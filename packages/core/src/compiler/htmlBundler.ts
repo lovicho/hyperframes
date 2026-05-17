@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "fs";
-import { join, resolve, isAbsolute, sep } from "path";
+import { join, resolve, dirname, isAbsolute, sep } from "path";
 import { transformSync } from "esbuild";
 import { compileHtml, type MediaDurationProber } from "./htmlCompiler";
 import {
@@ -88,6 +88,31 @@ function safeReadFile(filePath: string): string | null {
   } catch {
     return null;
   }
+}
+
+const CSS_IMPORT_RE =
+  /@import\s+(?:url\(\s*(["']?)([^)"']+)\1\s*\)|(["'])([^"']+)\3)\s*([^;]*);\s*/g;
+
+function resolveCssImports(
+  css: string,
+  cssFileDir: string,
+  projectDir: string,
+  visited: Set<string> = new Set(),
+): string {
+  return css.replace(CSS_IMPORT_RE, (full, _q1, urlPath, _q2, barePath, mediaQuery) => {
+    const importPath = urlPath ?? barePath;
+    if (!importPath || !isRelativeUrl(importPath)) return full;
+    const resolved = resolve(cssFileDir, importPath);
+    const normalizedBase = resolve(projectDir) + sep;
+    if (!resolved.startsWith(normalizedBase) || visited.has(resolved)) return full;
+    const content = safeReadFile(resolved);
+    if (content == null) return full;
+    visited.add(resolved);
+    const inlined = resolveCssImports(content, dirname(resolved), projectDir, visited);
+    const trimmedMedia = (mediaQuery || "").trim();
+    if (trimmedMedia) return `@media ${trimmedMedia} {\n${inlined}\n}\n`;
+    return inlined + "\n";
+  });
 }
 
 function safeReadFileBuffer(filePath: string): Buffer | null {
@@ -525,9 +550,10 @@ export async function bundleToSingleHtml(
     const href = el.getAttribute("href");
     if (!href || !isRelativeUrl(href)) continue;
     const cssPath = safePath(projectDir, href);
-    const css = cssPath ? safeReadFile(cssPath) : null;
+    if (!cssPath) continue;
+    const css = safeReadFile(cssPath);
     if (css == null) continue;
-    localCssChunks.push(css);
+    localCssChunks.push(resolveCssImports(css, dirname(cssPath), projectDir));
     if (!cssAnchorPlaced) {
       const anchor = document.createElement("style");
       anchor.setAttribute("data-hf-bundled-local-css", "1");

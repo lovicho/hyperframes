@@ -725,4 +725,80 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain('url("fonts/brand.woff2")');
     expect(bundled).not.toContain('url("../fonts/brand.woff2")');
   });
+
+  it("resolves CSS @import statements when inlining stylesheets", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <link rel="stylesheet" href="styles/canvas.css">
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      "styles/canvas.css": `@import url('./tokens.css');\nbody { margin: 0; }`,
+      "styles/tokens.css": `:root { --brand: #ff5728; }`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+
+    expect(bundled).toContain("--brand: #ff5728");
+    expect(bundled).not.toContain("@import");
+    expect(bundled).toContain("margin: 0");
+  });
+
+  it("resolves nested CSS @import chains", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <link rel="stylesheet" href="styles/main.css">
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      "styles/main.css": `@import url('./base.css');\n.main { color: red; }`,
+      "styles/base.css": `@import url('../tokens.css');\n.base { display: flex; }`,
+      "tokens.css": `:root { --tk-teal: #1a3540; }`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+
+    expect(bundled).toContain("--tk-teal: #1a3540");
+    expect(bundled).toContain("display: flex");
+    expect(bundled).toContain("color: red");
+    expect(bundled).not.toContain("@import");
+  });
+
+  it("wraps @import with media query in @media block", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <link rel="stylesheet" href="print.css">
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      "print.css": `@import url('./print-tokens.css') print;\nbody { font-size: 12pt; }`,
+      "print-tokens.css": `.print-only { display: block; }`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+
+    expect(bundled).toContain("@media print");
+    expect(bundled).toContain("display: block");
+    expect(bundled).not.toContain("@import");
+  });
+
+  it("preserves @import for absolute URLs", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <link rel="stylesheet" href="app.css">
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      "app.css": `@import url('https://fonts.googleapis.com/css2?family=Inter');\nbody { margin: 0; }`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+
+    expect(bundled).toContain("@import url('https://fonts.googleapis.com/css2?family=Inter')");
+    expect(bundled).toContain("margin: 0");
+  });
 });
