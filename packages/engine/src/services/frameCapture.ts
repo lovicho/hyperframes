@@ -349,6 +349,41 @@ async function pollPageExpression(
   return Boolean(await page.evaluate(expression));
 }
 
+async function pollSubCompositionTimelines(
+  page: Page,
+  timeoutMs: number,
+  intervalMs: number = 150,
+): Promise<void> {
+  const expression = `(function() {
+    var hosts = document.querySelectorAll("[data-composition-id]");
+    if (hosts.length <= 1) return true;
+    var timelines = window.__timelines || {};
+    for (var i = 0; i < hosts.length; i++) {
+      var id = hosts[i].getAttribute("data-composition-id");
+      if (!id) continue;
+      if (!timelines[id]) return false;
+    }
+    return true;
+  })()`;
+  const ready = await pollPageExpression(page, expression, timeoutMs, intervalMs);
+  if (!ready) {
+    const missing = await page.evaluate(`(function() {
+      var hosts = document.querySelectorAll("[data-composition-id]");
+      var timelines = window.__timelines || {};
+      var m = [];
+      for (var i = 0; i < hosts.length; i++) {
+        var id = hosts[i].getAttribute("data-composition-id");
+        if (id && !timelines[id]) m.push(id);
+      }
+      return m.join(", ");
+    })()`);
+    console.warn(
+      `[FrameCapture] Sub-composition timelines not registered after ${timeoutMs}ms: ${missing}. ` +
+        `Compositions that load data asynchronously (e.g. fetch) must register window.__timelines[id] after setup completes.`,
+    );
+  }
+}
+
 async function pollVideosReady(
   page: Page,
   skipIds: readonly string[],
@@ -499,6 +534,8 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       );
     }
 
+    await pollSubCompositionTimelines(page, pageReadyTimeout);
+
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
 
     // Wait for all video elements to have decoded their CURRENT frame, not
@@ -614,6 +651,8 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       `[FrameCapture] window.__hf not ready after ${pageReadyTimeout}ms. Page must expose window.__hf = { duration, seek }.`,
     );
   }
+
+  await pollSubCompositionTimelines(page, pageReadyTimeout);
 
   await applyVideoMetadataHints(page, session.options.videoMetadataHints);
 
