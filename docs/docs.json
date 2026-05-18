@@ -189,6 +189,16 @@
             ]
           },
           {
+            "group": "Maps",
+            "pages": [
+              "catalog/blocks/us-map",
+              "catalog/blocks/us-map-bubble",
+              "catalog/blocks/us-map-hex",
+              "catalog/blocks/us-map-flow",
+              "catalog/blocks/world-map"
+            ]
+          },
+          {
             "group": "Data",
             "pages": [
               "catalog/blocks/data-chart"
