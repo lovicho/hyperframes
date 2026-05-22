@@ -13,6 +13,7 @@ import { trackStudioEvent } from "../../utils/studioTelemetry";
 import { BlocksTab, type BlockPreviewInfo } from "./BlocksTab";
 import { FileTree } from "../editor/FileTree";
 import { STUDIO_BLOCKS_PANEL_ENABLED } from "../editor/manualEditingAvailability";
+import { Tooltip } from "../ui";
 
 export type SidebarTab = "compositions" | "assets" | "code" | "blocks";
 
@@ -124,55 +125,59 @@ export const LeftSidebar = memo(
                       : "1fr 1fr 1fr",
                   }}
                 >
-                  <button
-                    type="button"
-                    onClick={() => selectTab("code")}
-                    title="Source code editor"
-                    className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
-                      tab === "code"
-                        ? "bg-neutral-800 text-white"
-                        : "text-neutral-500 hover:text-neutral-200"
-                    }`}
-                  >
-                    Code
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => selectTab("compositions")}
-                    title="Composition layers and sub-compositions"
-                    className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
-                      tab === "compositions"
-                        ? "bg-neutral-800 text-white"
-                        : "text-neutral-500 hover:text-neutral-200"
-                    }`}
-                  >
-                    Comps
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => selectTab("assets")}
-                    title="Media assets — videos, images, audio, fonts"
-                    className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
-                      tab === "assets"
-                        ? "bg-neutral-800 text-white"
-                        : "text-neutral-500 hover:text-neutral-200"
-                    }`}
-                  >
-                    Assets
-                  </button>
-                  {STUDIO_BLOCKS_PANEL_ENABLED && (
+                  <Tooltip label="Source code editor" side="bottom">
                     <button
                       type="button"
-                      onClick={() => selectTab("blocks")}
-                      title="Browse blocks, components, and templates from the registry"
+                      onClick={() => selectTab("code")}
                       className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
-                        tab === "blocks"
+                        tab === "code"
                           ? "bg-neutral-800 text-white"
                           : "text-neutral-500 hover:text-neutral-200"
                       }`}
                     >
-                      Catalog
+                      Code
                     </button>
+                  </Tooltip>
+                  <Tooltip label="Compositions and sub-compositions" side="bottom">
+                    <button
+                      type="button"
+                      onClick={() => selectTab("compositions")}
+                      className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
+                        tab === "compositions"
+                          ? "bg-neutral-800 text-white"
+                          : "text-neutral-500 hover:text-neutral-200"
+                      }`}
+                    >
+                      Comps
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Videos, images, audio, fonts" side="bottom">
+                    <button
+                      type="button"
+                      onClick={() => selectTab("assets")}
+                      className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
+                        tab === "assets"
+                          ? "bg-neutral-800 text-white"
+                          : "text-neutral-500 hover:text-neutral-200"
+                      }`}
+                    >
+                      Assets
+                    </button>
+                  </Tooltip>
+                  {STUDIO_BLOCKS_PANEL_ENABLED && (
+                    <Tooltip label="Browse blocks and components" side="bottom">
+                      <button
+                        type="button"
+                        onClick={() => selectTab("blocks")}
+                        className={`rounded-[14px] px-1.5 py-2 text-[10px] font-semibold truncate transition-all ${
+                          tab === "blocks"
+                            ? "bg-neutral-800 text-white"
+                            : "text-neutral-500 hover:text-neutral-200"
+                        }`}
+                      >
+                        Catalog
+                      </button>
+                    </Tooltip>
                   )}
                 </div>
                 {onToggleCollapse && (
