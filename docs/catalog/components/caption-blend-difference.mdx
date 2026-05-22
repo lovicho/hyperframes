@@ -1,13 +1,15 @@
 ---
 title: "Blend Difference"
-description: "Auto-inverting captions using mix-blend-mode: difference — text flips between white and black per-pixel against the background"
+description: "Auto-inverting text using mix-blend-mode: difference — flips between white and black per-pixel against the background"
 ---
 
 # Blend Difference
 
-Auto-inverting captions using mix-blend-mode: difference — text flips between white and black per-pixel against the background
+Auto-inverting text using mix-blend-mode: difference — flips between white and black per-pixel against the background
 
 `text` `effect` `blend-mode` `contrast` `inversion`
+
+<video className="w-full aspect-video rounded-xl object-cover bg-zinc-100 dark:bg-zinc-800" src="https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-blend-difference.mp4" poster="https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-blend-difference.png" autoPlay muted loop playsInline />
 
 ## Install
 
@@ -18,49 +20,6 @@ npx hyperframes add caption-blend-difference
 ```
 
 </CodeGroup>
-
-## How It Works
-
-White text with `mix-blend-mode: difference` inverts per-pixel against whatever is behind it:
-
-- **Dark background** → text stays white
-- **Light background** → text flips to black
-- **Color background** → text becomes the complement (blue → orange, red → cyan)
-
-The composition root needs `isolation: isolate` so the blend operates against sibling content (video, images) rather than the page background.
-
-## Variants
-
-| Class | Blend Mode | Effect |
-| --- | --- | --- |
-| `.blend-difference` | `difference` | Hard per-pixel inversion — maximum contrast |
-| `.blend-difference-soft` | `exclusion` | Softer inversion — less harsh on midtones |
-| `.blend-difference-screen` | `screen` | Text glows on dark areas, fades on light |
-
-## Example
-
-```html
-<div data-composition-id="root" style="isolation: isolate;">
-  <video src="video.mp4" muted playsinline
-         data-start="0" data-duration="30" data-track-index="0" />
-
-  <div class="clip blend-difference"
-       data-start="0" data-duration="5" data-track-index="1"
-       style="position: absolute; inset: 0; z-index: 10;
-              display: flex; align-items: center; justify-content: center;">
-    <span style="font-size: 120px; font-weight: 800;">
-      YOUR CAPTION
-    </span>
-  </div>
-</div>
-```
-
-## CSS Custom Properties
-
-| Property | Default | Description |
-| --- | --- | --- |
-| `--blend-caption-color` | `white` | Base text color before blending |
-| `--blend-mode` | `difference` | Override blend mode on `.blend-difference` |
 
 ## Details
 

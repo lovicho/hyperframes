@@ -42,6 +42,21 @@
     "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/blue-sweater-intro-video.png"
   },
   {
+    "name": "caption-blend-difference",
+    "type": "component",
+    "title": "Blend Difference",
+    "description": "Auto-inverting text using mix-blend-mode: difference — flips between white and black per-pixel against the background",
+    "tags": [
+      "text",
+      "effect",
+      "blend-mode",
+      "contrast",
+      "inversion"
+    ],
+    "href": "/catalog/components/caption-blend-difference",
+    "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-blend-difference.png"
+  },
+  {
     "name": "caption-clip-wipe",
     "type": "component",
     "title": "Clip Wipe",
@@ -234,19 +249,18 @@
     "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-pill-karaoke.png"
   },
   {
-    "name": "caption-texture-lava",
+    "name": "caption-texture",
     "type": "component",
-    "title": "Texture Lava",
-    "description": "Flowing lava texture mask over large uppercase text",
+    "title": "Texture",
+    "description": "Flowing texture mask over large uppercase text — ships with 6 textures (lava, marble, metal, wood, concrete, rock), configurable via the texture variable",
     "tags": [
       "captions",
       "caption-style",
       "texture",
-      "lava",
       "mask"
     ],
-    "href": "/catalog/components/caption-texture-lava",
-    "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-texture-lava.png"
+    "href": "/catalog/components/caption-texture",
+    "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/caption-texture.png"
   },
   {
     "name": "caption-weight-shift",
@@ -480,6 +494,37 @@
     ],
     "href": "/catalog/blocks/nyc-paris-flight",
     "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/nyc-paris-flight.png"
+  },
+  {
+    "name": "parallax-unzoom",
+    "type": "component",
+    "title": "Parallax Unzoom",
+    "description": "Reveal transition — focus card scales down from full frame as siblings parallax in to form a grid (reverse of parallax-zoom)",
+    "tags": [
+      "transition",
+      "reveal",
+      "unzoom",
+      "parallax",
+      "grid",
+      "hero"
+    ],
+    "href": "/catalog/components/parallax-unzoom",
+    "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/parallax-unzoom.png"
+  },
+  {
+    "name": "parallax-zoom",
+    "type": "component",
+    "title": "Parallax Zoom",
+    "description": "Center card scales up to fill the frame while siblings parallax outward — inspired by the eBay Playbook hero transition",
+    "tags": [
+      "transition",
+      "zoom",
+      "parallax",
+      "grid",
+      "hero"
+    ],
+    "href": "/catalog/components/parallax-zoom",
+    "preview": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/components/parallax-zoom.png"
   },
   {
     "name": "reddit-post",

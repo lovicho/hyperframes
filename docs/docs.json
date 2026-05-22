@@ -122,7 +122,7 @@
               "catalog/components/caption-parallax-layers",
               "catalog/components/caption-particle-burst",
               "catalog/components/caption-pill-karaoke",
-              "catalog/components/caption-texture-lava",
+              "catalog/components/caption-texture",
               "catalog/components/caption-weight-shift"
             ]
           },
@@ -200,20 +200,15 @@
             ]
           },
           {
-            "group": "Maps",
-            "pages": [
-              "catalog/blocks/us-map",
-              "catalog/blocks/us-map-bubble",
-              "catalog/blocks/us-map-hex",
-              "catalog/blocks/us-map-flow",
-              "catalog/blocks/world-map",
-              "catalog/blocks/spain-map"
-            ]
-          },
-          {
             "group": "Data",
             "pages": [
-              "catalog/blocks/data-chart"
+              "catalog/blocks/data-chart",
+              "catalog/blocks/spain-map",
+              "catalog/blocks/us-map",
+              "catalog/blocks/us-map-bubble",
+              "catalog/blocks/us-map-flow",
+              "catalog/blocks/us-map-hex",
+              "catalog/blocks/world-map"
             ]
           },
           {
@@ -222,6 +217,8 @@
               "catalog/components/caption-blend-difference",
               "catalog/components/grain-overlay",
               "catalog/components/grid-pixelate-wipe",
+              "catalog/components/parallax-unzoom",
+              "catalog/components/parallax-zoom",
               "catalog/components/shimmer-sweep",
               "catalog/components/texture-mask-text",
               "catalog/components/vignette"
