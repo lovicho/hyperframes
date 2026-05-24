@@ -276,6 +276,7 @@ async function captureSnapshots(
       for (let i = 0; i < positions.length; i++) {
         const time = positions[i]!;
 
+        // 30 = runtime's default canonicalFps (not exposed on PlayerAPI)
         await page.evaluate((t: number) => {
           const player = (window as any).__player;
           if (!player) return;

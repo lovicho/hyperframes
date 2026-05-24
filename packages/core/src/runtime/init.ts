@@ -1634,6 +1634,8 @@ export function initSandboxRuntimeModular(): void {
     player._timeline = state.capturedTimeline;
   }
 
+  // __renderReady = timeline is bound, safe for deterministic seeking.
+  // fileServer.ts sets this immediately (no timeline to bind in its runtime).
   if (state.capturedTimeline) {
     (window as Window & { __renderReady?: boolean }).__renderReady = true;
   }
