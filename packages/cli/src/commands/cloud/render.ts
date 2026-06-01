@@ -26,6 +26,10 @@
 
 import { defineCommand } from "citty";
 
+import {
+  detectAspectRatioFromHtml,
+  type AspectRatioDetection,
+} from "../../cloud/detectAspectRatio.js";
 import { c } from "../../ui/colors.js";
 import { errorBox, formatBytes, formatDuration } from "../../ui/format.js";
 import { resolveProject } from "../../utils/project.js";
@@ -58,14 +62,8 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 
 const VALID_QUALITY = ["draft", "standard", "high"] as const;
 const VALID_FORMAT = ["mp4", "webm", "mov"] as const;
-const VALID_RESOLUTION = [
-  "landscape",
-  "portrait",
-  "landscape-4k",
-  "portrait-4k",
-  "square",
-  "square-4k",
-] as const;
+const VALID_RESOLUTION = ["1080p", "4k"] as const;
+const VALID_ASPECT_RATIO = ["16:9", "9:16", "1:1"] as const;
 
 const FORMAT_EXT: Record<string, string> = { mp4: ".mp4", webm: ".webm", mov: ".mov" };
 
@@ -96,8 +94,11 @@ export default defineCommand({
     format: { type: "string", description: "mp4 | webm | mov (default: mp4)" },
     resolution: {
       type: "string",
-      description:
-        "Resolution preset: landscape | portrait | landscape-4k | portrait-4k | square | square-4k",
+      description: "Resolution tier: 1080p | 4k (default: 1080p; 4k is billed at 1.5x)",
+    },
+    "aspect-ratio": {
+      type: "string",
+      description: "Aspect ratio: 16:9 | 9:16 | 1:1 (default: 16:9)",
     },
     composition: {
       type: "string",
@@ -185,6 +186,9 @@ export default defineCommand({
     const resolution = parseEnumFlag(args.resolution, VALID_RESOLUTION, {
       flag: "--resolution",
     });
+    const explicitAspectRatio = parseEnumFlag(args["aspect-ratio"], VALID_ASPECT_RATIO, {
+      flag: "--aspect-ratio",
+    });
     const pollIntervalMs = parsePollIntervalMs(args["poll-interval"]);
     const maxWaitMs = parseMaxWaitMs(args["max-wait"]);
     validateIdempotencyKey(args["idempotency-key"]);
@@ -197,6 +201,14 @@ export default defineCommand({
       assetId: args["asset-id"],
       url: args.url,
     });
+
+    // When the user didn't pass --aspect-ratio explicitly AND the project is
+    // a local dir, parse the entry HTML's root composition div for
+    // data-width/data-height and pick the matching supported ratio. Saves
+    // the user from having to specify a value that's already implicit in
+    // the composition they authored. Explicit flag always wins.
+    const aspectRatio =
+      explicitAspectRatio ?? maybeAutoDetectAspectRatio(project, args.composition, asJson);
 
     const variables = resolveVariablesAndValidateIfLocal(
       args.variables,
@@ -214,6 +226,7 @@ export default defineCommand({
       quality,
       format,
       resolution,
+      aspectRatio,
       composition: args.composition,
       variables,
       title: args.title,
@@ -340,6 +353,70 @@ function resolveProjectInput(opts: {
   return { kind: "dir", dir: opts.dir ?? "." };
 }
 
+/**
+ * Best-effort aspect-ratio detection for the cloud-render submit body when
+ * the user hasn't passed `--aspect-ratio`. Returns the detected value (one
+ * of `"16:9" | "9:16" | "1:1"`) or `undefined` to let the server's default
+ * (16:9) apply.
+ *
+ * Detection only fires when the project source is a local directory — for
+ * `--asset-id` and `--url` the composition zip isn't on disk and parsing
+ * it client-side isn't worth the extra fetch. The user gets a one-line
+ * note explaining the fallback.
+ *
+ * Logs to stdout in human-readable mode; suppressed in `--json` mode so the
+ * machine-readable output stays clean.
+ */
+// fallow-ignore-next-line complexity
+function maybeAutoDetectAspectRatio(
+  project: ProjectInputSource,
+  compositionArg: string | undefined,
+  asJson: boolean,
+): "16:9" | "9:16" | "1:1" | undefined {
+  if (project.kind !== "dir") {
+    const reason = project.kind === "asset_id" ? "--asset-id" : "--url";
+    logDetection(asJson, `Auto-detect skipped (project is ${reason})`);
+    return undefined;
+  }
+
+  const dir = project.dir ?? ".";
+  const entryRelative = compositionArg ?? "index.html";
+  const entryPath = resolvePath(dir, entryRelative);
+
+  const detection = detectAspectRatioFromHtml(entryPath);
+  logDetection(asJson, summarizeDetection(detection, entryRelative));
+  return detection.kind === "matched" ? detection.aspectRatio : undefined;
+}
+
+const ASPECT_FALLBACK_HINT =
+  "server will default aspect_ratio to 16:9. Pass --aspect-ratio to override.";
+
+function logDetection(asJson: boolean, message: string): void {
+  if (asJson) return;
+  // `matched` is the only branch with its own affirmative phrasing; the
+  // rest share the fallback hint to keep the user oriented after a miss.
+  const suffix = message.startsWith("Detected aspect ratio") ? "" : `; ${ASPECT_FALLBACK_HINT}`;
+  console.log(c.dim(`   ${message}${suffix}`));
+}
+
+// fallow-ignore-next-line complexity
+function summarizeDetection(detection: AspectRatioDetection, entryRelative: string): string {
+  switch (detection.kind) {
+    case "matched":
+      return `Detected aspect ratio: ${detection.aspectRatio} (from ${entryRelative} dims ${detection.width}×${detection.height})`;
+    case "no-root-div":
+      return `No <div data-composition-id> found in ${entryRelative}`;
+    case "no-dims":
+      return `${entryRelative} root composition has no data-width / data-height`;
+    case "invalid-dims":
+      return `${entryRelative} root has invalid dims (${detection.width}×${detection.height})`;
+    case "no-match":
+      return `${entryRelative} dims ${detection.width}×${detection.height} (ratio ${detection.ratio.toFixed(2)}) don't match 16:9, 9:16, or 1:1`;
+    case "read-error":
+      return `Couldn't read ${entryRelative} for aspect-ratio detection (${detection.error})`;
+  }
+}
+
 function resolveVariablesAndValidateIfLocal(
   inline: string | undefined,
   filePath: string | undefined,
@@ -443,6 +520,7 @@ interface SubmitOptions {
   quality: "draft" | "standard" | "high" | undefined;
   format: "mp4" | "webm" | "mov" | undefined;
   resolution: CreateHyperframesRenderRequest["resolution"] | undefined;
+  aspectRatio: CreateHyperframesRenderRequest["aspect_ratio"] | undefined;
   composition: string | undefined;
   variables: Record<string, unknown> | undefined;
   title: string | undefined;
@@ -470,6 +548,7 @@ function buildRenderBody(opts: SubmitOptions): CreateHyperframesRenderRequest {
   if (opts.quality !== undefined) body.quality = opts.quality;
   if (opts.format !== undefined) body.format = opts.format;
   if (opts.resolution !== undefined) body.resolution = opts.resolution;
+  if (opts.aspectRatio !== undefined) body.aspect_ratio = opts.aspectRatio;
   if (opts.composition !== undefined) body.composition = opts.composition;
   if (opts.variables !== undefined) body.variables = opts.variables;
   if (opts.title !== undefined) body.title = opts.title;
