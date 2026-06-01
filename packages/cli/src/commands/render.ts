@@ -51,6 +51,7 @@ import { VERSION } from "../version.js";
 import { isDevMode } from "../utils/env.js";
 import { buildDockerRunArgs } from "../utils/dockerRunArgs.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
+import { findFFmpeg, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import type { RenderJob } from "@hyperframes/producer";
 import {
   normalizeResolutionFlag,
@@ -434,19 +435,6 @@ export default defineCommand({
       console.log("");
     }
 
-    // ── Check FFmpeg for local renders ───────────────────────────────────
-    if (!useDocker) {
-      const { findFFmpeg, getFFmpegInstallHint } = await import("../browser/ffmpeg.js");
-      if (!findFFmpeg()) {
-        errorBox(
-          "FFmpeg not found",
-          "Rendering requires FFmpeg for video encoding.",
-          `Install: ${getFFmpegInstallHint()}`,
-        );
-        process.exit(1);
-      }
-    }
-
     // ── Ensure browser for local renders ────────────────────────────────
     let browserPath: string | undefined;
     if (!useDocker) {
@@ -786,6 +774,16 @@ export async function renderLocal(
   options: RenderOptions,
 ): Promise<void> {
   const producer = await loadProducer();
+
+  if (!findFFmpeg()) {
+    errorBox(
+      "FFmpeg not found",
+      "FFmpeg is required to encode video. The render cannot proceed without it.",
+      getFFmpegInstallHint(),
+    );
+    process.exit(1);
+  }
+
   const startTime = Date.now();
 
   // Pass the resolved browser path to the producer via env var so
@@ -822,7 +820,14 @@ export async function renderLocal(
   try {
     await producer.executeRenderJob(job, projectDir, outputPath, onProgress);
   } catch (error: unknown) {
-    handleRenderError(error, options, startTime, false, "Try --docker for containerized rendering");
+    handleRenderError(
+      error,
+      options,
+      startTime,
+      false,
+      "Try --docker for containerized rendering",
+      job.failedStage,
+    );
   }
 
   const elapsed = Date.now() - startTime;
@@ -868,6 +873,7 @@ function handleRenderError(
   startTime: number,
   docker: boolean,
   hint: string,
+  failedStage?: string,
 ): never {
   const message = normalizeErrorMessage(error);
   trackRenderError({
@@ -878,6 +884,7 @@ function handleRenderError(
     gpu: options.gpu,
     elapsedMs: Date.now() - startTime,
     errorMessage: message,
+    failedStage,
     ...getMemorySnapshot(),
   });
   errorBox("Render failed", message, hint);
