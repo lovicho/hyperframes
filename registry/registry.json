@@ -368,6 +368,110 @@
       "type": "hyperframes:block"
     },
     {
+      "name": "code-snippet-apple-terminal-basic",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-clear-dark",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-clear-light",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-grass",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-homebrew",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-man-page",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-novel",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-ocean",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-pro",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-red-sands",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-silver-aerogel",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-apple-terminal-solid-colors",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-dark-2026",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-dark-modern",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-dark-plus",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-high-contrast",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-high-contrast-light",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-light-2026",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-light-modern",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-light-plus",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-monokai",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-solarized-light",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-visual-studio-dark",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "code-snippet-visual-studio-light",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "flowchart-vertical",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-liquid-glass",
+      "type": "hyperframes:block"
+    },
+    {
       "name": "parallax-zoom",
       "type": "hyperframes:component"
     },
