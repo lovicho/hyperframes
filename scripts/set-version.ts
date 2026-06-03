@@ -7,15 +7,18 @@
  *   bun run set-version 0.1.1          # stable release → npm "latest" tag
  *   bun run set-version 0.1.1-alpha.1  # pre-release  → npm "alpha" tag
  *   bun run set-version 0.1.1 --no-tag # bump only (no commit or tag)
+ *   bun run set-version 0.1.1 --skip-changelog-check # emergency stable release
  *
  * All packages and plugins share a single version number (fixed versioning).
  * Pre-release suffixes (-alpha, -beta, -rc, etc.) are detected by the
  * publish workflow and published to the corresponding npm dist-tag.
  */
 
-import { readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
+import { pathToFileURL } from "url";
+import { CLI_SEMVER_PATTERN } from "./cli-options.ts";
 
 const PACKAGES = [
   "packages/core",
@@ -31,24 +34,56 @@ const PACKAGES = [
 const PLUGINS = [".claude-plugin", ".codex-plugin", ".cursor-plugin"];
 
 const ROOT = join(import.meta.dirname, "..");
+export const CHANGELOG_REVIEW_TODO = "<!-- TODO: write a 1-2 sentence release summary here. -->";
+
+type ReleaseOptions = {
+  version: string;
+  skipTag: boolean;
+  skipChangelogCheck: boolean;
+};
 
 function main() {
-  const args = process.argv.slice(2);
+  const options = parseReleaseOptions(process.argv.slice(2));
+  if (releaseRequiresChangelog(options)) {
+    assertReviewedChangelog(options.version);
+  }
+
+  updatePackageVersions(options.version);
+  updatePluginVersions(options.version);
+
+  console.log(
+    `\nSet ${PACKAGES.length} packages and ${PLUGINS.length} plugin manifests to v${options.version}`,
+  );
+
+  if (options.skipTag) {
+    console.log(`\nSkipped commit and tag (--no-tag). Remember to commit and tag manually.`);
+    return;
+  }
+
+  createReleaseCommitAndTag(options.version);
+  printReleaseNextSteps(options.version);
+}
+
+export function parseReleaseOptions(args: string[]): ReleaseOptions {
   const version = args.find((a) => !a.startsWith("--"));
   const skipTag = args.includes("--no-tag");
+  const skipChangelogCheck = args.includes("--skip-changelog-check");
 
   if (!version) {
-    console.error("Usage: bun run set-version <version> [--no-tag]");
+    console.error("Usage: bun run set-version <version> [--no-tag] [--skip-changelog-check]");
     console.error("Example: bun run set-version 0.1.1");
     process.exit(1);
   }
 
-  if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
+  if (!CLI_SEMVER_PATTERN.test(version)) {
     console.error(`Invalid semver: ${version}`);
     process.exit(1);
   }
 
-  // Update each package.json
+  return { version, skipTag, skipChangelogCheck };
+}
+
+function updatePackageVersions(version: string) {
   for (const pkg of PACKAGES) {
     const pkgPath = join(ROOT, pkg, "package.json");
     const content = JSON.parse(readFileSync(pkgPath, "utf-8"));
@@ -57,7 +92,9 @@ function main() {
     writeFileSync(pkgPath, JSON.stringify(content, null, 2) + "\n");
     console.log(`  ${content.name}: ${oldVersion} -> ${version}`);
   }
+}
 
+function updatePluginVersions(version: string) {
   // Update each plugin.json. Replace just the version string rather than
   // round-tripping through JSON.parse/stringify: oxfmt keeps these manifests'
   // short arrays inline, but JSON.stringify expands them, which would fail the
@@ -69,52 +106,134 @@ function main() {
     writeFileSync(pluginPath, text.replace(/("version"\s*:\s*)"[^"]*"/, `$1"${version}"`));
     console.log(`  ${plugin}: ${oldVersion} -> ${version}`);
   }
+}
 
-  console.log(
-    `\nSet ${PACKAGES.length} packages and ${PLUGINS.length} plugin manifests to v${version}`,
-  );
-
-  if (skipTag) {
-    console.log(`\nSkipped commit and tag (--no-tag). Remember to commit and tag manually.`);
-    return;
-  }
-
-  // Verify working tree is clean (aside from the version bumps we just made)
-  const status = execSync("git status --porcelain", {
+function createReleaseCommitAndTag(version: string) {
+  const status = execFileSync("git", ["status", "--porcelain"], {
     cwd: ROOT,
     encoding: "utf-8",
   }).trim();
+  const allowedPaths = releaseAllowedPaths(version);
+  assertNoUnexpectedChanges(status, allowedPaths);
+
+  // Pass git arguments as an array (execFileSync, no shell) so the interpolated
+  // version and paths can never be interpreted as shell commands.
+  const pathsToAdd = allowedPaths.filter((path) => existsSync(join(ROOT, path)));
+  execFileSync("git", ["add", ...pathsToAdd], { cwd: ROOT, stdio: "inherit" });
+  execFileSync("git", ["commit", "-m", `chore: release v${version}`], {
+    cwd: ROOT,
+    stdio: "inherit",
+  });
+  execFileSync("git", ["tag", `v${version}`], { cwd: ROOT, stdio: "inherit" });
+  console.log(`\nCreated commit and tag v${version}`);
+}
+
+export function releaseRequiresChangelog(options: ReleaseOptions) {
+  return !options.skipTag && !options.skipChangelogCheck && !isPrerelease(options.version);
+}
+
+export function isPrerelease(version: string) {
+  return version.includes("-");
+}
+
+function assertReviewedChangelog(version: string) {
+  const missing = missingChangelogArtifacts(version);
+  const unreviewed = unreviewedChangelogArtifacts(version);
+
+  if (missing.length > 0 || unreviewed.length > 0) {
+    console.error("\nChangelog review required:");
+    missing.forEach((artifact) => console.error(`  ${artifact}`));
+    unreviewed.forEach((artifact) =>
+      console.error(`  ${artifact} still contains the generated TODO summary`),
+    );
+    console.error(`\nRun: bun run release:prepare ${version}`);
+    console.error(
+      "Review and rewrite the generated release notes, then rerun release:prepare. Use --skip-changelog-check only for emergency releases.",
+    );
+    process.exit(1);
+  }
+}
+
+export function missingChangelogArtifacts(version: string) {
+  return changelogArtifacts(version).filter((artifact) => !artifactExists(artifact));
+}
+
+export function changelogArtifacts(version: string) {
+  return [join("releases", `v${version}.md`), `docs/changelog.mdx#HyperFrames v${version}`];
+}
+
+export function unreviewedChangelogArtifacts(version: string) {
+  return changelogArtifacts(version).filter(
+    (artifact) => artifactExists(artifact) && artifactHasGeneratedTodo(artifact),
+  );
+}
+
+function artifactExists(artifact: string) {
+  const [path, marker] = artifact.split("#");
+  const absolutePath = join(ROOT, path);
+
+  if (!existsSync(absolutePath)) {
+    return false;
+  }
+  return marker ? readFileSync(absolutePath, "utf-8").includes(`label="${marker}"`) : true;
+}
+
+function artifactHasGeneratedTodo(artifact: string) {
+  const [path, marker] = artifact.split("#");
+  const content = readFileSync(join(ROOT, path), "utf-8");
+  if (!marker) {
+    return hasGeneratedChangelogTodo(content);
+  }
+
+  return docsChangelogEntryHasGeneratedTodo(content, marker);
+}
+
+export function hasGeneratedChangelogTodo(content: string) {
+  return content.includes(CHANGELOG_REVIEW_TODO);
+}
+
+export function docsChangelogEntryHasGeneratedTodo(content: string, marker: string) {
+  const labelIndex = content.indexOf(`label="${marker}"`);
+  if (labelIndex === -1) {
+    return false;
+  }
+
+  const entryStart = content.lastIndexOf("<Update", labelIndex);
+  const entryEnd = content.indexOf("</Update>", labelIndex);
+  const entry = content.slice(
+    entryStart === -1 ? labelIndex : entryStart,
+    entryEnd === -1 ? undefined : entryEnd + "</Update>".length,
+  );
+
+  return hasGeneratedChangelogTodo(entry);
+}
+
+function releaseAllowedPaths(version: string) {
+  return [
+    ...PACKAGES.map((pkg) => join(pkg, "package.json")),
+    ...PLUGINS.map((plugin) => join(plugin, "plugin.json")),
+    "docs/changelog.mdx",
+    join("releases", `v${version}.md`),
+  ];
+}
+
+function assertNoUnexpectedChanges(status: string, allowedPaths: string[]) {
   const unexpected = status
     .split("\n")
     .filter(
-      (line) =>
-        line &&
-        !PACKAGES.some((pkg) => line.includes(pkg)) &&
-        !PLUGINS.some((plugin) => line.includes(plugin)),
+      (line) => line && !allowedPaths.some((allowedPath) => gitStatusPath(line) === allowedPath),
     );
+
   if (unexpected.length > 0) {
     console.error("\nUnexpected uncommitted changes:");
     unexpected.forEach((line) => console.error(`  ${line}`));
     console.error("Commit or stash these before releasing.");
     process.exit(1);
   }
+}
 
-  execSync(
-    `git add ${[...PACKAGES.map((p) => join(p, "package.json")), ...PLUGINS.map((p) => join(p, "plugin.json"))].join(" ")}`,
-    {
-      cwd: ROOT,
-      stdio: "inherit",
-    },
-  );
-  execSync(`git commit -m "chore: release v${version}"`, {
-    cwd: ROOT,
-    stdio: "inherit",
-  });
-  execSync(`git tag v${version}`, { cwd: ROOT, stdio: "inherit" });
-  console.log(`\nCreated commit and tag v${version}`);
-
-  const isPrerelease = version.includes("-");
-  if (isPrerelease) {
+function printReleaseNextSteps(version: string) {
+  if (isPrerelease(version)) {
     const distTag = version.replace(/^.*-([a-zA-Z]+).*$/, "$1");
     console.log(`\nThis is a pre-release — npm dist-tag will be "${distTag}" (not "latest").`);
     console.log(`Consumers install with: npm install @hyperframes/core@${distTag}`);
@@ -124,4 +243,10 @@ function main() {
   }
 }
 
-main();
+export function gitStatusPath(line: string) {
+  return line.slice(3).replace(/^"|"$/g, "");
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
