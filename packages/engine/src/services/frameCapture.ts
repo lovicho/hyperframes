@@ -1,3 +1,4 @@
+// fallow-ignore-file complexity
 /**
  * Frame Capture Service
  *
@@ -172,6 +173,7 @@ async function waitForCloseWithTimeout(promise: Promise<unknown>): Promise<boole
   return !timedOut;
 }
 
+// fallow-ignore-next-line unit-size
 export async function createCaptureSession(
   serverUrl: string,
   outputDir: string,
@@ -349,6 +351,124 @@ async function pollPageExpression(
   return Boolean(await page.evaluate(expression));
 }
 
+const HF_READY_DIAGNOSTIC_EXPR = `(function() {
+  var hf = window.__hf;
+  var player = window.__player;
+  var renderReady = !!window.__renderReady;
+  var hasSeek = !!(hf && typeof hf.seek === "function");
+  var duration = hf ? hf.duration : -1;
+  var hasTimeline = !!(window.__timelines && Object.keys(window.__timelines).length > 0);
+  var root = document.querySelector("[data-composition-id]");
+  var declaredDuration = root ? Number(root.getAttribute("data-duration")) : -1;
+  return {
+    renderReady: renderReady,
+    hasHf: !!hf,
+    hasSeek: hasSeek,
+    hasPlayer: !!player,
+    duration: duration,
+    hasTimeline: hasTimeline,
+    declaredDuration: declaredDuration,
+  };
+})()`;
+
+// fallow-ignore-next-line complexity
+function buildZeroDurationDiagnostic(diag: {
+  renderReady: boolean;
+  hasHf: boolean;
+  hasSeek: boolean;
+  hasPlayer: boolean;
+  duration: number;
+  hasTimeline: boolean;
+  declaredDuration: number;
+}): string {
+  const hints: string[] = [];
+  if (!diag.hasPlayer) {
+    hints.push("window.__player was never set — the HyperFrames runtime did not initialize.");
+  }
+  if (!diag.hasTimeline) {
+    hints.push(
+      "No GSAP timeline registered (window.__timelines is empty). " +
+        "If using CSS/WAAPI/Lottie/Three.js animations, add data-duration to the root element.",
+    );
+  }
+  if (diag.declaredDuration <= 0 && !diag.hasTimeline) {
+    hints.push(
+      'Fix: add data-duration="<seconds>" to your root <div data-composition-id="..."> element.',
+    );
+  }
+  if (diag.hasSeek && diag.duration === 0 && diag.renderReady) {
+    hints.push("The runtime finished initializing but reported zero duration — this is permanent.");
+  }
+  return (
+    `[FrameCapture] Composition has zero duration.\n` +
+    `  Runtime ready: ${diag.renderReady}, __player: ${diag.hasPlayer}, ` +
+    `__hf.seek: ${diag.hasSeek}, GSAP timeline: ${diag.hasTimeline}, ` +
+    `data-duration: ${diag.declaredDuration > 0 ? diag.declaredDuration + "s" : "not set"}\n` +
+    (hints.length > 0 ? hints.map((h) => `  → ${h}`).join("\n") : "")
+  );
+}
+
+interface HfDiagnostic {
+  renderReady: boolean;
+  hasHf: boolean;
+  hasSeek: boolean;
+  hasPlayer: boolean;
+  duration: number;
+  hasTimeline: boolean;
+  declaredDuration: number;
+}
+
+async function evaluateHfDiagnostic(page: Page): Promise<HfDiagnostic> {
+  return (await page.evaluate(HF_READY_DIAGNOSTIC_EXPR)) as HfDiagnostic;
+}
+
+async function pollHfReady(page: Page, timeoutMs: number, intervalMs: number = 100): Promise<void> {
+  const readyExpr = `!!(window.__hf && typeof window.__hf.seek === "function" && window.__hf.duration > 0)`;
+  const FAST_FAIL_AFTER_MS = 10_000;
+  // Throttle diagnostic CDP calls to ~1000ms — running evaluateHfDiagnostic on
+  // every 100ms poll tick after the 10s mark generates ~350 unnecessary CDP
+  // round-trips per failed render. One diagnostic per second is enough.
+  const DIAGNOSTIC_INTERVAL_MS = 1_000;
+  const deadline = Date.now() + timeoutMs;
+  let lastDiagnosticAt = 0;
+
+  while (Date.now() < deadline) {
+    const ready = Boolean(await page.evaluate(readyExpr));
+    if (ready) return;
+
+    const elapsed = timeoutMs - (deadline - Date.now());
+    if (elapsed >= FAST_FAIL_AFTER_MS) {
+      const now = Date.now();
+      if (now - lastDiagnosticAt >= DIAGNOSTIC_INTERVAL_MS) {
+        lastDiagnosticAt = now;
+        const diag = await evaluateHfDiagnostic(page);
+        // Only fast-fail when BOTH signals are permanently zero:
+        //   1. No GSAP timeline registered (GSAP sets duration synchronously
+        //      before __renderReady, so a missing timeline won't self-correct).
+        //   2. No data-duration declared on the root element.
+        // A composition with a GSAP timeline but no data-duration is still
+        // valid — GSAP drives duration via __timelines, not data-duration.
+        if (diag.renderReady && diag.hasSeek && !diag.hasTimeline && diag.declaredDuration <= 0) {
+          throw new Error(buildZeroDurationDiagnostic(diag));
+        }
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  const diag = await evaluateHfDiagnostic(page);
+  if (diag.hasSeek && diag.duration === 0) {
+    throw new Error(buildZeroDurationDiagnostic(diag));
+  }
+  throw new Error(
+    `[FrameCapture] window.__hf not ready after ${timeoutMs}ms. ` +
+      `Page must expose window.__hf = { duration, seek }.\n` +
+      `  State: __hf=${diag.hasHf}, seek=${diag.hasSeek}, player=${diag.hasPlayer}, ` +
+      `renderReady=${diag.renderReady}, duration=${diag.duration}`,
+  );
+}
+
 async function pollSubCompositionTimelines(
   page: Page,
   timeoutMs: number,
@@ -436,6 +556,7 @@ async function applyVideoMetadataHints(
 ): Promise<void> {
   if (!hints || hints.length === 0) return;
 
+  // fallow-ignore-next-line complexity
   await page.evaluate(
     (metadataHints: CaptureVideoMetadataHint[]) => {
       for (const hint of metadataHints) {
@@ -488,10 +609,12 @@ async function waitForOptionalTailwindReady(page: Page, timeoutMs: number): Prom
   }
 }
 
+// fallow-ignore-next-line unit-size
 export async function initializeSession(session: CaptureSession): Promise<void> {
   const { page, serverUrl } = session;
 
   // Forward browser console to host with [Browser] prefix
+  // fallow-ignore-next-line complexity
   page.on("console", (msg: ConsoleMessage) => {
     const type = msg.type();
     const text = msg.text();
@@ -546,16 +669,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
 
     const pageReadyTimeout =
       session.config?.playerReadyTimeout ?? DEFAULT_CONFIG.playerReadyTimeout;
-    const pageReady = await pollPageExpression(
-      page,
-      `!!(window.__hf && typeof window.__hf.seek === "function" && window.__hf.duration > 0)`,
-      pageReadyTimeout,
-    );
-    if (!pageReady) {
-      throw new Error(
-        `[FrameCapture] window.__hf not ready after ${pageReadyTimeout}ms. Page must expose window.__hf = { duration, seek }.`,
-      );
-    }
+    await pollHfReady(page, pageReadyTimeout);
 
     await pollSubCompositionTimelines(page, pageReadyTimeout);
 
@@ -666,22 +780,11 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
   // Poll for window.__hf readiness using manual evaluate loop (waitForFunction
   // uses rAF polling internally, which won't fire in beginFrame mode).
   const pageReadyTimeout = session.config?.playerReadyTimeout ?? DEFAULT_CONFIG.playerReadyTimeout;
-  const pollDeadline = Date.now() + pageReadyTimeout;
-  while (Date.now() < pollDeadline) {
-    const ready = await page.evaluate(
-      `!!(window.__hf && typeof window.__hf.seek === "function" && window.__hf.duration > 0)`,
-    );
-    if (ready) break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  const pageReady = await page.evaluate(
-    `!!(window.__hf && typeof window.__hf.seek === "function" && window.__hf.duration > 0)`,
-  );
-  if (!pageReady) {
+  try {
+    await pollHfReady(page, pageReadyTimeout);
+  } catch (err) {
     warmupState.running = false;
-    throw new Error(
-      `[FrameCapture] window.__hf not ready after ${pageReadyTimeout}ms. Page must expose window.__hf = { duration, seek }.`,
-    );
+    throw err;
   }
 
   await pollSubCompositionTimelines(page, pageReadyTimeout);

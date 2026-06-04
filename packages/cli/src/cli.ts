@@ -1,5 +1,26 @@
 #!/usr/bin/env node
 
+// ── EPIPE suppression (must run before ANY stdout/stderr write) ────────────
+// When the CLI runs inside a piped agent environment (Claude Code, Codex,
+// Cursor, etc.), the reader may close the pipe before we finish writing.
+// Node treats EPIPE on stdout/stderr as an uncaughtException, which crashes
+// the process. This is a normal lifecycle event — suppress it.
+//
+// commandFailed must be declared here (before the handlers) so the EPIPE
+// stream-error path can set it before process.exit(0). The telemetry exit
+// handler reads this flag to determine success/failure — an EPIPE exit
+// should NOT score as success:true in telemetry.
+let commandFailed = false;
+
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (err) => {
+    if ((err as NodeJS.ErrnoException).code === "EPIPE") {
+      commandFailed = true;
+      process.exit(0);
+    }
+  });
+}
+
 // ── Worker entry path bootstrap (must run before any producer/engine load) ──
 // The hf#677 worker_threads pools (`pngDecodeBlitWorkerPool`,
 // `shaderTransitionWorkerPool`) live in the producer package and try to
@@ -194,7 +215,6 @@ if (!isHelp && !hasJsonFlag && command !== "upgrade") {
 }
 
 const commandStart = Date.now();
-let commandFailed = false;
 
 // Async flush for normal exit. `beforeExit` re-fires every time the
 // event loop drains, and the async `_flush()` itself schedules new
@@ -220,6 +240,10 @@ process.on("exit", (code) => {
 });
 
 process.on("uncaughtException", (error) => {
+  if ((error as NodeJS.ErrnoException).code === "EPIPE") {
+    commandFailed = true;
+    process.exit(0);
+  }
   commandFailed = true;
   _trackCliError?.({
     error_name: error.name,
