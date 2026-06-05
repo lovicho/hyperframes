@@ -11,7 +11,12 @@ import { getTimelinePixelsPerSecond } from "./timelineZoom";
 import { TIMELINE_ASSET_MIME, TIMELINE_BLOCK_MIME } from "../../utils/timelineAssetDrop";
 import { TimelineEmptyState } from "./TimelineEmptyState";
 import { TimelineCanvas } from "./TimelineCanvas";
+import {
+  KeyframeDiamondContextMenu,
+  type KeyframeDiamondContextMenuState,
+} from "./KeyframeDiamondContextMenu";
 import { useTimelineClipDrag } from "./useTimelineClipDrag";
+import { ClipContextMenu } from "./ClipContextMenu";
 import {
   GUTTER,
   TRACK_H,
@@ -66,7 +71,13 @@ interface TimelineProps {
     updates: Pick<TimelineElement, "start" | "duration" | "playbackStart">,
   ) => Promise<void> | void;
   onBlockedEditAttempt?: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
+  onSplitElement?: (element: TimelineElement, splitTime: number) => Promise<void> | void;
   onSelectElement?: (element: TimelineElement | null) => void;
+  onDeleteKeyframe?: (elementId: string, percentage: number) => void;
+  onDeleteAllKeyframes?: (elementId: string) => void;
+  onChangeKeyframeEase?: (elementId: string, percentage: number, ease: string) => void;
+  onMoveKeyframe?: (element: TimelineElement, oldPct: number, newPct: number) => void;
+  onToggleKeyframeAtPlayhead?: (element: TimelineElement) => void;
   theme?: Partial<TimelineTheme>;
 }
 
@@ -82,7 +93,13 @@ export const Timeline = memo(function Timeline({
   onMoveElement,
   onResizeElement,
   onBlockedEditAttempt,
+  onSplitElement,
   onSelectElement,
+  onDeleteKeyframe,
+  onDeleteAllKeyframes,
+  onChangeKeyframeEase,
+  onMoveKeyframe,
+  onToggleKeyframeAtPlayhead,
   theme: themeOverrides,
 }: TimelineProps = {}) {
   const theme = useMemo(() => ({ ...defaultTimelineTheme, ...themeOverrides }), [themeOverrides]);
@@ -120,6 +137,12 @@ export const Timeline = memo(function Timeline({
 
   const [showPopover, setShowPopover] = useState(false);
   const [showShortcutHint, setShowShortcutHint] = useState(true);
+  const [kfContextMenu, setKfContextMenu] = useState<KeyframeDiamondContextMenuState | null>(null);
+  const [clipContextMenu, setClipContextMenu] = useState<{
+    x: number;
+    y: number;
+    element: TimelineElement;
+  } | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
   const roRef = useRef<ResizeObserver | null>(null);
   const shortcutHintRafRef = useRef(0);
@@ -231,6 +254,10 @@ export const Timeline = memo(function Timeline({
   }, [draggedClip, trackOrder]);
 
   const totalH = getTimelineCanvasHeight(displayTrackOrder.length);
+  const keyframeCache = usePlayerStore((s) => s.keyframeCache);
+  const selectedKeyframes = usePlayerStore((s) => s.selectedKeyframes);
+  const toggleSelectedKeyframe = usePlayerStore((s) => s.toggleSelectedKeyframe);
+
   const selectedElement = useMemo(
     () => elements.find((element) => (element.key ?? element.id) === selectedElementId) ?? null,
     [elements, selectedElementId],
@@ -477,6 +504,48 @@ export const Timeline = memo(function Timeline({
           shiftClickClipRef={shiftClickClipRef}
           getPreviewElement={getPreviewElement}
           getTrackStyle={getTrackStyle}
+          keyframeCache={keyframeCache}
+          selectedKeyframes={selectedKeyframes}
+          currentTime={currentTime}
+          onToggleKeyframeAtPlayhead={onToggleKeyframeAtPlayhead}
+          onClickKeyframe={(el, pct) => {
+            usePlayerStore.getState().clearSelectedKeyframes();
+            const elKey = el.key ?? el.id;
+            setSelectedElementId(elKey);
+            onSelectElement?.(el);
+            const absTime = el.start + (pct / 100) * el.duration;
+            onSeek?.(absTime);
+          }}
+          onShiftClickKeyframe={(elId, pct) => {
+            toggleSelectedKeyframe(`${elId}:${pct}`);
+          }}
+          onDragKeyframe={(el, oldPct, newPct) => {
+            onMoveKeyframe?.(el, oldPct, newPct);
+          }}
+          onContextMenuKeyframe={(e, elId, pct) => {
+            const el = elements.find((x) => (x.key ?? x.id) === elId);
+            if (el) {
+              setSelectedElementId(elId);
+              onSelectElement?.(el);
+              const absTime = el.start + (pct / 100) * el.duration;
+              onSeek?.(absTime);
+            }
+            const kfData = keyframeCache.get(elId);
+            const kf = kfData?.keyframes.find((k) => k.percentage === pct);
+            setKfContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              elementId: elId,
+              percentage: pct,
+              currentEase: kf?.ease ?? kfData?.ease,
+            });
+          }}
+          onContextMenuClip={(e, el) => {
+            e.preventDefault();
+            setSelectedElementId(el.key ?? el.id);
+            onSelectElement?.(el);
+            setClipContextMenu({ x: e.clientX, y: e.clientY, element: el });
+          }}
         />
       </div>
 
@@ -509,6 +578,35 @@ export const Timeline = memo(function Timeline({
             setShowPopover(false);
             setRangeSelection(null);
           }}
+        />
+      )}
+
+      {kfContextMenu && (
+        <KeyframeDiamondContextMenu
+          state={kfContextMenu}
+          onClose={() => setKfContextMenu(null)}
+          onDelete={(elId, pct) => onDeleteKeyframe?.(elId, pct)}
+          onDeleteAll={(elId) => onDeleteAllKeyframes?.(elId)}
+          onChangeEase={(elId, pct, ease) => onChangeKeyframeEase?.(elId, pct, ease)}
+          onCopyProperties={(elId, pct) => {
+            const kfData = keyframeCache.get(elId);
+            const kf = kfData?.keyframes.find((k) => k.percentage === pct);
+            if (kf) {
+              void navigator.clipboard.writeText(JSON.stringify(kf.properties, null, 2));
+            }
+          }}
+        />
+      )}
+
+      {clipContextMenu && (
+        <ClipContextMenu
+          x={clipContextMenu.x}
+          y={clipContextMenu.y}
+          element={clipContextMenu.element}
+          currentTime={currentTime}
+          onClose={() => setClipContextMenu(null)}
+          onSplit={(el, time) => onSplitElement?.(el, time)}
+          onDelete={(el) => _onDeleteElement?.(el)}
         />
       )}
     </div>

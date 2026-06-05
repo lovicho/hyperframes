@@ -266,8 +266,10 @@ export function StudioApp() {
   const handleDomEditElementDeleteRef = useRef<(s: DomEditSelection) => Promise<void>>(
     async () => {},
   );
-  const domEditDeleteBridge = async (s: DomEditSelection) =>
-    handleDomEditElementDeleteRef.current(s);
+  const domEditDeleteBridge = (s: DomEditSelection) => handleDomEditElementDeleteRef.current(s);
+  const resetKeyframesRef = useRef<() => boolean>(() => false);
+  const deleteSelectedKeyframesRef = useRef<() => void>(() => {});
+  const invalidateGsapCacheRef = useRef<() => void>(() => {});
   const { handleCopy, handlePaste, handleCut } = useClipboard({
     projectId,
     activeCompPath,
@@ -284,6 +286,7 @@ export function StudioApp() {
   const appHotkeys = useAppHotkeys({
     toggleTimelineVisibility,
     handleTimelineElementDelete: timelineEditing.handleTimelineElementDelete,
+    handleTimelineElementSplit: timelineEditing.handleTimelineElementSplit,
     handleDomEditElementDelete: domEditDeleteBridge,
     domEditSelectionRef: domEditSelectionBridgeRef,
     clearDomSelectionRef,
@@ -299,8 +302,10 @@ export function StudioApp() {
     handleCopy,
     handlePaste,
     handleCut,
+    onResetKeyframes: () => resetKeyframesRef.current(),
+    onDeleteSelectedKeyframes: () => deleteSelectedKeyframesRef.current(),
+    onAfterUndoRedo: () => invalidateGsapCacheRef.current(),
   });
-
   const selectSidebarTabStable = useCallback(
     (tab: SidebarTab) => leftSidebarRef.current?.selectTab(tab),
     [],
@@ -345,11 +350,20 @@ export function StudioApp() {
     selectSidebarTab: selectSidebarTabStable,
     getSidebarTab: getSidebarTabStable,
   });
-
   domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
   clearDomSelectionRef.current = domEditSession.clearDomSelection;
   handleDomEditElementDeleteRef.current = domEditSession.handleDomEditElementDelete;
-
+  resetKeyframesRef.current = domEditSession.handleResetSelectedElementKeyframes;
+  invalidateGsapCacheRef.current = domEditSession.invalidateGsapCache;
+  deleteSelectedKeyframesRef.current = () => {
+    const sk = usePlayerStore.getState().selectedKeyframes;
+    const a = domEditSession.selectedGsapAnimations.find((x) => x.keyframes);
+    if (!a || sk.size === 0) return;
+    sk.forEach((k) => {
+      const p = Number(k.split(":")[1]);
+      if (Number.isFinite(p)) domEditSession.handleGsapRemoveKeyframe(a.id, p);
+    });
+  };
   useCaptionDetection({
     projectId,
     activeCompPath,
@@ -470,12 +484,15 @@ export function StudioApp() {
     timelineVisible,
     toggleTimelineVisibility,
   });
-
-  if (resolving || waitingForServer || !projectId) {
+  if (resolving || waitingForServer || !projectId)
     return <StudioSplash waiting={waitingForServer} />;
-  }
-
-  const timelineToolbar = <TimelineToolbar toggleTimelineVisibility={toggleTimelineVisibility} />;
+  const timelineToolbar = (
+    <TimelineToolbar
+      toggleTimelineVisibility={toggleTimelineVisibility}
+      domEditSession={domEditSession}
+      onSplitElement={timelineEditing.handleTimelineElementSplit}
+    />
+  );
   return (
     <StudioProvider value={studioCtxValue}>
       <PanelLayoutProvider value={panelLayout}>
@@ -517,6 +534,7 @@ export function StudioApp() {
                   handleTimelineElementMove={timelineEditing.handleTimelineElementMove}
                   handleTimelineElementResize={timelineEditing.handleTimelineElementResize}
                   handleBlockedTimelineEdit={timelineEditing.handleBlockedTimelineEdit}
+                  handleTimelineElementSplit={timelineEditing.handleTimelineElementSplit}
                   setCompIdToSrc={setCompIdToSrc}
                   setCompositionLoading={setCompositionLoading}
                   shouldShowSelectedDomBounds={shouldShowSelectedDomBounds}
@@ -540,7 +558,6 @@ export function StudioApp() {
               {lintModal !== null && (
                 <LintModal findings={lintModal} projectId={projectId} onClose={closeLintModal} />
               )}
-
               {consoleErrors !== null && consoleErrors.length > 0 && (
                 <LintModal
                   findings={consoleErrors}
@@ -548,7 +565,6 @@ export function StudioApp() {
                   onClose={() => setConsoleErrors(null)}
                 />
               )}
-
               {domEditSession.agentModalOpen && domEditSession.domEditSelection && (
                 <AskAgentModal
                   selectionLabel={domEditSession.domEditSelection.label}
@@ -567,7 +583,6 @@ export function StudioApp() {
               )}
 
               {dragOverlay.active && <StudioGlobalDragOverlay />}
-
               {appToast && (
                 <div
                   className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[91] px-4 py-2 rounded-lg border text-sm shadow-lg animate-in fade-in slide-in-from-bottom-2 ${

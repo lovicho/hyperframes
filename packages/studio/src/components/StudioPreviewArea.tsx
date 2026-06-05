@@ -5,6 +5,7 @@ import { CaptionTimeline } from "../captions/components/CaptionTimeline";
 import { DomEditOverlay } from "./editor/DomEditOverlay";
 import { StudioFeedbackBar } from "./StudioFeedbackBar";
 import type { TimelineElement } from "../player";
+import { usePlayerStore } from "../player/store/playerStore";
 import type { BlockedTimelineEditIntent } from "../player/components/timelineEditing";
 import {
   STUDIO_INSPECTOR_PANELS_ENABLED,
@@ -48,6 +49,7 @@ export interface StudioPreviewAreaProps {
     updates: Pick<TimelineElement, "start" | "duration" | "playbackStart">,
   ) => Promise<void> | void;
   handleBlockedTimelineEdit: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
+  handleTimelineElementSplit: (element: TimelineElement, splitTime: number) => Promise<void> | void;
   setCompIdToSrc: (map: Map<string, string>) => void;
   setCompositionLoading: (loading: boolean) => void;
   shouldShowSelectedDomBounds: boolean;
@@ -66,6 +68,7 @@ export function StudioPreviewArea({
   handleTimelineElementMove,
   handleTimelineElementResize,
   handleBlockedTimelineEdit,
+  handleTimelineElementSplit,
   setCompIdToSrc,
   setCompositionLoading,
   shouldShowSelectedDomBounds,
@@ -101,6 +104,12 @@ export function StudioPreviewArea({
     handleDomGroupPathOffsetCommit,
     handleDomBoxSizeCommit,
     handleDomRotationCommit,
+    selectedGsapAnimations,
+    handleGsapRemoveKeyframe,
+    handleGsapUpdateMeta,
+    handleGsapAddKeyframe,
+    handleGsapConvertToKeyframes,
+    handleGsapDeleteAnimation,
   } = useDomEditContext();
 
   return (
@@ -120,7 +129,56 @@ export function StudioPreviewArea({
           onMoveElement={handleTimelineElementMove}
           onResizeElement={handleTimelineElementResize}
           onBlockedEditAttempt={handleBlockedTimelineEdit}
+          onSplitElement={handleTimelineElementSplit}
           onSelectTimelineElement={handleTimelineElementSelect}
+          onDeleteAllKeyframes={(_elId) => {
+            const anim =
+              selectedGsapAnimations.find((a) => a.keyframes) ?? selectedGsapAnimations[0];
+            if (anim) handleGsapDeleteAnimation(anim.id);
+          }}
+          onDeleteKeyframe={(_elId, pct) => {
+            const anim = selectedGsapAnimations.find((a) => a.keyframes);
+            if (anim) handleGsapRemoveKeyframe(anim.id, pct);
+          }}
+          onChangeKeyframeEase={(_elId, _pct, ease) => {
+            const anim = selectedGsapAnimations.find((a) => a.keyframes);
+            if (anim) handleGsapUpdateMeta(anim.id, { ease });
+          }}
+          // fallow-ignore-next-line complexity
+          onMoveKeyframe={(_el, oldPct, newPct) => {
+            const anim = selectedGsapAnimations.find((a) => a.keyframes);
+            if (!anim?.keyframes) return;
+            const kf = anim.keyframes.keyframes.find((k) => k.percentage === oldPct);
+            if (!kf) return;
+            handleGsapRemoveKeyframe(anim.id, oldPct);
+            for (const [prop, val] of Object.entries(kf.properties)) {
+              handleGsapAddKeyframe(anim.id, newPct, prop, val);
+            }
+          }}
+          onToggleKeyframeAtPlayhead={(el) => {
+            const currentTime = usePlayerStore.getState().currentTime;
+            const pct =
+              el.duration > 0
+                ? Math.max(
+                    0,
+                    Math.min(100, Math.round(((currentTime - el.start) / el.duration) * 100)),
+                  )
+                : 0;
+            const anim = selectedGsapAnimations.find((a) => a.keyframes);
+            if (anim?.keyframes) {
+              const existing = anim.keyframes.keyframes.find(
+                (k) => Math.abs(k.percentage - pct) <= 1,
+              );
+              if (existing) {
+                handleGsapRemoveKeyframe(anim.id, existing.percentage);
+              } else {
+                handleGsapAddKeyframe(anim.id, pct, "x", 0);
+              }
+            } else {
+              const flatAnim = selectedGsapAnimations.find((a) => !a.keyframes);
+              if (flatAnim) handleGsapConvertToKeyframes(flatAnim.id);
+            }
+          }}
           onCompIdToSrcChange={setCompIdToSrc}
           onCompositionLoadingChange={setCompositionLoading}
           onCompositionChange={(compPath) => {

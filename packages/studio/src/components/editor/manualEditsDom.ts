@@ -223,6 +223,7 @@ function isIdentityAfterTranslateStrip(m: DOMMatrix): boolean {
 }
 
 function stripGsapTranslateFromTransform(element: HTMLElement): void {
+  if (element.hasAttribute(STUDIO_MANUAL_EDIT_GESTURE_ATTR)) return;
   const transform = element.style.getPropertyValue("transform");
   if (!transform || transform === "none") return;
   const DOMMatrixCtor = (element.ownerDocument.defaultView as (Window & typeof globalThis) | null)
@@ -233,8 +234,11 @@ function stripGsapTranslateFromTransform(element: HTMLElement): void {
     if (m.m41 === 0 && m.m42 === 0) return;
     const offsetX = readPxCustomProperty(element, STUDIO_OFFSET_X_PROP);
     const offsetY = readPxCustomProperty(element, STUDIO_OFFSET_Y_PROP);
-    m.m41 -= offsetX;
-    m.m42 -= offsetY;
+    const angle = Math.atan2(m.b, m.a);
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    m.m41 -= offsetX * cos - offsetY * sin;
+    m.m42 -= offsetX * sin + offsetY * cos;
     if (Math.abs(m.m41) < 0.01 && Math.abs(m.m42) < 0.01 && isIdentityAfterTranslateStrip(m)) {
       element.style.removeProperty("transform");
     } else {
@@ -512,8 +516,58 @@ function reapplyPathOffsets(doc: Document): void {
   }
 }
 
+function gsapAnimatesProperty(el: HTMLElement, ...props: string[]): boolean {
+  const win = el.ownerDocument.defaultView as
+    | (Window & {
+        __timelines?: Record<
+          string,
+          {
+            getChildren?: (
+              deep: boolean,
+            ) => Array<{ targets?: () => Element[]; vars?: Record<string, unknown> }>;
+          }
+        >;
+      })
+    | null;
+  if (!win?.__timelines) return false;
+  const propSet = new Set(props);
+  for (const tl of Object.values(win.__timelines)) {
+    if (!tl?.getChildren) continue;
+    try {
+      for (const child of tl.getChildren(true)) {
+        if (!child.targets || !child.vars) continue;
+        let targetsEl = false;
+        for (const t of child.targets()) {
+          if (t === el || (el.id && t.id === el.id)) {
+            targetsEl = true;
+            break;
+          }
+        }
+        if (!targetsEl) continue;
+        const vars = child.vars;
+        for (const p of propSet) {
+          if (p in vars) return true;
+        }
+        if (vars.keyframes && typeof vars.keyframes === "object") {
+          for (const kfVal of Object.values(vars.keyframes as Record<string, unknown>)) {
+            if (kfVal && typeof kfVal === "object") {
+              for (const p of propSet) {
+                if (p in (kfVal as Record<string, unknown>)) return true;
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      /* */
+    }
+  }
+  return false;
+}
+
 function reapplyBoxSizes(doc: Document): void {
   for (const el of queryStudioElements(doc, STUDIO_BOX_SIZE_ATTR)) {
+    if (gsapAnimatesProperty(el, "width", "height")) continue;
     const w = Number.parseFloat(el.style.getPropertyValue(STUDIO_WIDTH_PROP));
     const h = Number.parseFloat(el.style.getPropertyValue(STUDIO_HEIGHT_PROP));
     if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {

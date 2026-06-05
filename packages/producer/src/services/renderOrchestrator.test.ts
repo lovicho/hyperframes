@@ -212,6 +212,7 @@ describe("materializeExtractedFramesForCompiledDir", () => {
     expect(extracted.framePaths.get(0)).toBe(framePath);
   });
 
+  // fallow-ignore-next-line code-duplication
   it("remaps Windows cache frames under compiledDir using only the frame basename", () => {
     const compiledDir = win32.resolve("C:\\compiled");
     const outputDir = win32.resolve("D:\\cache\\abc123");
@@ -219,6 +220,7 @@ describe("materializeExtractedFramesForCompiledDir", () => {
     const extracted = createExtractedFrames(outputDir, framePath);
     const symlinks: Array<{ target: string; path: string }> = [];
 
+    // fallow-ignore-next-line code-duplication
     materializeExtractedFramesForCompiledDir([extracted], compiledDir, {
       pathModule: win32,
       fileSystem: {
@@ -240,6 +242,7 @@ describe("materializeExtractedFramesForCompiledDir", () => {
     expect(symlinks).toEqual([{ target: outputDir, path: linkPath }]);
   });
 
+  // fallow-ignore-next-line code-duplication
   it("recursively copies frames into compiledDir when materializeSymlinks is true", () => {
     // Distributed plan() must produce a self-contained planDir — symlinks
     // don't survive S3 / GCS round-trips. With materializeSymlinks=true the
@@ -250,6 +253,7 @@ describe("materializeExtractedFramesForCompiledDir", () => {
     const extracted = createExtractedFrames(outputDir, framePath);
     const copies: Array<{ src: string; dest: string; recursive: boolean }> = [];
 
+    // fallow-ignore-next-line code-duplication
     materializeExtractedFramesForCompiledDir([extracted], compiledDir, {
       pathModule: win32,
       fileSystem: {
@@ -385,6 +389,7 @@ function createCompiledComposition(
   };
 }
 
+// fallow-ignore-next-line code-duplication
 function createConfig(): EngineConfig {
   return {
     fps: 30,
@@ -421,6 +426,7 @@ function createConfig(): EngineConfig {
 }
 
 describe("applyRenderModeHints", () => {
+  // fallow-ignore-next-line code-duplication
   it("forces screenshot mode when compatibility hints recommend it", () => {
     const compiled = createCompiledComposition(["iframe", "requestAnimationFrame"]);
     const log = {
@@ -451,6 +457,7 @@ describe("applyRenderModeHints", () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
+  // fallow-ignore-next-line code-duplication
   it("returns false when neither caller nor hint forces", () => {
     const compiled = createCompiledComposition([]);
     const log = {
@@ -561,6 +568,7 @@ describe("resolveRenderWorkerCount", () => {
     expect(workers).toBe(1);
   });
 
+  // fallow-ignore-next-line code-duplication
   it("forces single worker when html-in-canvas is detected", () => {
     const log = {
       error: vi.fn(),
@@ -587,6 +595,7 @@ describe("resolveRenderWorkerCount", () => {
     expect(log.warn).toHaveBeenCalledOnce();
   });
 
+  // fallow-ignore-next-line code-duplication
   it("overrides explicit --workers when html-in-canvas is detected", () => {
     const log = {
       error: vi.fn(),
@@ -728,19 +737,21 @@ describe("selectCaptureCalibrationFrames", () => {
 });
 
 describe("capture calibration safeguards", () => {
-  it("uses a bounded protocol timeout for calibration probes", () => {
+  it("respects user protocol timeout when higher than calibration default", () => {
     const cfg = createConfig();
     const calibrationCfg = createCaptureCalibrationConfig(cfg);
 
-    expect(calibrationCfg.protocolTimeout).toBe(30000);
+    // User's 300s timeout is higher than the 30s calibration default — use the user's value
+    expect(calibrationCfg.protocolTimeout).toBe(300000);
     expect(cfg.protocolTimeout).toBe(300000);
   });
 
-  it("preserves smaller explicit protocol timeouts for calibration probes", () => {
+  it("uses calibration floor when user timeout is lower", () => {
     const cfg = createConfig();
     cfg.protocolTimeout = 5000;
 
-    expect(createCaptureCalibrationConfig(cfg).protocolTimeout).toBe(5000);
+    // 5s is below the 30s calibration floor — use the floor
+    expect(createCaptureCalibrationConfig(cfg).protocolTimeout).toBe(30000);
   });
 
   it("falls back to screenshot mode after beginFrame calibration failures", () => {

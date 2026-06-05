@@ -161,7 +161,7 @@ export function resolveRenderWorkerCount(
 export function createCaptureCalibrationConfig(cfg: EngineConfig): EngineConfig {
   return {
     ...cfg,
-    protocolTimeout: Math.min(cfg.protocolTimeout, CAPTURE_CALIBRATION_PROTOCOL_TIMEOUT_MS),
+    protocolTimeout: Math.max(cfg.protocolTimeout, CAPTURE_CALIBRATION_PROTOCOL_TIMEOUT_MS),
   };
 }
 
@@ -282,6 +282,7 @@ export interface CaptureCalibrationOutcome {
  * the fallback fires (BeginFrame is no longer the active capture mode,
  * so the probe session is no longer reusable).
  */
+// fallow-ignore-next-line complexity
 export async function runCaptureCalibration(input: {
   cfg: EngineConfig;
   fileServer: FileServerHandle;
