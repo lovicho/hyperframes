@@ -52,6 +52,13 @@ export interface DockerRenderOptions {
   /** Output resolution preset (e.g. "landscape-4k"). Forwarded as `--resolution`. */
   outputResolution?: string;
   pageSideCompositing?: boolean;
+  /**
+   * Puppeteer page-navigation timeout, in milliseconds. Forwarded to the
+   * in-container CLI as `--browser-timeout <seconds>` (the CLI takes
+   * seconds; the engine takes ms — kept consistent with the host-side
+   * `--browser-timeout` flag).
+   */
+  pageNavigationTimeoutMs?: number;
 }
 
 /**
@@ -79,6 +86,11 @@ export function resolveDockerPlatform(
   return arch === "arm64" ? "linux/arm64" : "linux/amd64";
 }
 
+// Pure argv builder — the cognitive count tracks the number of optional CLI
+// flags it forwards, not branching depth. Each conditional spread is one
+// option = O(1) to read. Inherited from main (#1196 added platform handling);
+// this PR added one more conditional for --browser-timeout.
+// fallow-ignore-next-line complexity
 export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
   const { imageTag, projectDir, outputDir, outputFilename, options } = input;
   const platform = input.platform ?? resolveDockerPlatform();
@@ -118,5 +130,8 @@ export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
     ...(options.entryFile ? ["--composition", options.entryFile] : []),
     ...(options.outputResolution ? ["--resolution", options.outputResolution] : []),
     ...(options.pageSideCompositing === false ? ["--no-page-side-compositing"] : []),
+    ...(options.pageNavigationTimeoutMs != null
+      ? ["--browser-timeout", String(options.pageNavigationTimeoutMs / 1000)]
+      : []),
   ];
 }
