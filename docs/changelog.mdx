@@ -9,6 +9,20 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.77"
+  description="Released - 2026-06-06"
+  tags={["Release", "Producer"]}
+>
+Ensures the probe stage respects low-memory mode by threading the `forceScreenshot` flag, preventing BeginFrame probe failures on memory-constrained systems.
+
+## Fixes
+
+- **Producer:** Thread forceScreenshot to probe stage for low-memory mode ([ca3bdd14](https://github.com/heygen-com/hyperframes/commit/ca3bdd149bdf07240b26f0863cbda4024a9493ab), [#1237](https://github.com/heygen-com/hyperframes/pull/1237))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.76...v0.6.77).
+</Update>
+
+<Update
   label="HyperFrames v0.6.76"
   description="Released - 2026-06-06"
   tags={["Release", "Player", "Producer", "AWS Lambda"]}
