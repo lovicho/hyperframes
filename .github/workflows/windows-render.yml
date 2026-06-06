@@ -84,6 +84,7 @@ jobs:
     steps:
       - name: Disable Windows Defender real-time monitoring
         shell: pwsh
+        continue-on-error: true
         run: Set-MpPreference -DisableRealtimeMonitoring $true
 
       - name: Checkout
@@ -374,6 +375,7 @@ jobs:
     steps:
       - name: Disable Windows Defender real-time monitoring
         shell: pwsh
+        continue-on-error: true
         run: Set-MpPreference -DisableRealtimeMonitoring $true
 
       - name: Checkout

@@ -529,6 +529,54 @@ export function useDomEditCommits({
     ],
   );
 
+  const handleDomZIndexReorderCommit = useCallback(
+    (
+      entries: Array<{
+        element: HTMLElement;
+        zIndex: number;
+        id?: string;
+        selector?: string;
+        selectorIndex?: number;
+        sourceFile: string;
+      }>,
+    ) => {
+      if (entries.length === 0) return;
+      const coalesceKey = `z-reorder:${entries.map((e) => e.id ?? e.selector ?? "el").join(":")}`;
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        entry.element.style.zIndex = String(entry.zIndex);
+        const patches: Array<{ type: "inline-style"; property: string; value: string }> = [
+          { type: "inline-style", property: "z-index", value: String(entry.zIndex) },
+        ];
+        try {
+          const win = entry.element.ownerDocument?.defaultView;
+          if (win && win.getComputedStyle(entry.element).position === "static") {
+            entry.element.style.position = "relative";
+            patches.push({ type: "inline-style", property: "position", value: "relative" });
+          }
+        } catch {
+          /* cross-origin or detached — skip */
+        }
+        commitPositionPatchToHtml(
+          {
+            element: entry.element,
+            id: entry.id ?? null,
+            selector: entry.selector,
+            selectorIndex: entry.selectorIndex,
+            sourceFile: entry.sourceFile,
+          } as unknown as DomEditSelection,
+          patches,
+          {
+            label: "Reorder layers",
+            coalesceKey,
+            skipRefresh: i < entries.length - 1,
+          },
+        );
+      }
+    },
+    [commitPositionPatchToHtml],
+  );
+
   return {
     resolveImportedFontAsset,
     handleDomStyleCommit,
@@ -547,5 +595,6 @@ export function useDomEditCommits({
     handleDomMotionCommit,
     handleDomMotionClear,
     handleDomEditElementDelete,
+    handleDomZIndexReorderCommit,
   };
 }

@@ -254,40 +254,103 @@ export async function downloadAndRewriteFonts(css: string, outputDir: string): P
   return rewritten;
 }
 
-/** Block requests to private/internal IP ranges to prevent SSRF */
+// Reserved/loopback/private IPv4 blocks as [firstOctet, secondOctetLo, secondOctetHi].
+const PRIVATE_V4_BLOCKS: ReadonlyArray<readonly [number, number, number]> = [
+  [0, 0, 255], // 0.0.0.0/8 (incl. 0.0.0.0, which routes to localhost)
+  [10, 0, 255], // 10.0.0.0/8
+  [127, 0, 255], // 127.0.0.0/8 loopback
+  [172, 16, 31], // 172.16.0.0/12
+  [192, 168, 168], // 192.168.0.0/16
+  [169, 254, 254], // 169.254.0.0/16 link-local (cloud metadata)
+];
+
+/** True for a dotted-quad IPv4 literal in a loopback/private/reserved range. */
+function isPrivateIpv4(host: string): boolean {
+  const octets = host.split(".").map(Number);
+  if (octets.length !== 4) return false;
+  const [a, b] = octets as [number, number, number, number];
+  return PRIVATE_V4_BLOCKS.some(([first, lo, hi]) => a === first && b >= lo && b <= hi);
+}
+
+/** True for a bracketed IPv6 hostname in a loopback/private/reserved range. */
+function isPrivateIpv6(bracketed: string): boolean {
+  const addr = bracketed.replace(/^\[|\]$/g, "").toLowerCase();
+  if (addr === "::1" || addr === "::") return true; // loopback / unspecified
+  const mapped = /^::ffff:(.+)$/.exec(addr); // IPv4-mapped ::ffff:a.b.c.d or ::ffff:hhhh:hhhh
+  if (mapped) {
+    const tail = mapped[1]!;
+    if (tail.includes(".")) return isPrivateIpv4(tail);
+    const hex = tail.split(":");
+    if (hex.length === 2) {
+      const n = ((parseInt(hex[0]!, 16) << 16) | parseInt(hex[1]!, 16)) >>> 0;
+      return isPrivateIpv4(
+        [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join("."),
+      );
+    }
+  }
+  if (/^f[cd]/.test(addr)) return true; // fc00::/7 unique-local
+  if (/^fe[89ab]/.test(addr)) return true; // fe80::/10 link-local
+  return false;
+}
+
+/**
+ * Block requests to private/internal hosts to prevent SSRF. WHATWG URL parsing
+ * canonicalizes alternate IPv4 encodings (decimal/octal/hex) to dotted-quad
+ * before we see them, so only dotted IPv4 and bracketed IPv6 literals reach the
+ * classifiers below.
+ */
 export function isPrivateUrl(url: string): boolean {
   try {
-    const { hostname } = new URL(url);
-    // Block cloud metadata, localhost, and private IP ranges
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") return true;
-    if (hostname === "169.254.169.254") return true; // AWS/GCP metadata
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return true; // no file:, etc.
+    const hostname = u.hostname;
+    if (hostname === "localhost") return true;
     if (hostname.endsWith(".internal") || hostname.endsWith(".local")) return true;
-    // IPv4 private ranges
-    const parts = hostname.split(".").map(Number);
-    if (parts.length === 4 && parts.every((p) => !isNaN(p))) {
-      if (parts[0] === 10) return true; // 10.0.0.0/8
-      if (parts[0] === 172 && parts[1]! >= 16 && parts[1]! <= 31) return true; // 172.16.0.0/12
-      if (parts[0] === 192 && parts[1] === 168) return true; // 192.168.0.0/16
-      if (parts[0] === 169 && parts[1] === 254) return true; // 169.254.0.0/16 (link-local)
-    }
-    // Block non-HTTP(S) schemes
-    const scheme = new URL(url).protocol;
-    if (scheme !== "http:" && scheme !== "https:") return true;
+    if (hostname.startsWith("[")) return isPrivateIpv6(hostname);
+    if (/^\d+(\.\d+){3}$/.test(hostname)) return isPrivateIpv4(hostname);
     return false;
   } catch {
     return true; // reject unparseable URLs
   }
 }
 
+/** Max redirect hops safeFetch will follow before giving up. */
+const MAX_FETCH_REDIRECTS = 5;
+
+/**
+ * fetch() that re-validates the SSRF denylist on EVERY redirect hop. A bare
+ * `redirect: "follow"` only checks the initial URL, so a public URL can 30x to
+ * an internal/metadata host. We resolve redirects manually and re-run
+ * isPrivateUrl on each Location. Returns null when blocked, on too many hops,
+ * or on network error.
+ */
+export async function safeFetch(url: string, init?: RequestInit): Promise<Response | null> {
+  let current = url;
+  for (let hop = 0; hop <= MAX_FETCH_REDIRECTS; hop++) {
+    if (isPrivateUrl(current)) return null;
+    const res = await fetch(current, { ...init, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) return res;
+      try {
+        current = new URL(loc, current).toString();
+      } catch {
+        return null; // malformed Location header
+      }
+      continue;
+    }
+    return res;
+  }
+  return null; // too many redirects
+}
+
 async function fetchBuffer(url: string): Promise<Buffer | null> {
   try {
-    if (isPrivateUrl(url)) return null;
-    const res = await fetch(url, {
+    const res = await safeFetch(url, {
       signal: AbortSignal.timeout(10000),
       headers: { "User-Agent": "HyperFrames/1.0" },
-      redirect: "follow",
     });
-    if (!res.ok) return null;
+    if (!res || !res.ok) return null;
     // Reject XML/HTML error pages disguised as 200 OK (common with S3/CloudFront)
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("text/xml") || ct.includes("text/html") || ct.includes("application/xml")) {

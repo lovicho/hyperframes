@@ -53,11 +53,10 @@ export const CAPTURE_CALIBRATION_TARGET_MS = 600;
 export const MAX_MEASURED_CAPTURE_COST_MULTIPLIER = 8;
 
 /**
- * CDP protocol timeout used while running calibration. Bounded below
- * the normal `cfg.protocolTimeout` so a wedged BeginFrame calibration
- * times out fast and falls back to screenshot mode (see the
- * `shouldFallbackToScreenshotAfterCalibrationError` path in the
- * sequencer).
+ * CDP protocol timeout used while running calibration. This is a ceiling,
+ * not a floor — a wedged BeginFrame must time out fast so the sequencer
+ * can fall back to screenshot mode via
+ * `shouldFallbackToScreenshotAfterCalibrationError`.
  */
 export const CAPTURE_CALIBRATION_PROTOCOL_TIMEOUT_MS = 30_000;
 
@@ -129,6 +128,18 @@ export function resolveRenderWorkerCount(
     return 1;
   }
 
+  // Low-memory safe profile pins capture to a single worker (unless the user
+  // asked for a specific count) so the pipeline never runs N concurrent
+  // Chrome instances on a constrained host. Kept here, alongside the other
+  // worker-count decisions, so the "why workers=N" log stays coherent across
+  // every path into capture.
+  if (cfg.lowMemoryMode && requestedWorkers === undefined) {
+    log.info(
+      "[Render] Low-memory profile — pinning to 1 capture worker (auto-worker calibration skipped).",
+    );
+    return 1;
+  }
+
   const captureCost = combineCaptureCostEstimates(
     estimateCaptureCostMultiplier(compiled),
     measuredCaptureCost,
@@ -161,7 +172,7 @@ export function resolveRenderWorkerCount(
 export function createCaptureCalibrationConfig(cfg: EngineConfig): EngineConfig {
   return {
     ...cfg,
-    protocolTimeout: Math.max(cfg.protocolTimeout, CAPTURE_CALIBRATION_PROTOCOL_TIMEOUT_MS),
+    protocolTimeout: Math.min(cfg.protocolTimeout, CAPTURE_CALIBRATION_PROTOCOL_TIMEOUT_MS),
   };
 }
 
@@ -362,6 +373,12 @@ export async function runCaptureCalibration(input: {
   };
 
   const calibrationCfg = createCaptureCalibrationConfig({ ...cfg, forceScreenshot });
+  log.info("[Render] Calibration config", {
+    protocolTimeout: calibrationCfg.protocolTimeout,
+    parentProtocolTimeout: cfg.protocolTimeout,
+    forceScreenshot,
+    totalFrames,
+  });
   let calibration:
     | { estimate: CaptureCostEstimate; samples: CaptureCalibrationSample[] }
     | undefined;

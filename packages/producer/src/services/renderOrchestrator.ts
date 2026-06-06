@@ -74,6 +74,8 @@ import {
   convertTransfer,
   type ElementStackingInfo,
   type HfTransitionMeta,
+  getSystemTotalMb,
+  LOW_MEMORY_TOTAL_MB_THRESHOLD,
 } from "@hyperframes/engine";
 import { join, dirname, resolve } from "path";
 import { randomUUID } from "crypto";
@@ -1495,6 +1497,22 @@ export async function executeRenderJob(
 
     job.startedAt = new Date();
     assertNotAborted();
+
+    log.info("[Render] Pipeline started", {
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
+      fps: job.config.fps,
+      format: outputFormat,
+      quality: job.config.quality,
+      browserGpuMode: cfg.browserGpuMode,
+      forceScreenshot: cfg.forceScreenshot,
+      protocolTimeout: cfg.protocolTimeout,
+      browserTimeout: cfg.browserTimeout,
+      pageNavigationTimeout: cfg.pageNavigationTimeout,
+      playerReadyTimeout: cfg.playerReadyTimeout,
+    });
+
     if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
 
     if (job.config.debug) {
@@ -1565,11 +1583,35 @@ export async function executeRenderJob(
     // `cfg.forceScreenshot` directly.
     let captureForceScreenshot = compileResult.forceScreenshot;
 
+    // Low-memory safe profile: on memory-constrained hosts the default render
+    // shape (probe Chrome + a throwaway calibration Chrome + N capture
+    // workers) thrashes — concurrent Chrome instances drive memory pressure
+    // that slows every CDP call and spikes V8 GC, surfacing as the slow/stuck
+    // renders in heygen-com/hyperframes#1218 / #1219. Collapse to the cheapest
+    // shape: skip auto-worker calibration (the gate below), pin to a single
+    // worker (resolved below), and prefer screenshot capture over BeginFrame
+    // (which avoids the BeginFrame protocol-timeout → relaunch churn on slow
+    // hardware). Auto-detected from total RAM; opt out with
+    // `--no-low-memory-mode` / PRODUCER_LOW_MEMORY_MODE=false. An explicit
+    // `--workers N` still gets screenshot capture + skipped calibration; only
+    // the single-worker pin is bypassed.
+    if (cfg.lowMemoryMode) {
+      captureForceScreenshot = true;
+      log.info(
+        "[Render] Low-memory render profile active — " +
+          "screenshot capture, auto-worker calibration skipped" +
+          (job.config.workers === undefined ? ", pinned to 1 worker" : "") +
+          ". Override with --no-low-memory-mode or PRODUCER_LOW_MEMORY_MODE=false.",
+        { totalMemMb: getSystemTotalMb(), thresholdMb: LOW_MEMORY_TOTAL_MB_THRESHOLD },
+      );
+    }
+
     const probeResult = await runProbeStage({
       projectDir,
       workDir,
       job,
       cfg,
+      forceScreenshot: captureForceScreenshot,
       log,
       assertNotAborted,
       compiled,
@@ -1704,7 +1746,12 @@ export async function executeRenderJob(
     const htmlInCanvasDetected = compiled.renderModeHints.reasons.some(
       (r) => r.code === "htmlInCanvas",
     );
-    if (job.config.workers === undefined && totalFrames >= 60 && !htmlInCanvasDetected) {
+    if (
+      job.config.workers === undefined &&
+      totalFrames >= 60 &&
+      !htmlInCanvasDetected &&
+      !cfg.lowMemoryMode
+    ) {
       const outcome = await runCaptureCalibration({
         cfg,
         fileServer,
@@ -1726,6 +1773,8 @@ export async function executeRenderJob(
       }
     }
 
+    // Low-memory safe-mode's single-worker pin lives inside
+    // resolveRenderWorkerCount so its "why workers=N" logging stays coherent.
     let workerCount = resolveRenderWorkerCount(
       totalFrames,
       job.config.workers,
@@ -2124,6 +2173,19 @@ export async function executeRenderJob(
       lastBrowserConsole,
       perfStages,
       hdrDiagnostics,
+    });
+
+    log.info("[Render] Failure summary", {
+      failedStage: job.currentStage,
+      error: errorMessage,
+      elapsedMs: Date.now() - pipelineStart,
+      stageTimings: perfStages,
+      isTimeout: isTimeoutError,
+      workers: job.config.workers ?? "auto",
+      protocolTimeout: cfg.protocolTimeout,
+      browserConsoleErrors: lastBrowserConsole
+        .filter((l) => l.includes("ERROR") || l.includes("PAGEERROR"))
+        .slice(-5),
     });
 
     await cleanupRenderResources({

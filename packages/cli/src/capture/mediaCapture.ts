@@ -10,7 +10,7 @@
 import type { Browser, Page } from "puppeteer-core";
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { isPrivateUrl } from "./assetDownloader.js";
+import { safeFetch } from "./assetDownloader.js";
 
 /** Discovered Lottie item from network interception or DOM scan. */
 export interface DiscoveredLottie {
@@ -42,14 +42,12 @@ export async function saveLottieAnimations(
         // Already have the JSON data from network interception
         jsonData = JSON.stringify(lottieItem.data);
       } else if (lottieItem.url) {
-        // SSRF guard — don't fetch private/internal URLs
-        if (isPrivateUrl(lottieItem.url)) continue;
-        // Download the file
-        const res = await fetch(lottieItem.url, {
+        // SSRF guard — safeFetch re-checks the denylist on every redirect hop
+        const res = await safeFetch(lottieItem.url, {
           signal: AbortSignal.timeout(10000),
           headers: { "User-Agent": "HyperFrames/1.0" },
         });
-        if (!res.ok) continue;
+        if (!res || !res.ok) continue;
         const buf = Buffer.from(await res.arrayBuffer());
 
         if (lottieItem.url.endsWith(".lottie")) {

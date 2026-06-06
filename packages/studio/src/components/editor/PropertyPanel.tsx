@@ -1,8 +1,6 @@
 import { memo } from "react";
 import { Eye, Layers, MessageSquare, Move, X } from "../../icons/SystemIcons";
-import { type DomEditSelection } from "./domEditing";
 import { readStudioBoxSize, readStudioPathOffset, readStudioRotation } from "./manualEdits";
-import type { ImportedFontAsset } from "./fontAssets";
 import {
   EMPTY_STYLES,
   formatPxMetricValue,
@@ -13,11 +11,12 @@ import {
 import { MetricField, Section } from "./propertyPanelPrimitives";
 import { isMediaElement, MediaSection } from "./propertyPanelMediaSection";
 import { TextSection, StyleSections } from "./propertyPanelSections";
-import { TimingSection } from "./propertyPanelTimingSection";
 import { GsapAnimationSection } from "./GsapAnimationSection";
 import { KeyframeNavigation } from "./KeyframeNavigation";
 import { STUDIO_GSAP_PANEL_ENABLED, STUDIO_KEYFRAMES_ENABLED } from "./manualEditingAvailability";
 import { usePlayerStore } from "../../player";
+import { TimingSection } from "./propertyPanelTimingSection";
+import { computeFitToChildrenSize, type PropertyPanelProps } from "./propertyPanelHelpers";
 
 // Re-export helpers that external consumers import from this module
 export {
@@ -30,60 +29,6 @@ export {
   normalizePanelPxValue,
   setCssFilterFunctionPx,
 } from "./propertyPanelHelpers";
-
-interface PropertyPanelProps {
-  projectId: string;
-  projectDir: string | null;
-  assets: string[];
-  element: DomEditSelection | null;
-  multiSelectCount?: number;
-  copiedAgentPrompt: boolean;
-  onClearSelection: () => void;
-  onSetStyle: (prop: string, value: string) => void | Promise<void>;
-  onSetAttribute: (attr: string, value: string) => void | Promise<void>;
-  onSetHtmlAttribute: (attr: string, value: string | null) => void | Promise<void>;
-  onSetManualOffset: (element: DomEditSelection, next: { x: number; y: number }) => void;
-  onSetManualSize: (element: DomEditSelection, next: { width: number; height: number }) => void;
-  onSetManualRotation: (element: DomEditSelection, next: { angle: number }) => void;
-  onSetText: (value: string, fieldKey?: string) => void;
-  onSetTextFieldStyle: (fieldKey: string, property: string, value: string) => void;
-  onAddTextField: (afterFieldKey?: string) => string | Promise<string | null> | null;
-  onRemoveTextField: (fieldKey: string) => void;
-  onAskAgent: () => void;
-  onImportAssets?: (files: FileList) => Promise<string[]>;
-  fontAssets?: ImportedFontAsset[];
-  onImportFonts?: (files: FileList | File[]) => Promise<ImportedFontAsset[]>;
-  previewIframeRef?: React.RefObject<HTMLIFrameElement | null>;
-  gsapAnimations?: import("@hyperframes/core/gsap-parser").GsapAnimation[];
-  gsapMultipleTimelines?: boolean;
-  gsapUnsupportedTimelinePattern?: boolean;
-  onUpdateGsapProperty?: (animId: string, prop: string, value: number | string) => void;
-  onUpdateGsapMeta?: (
-    animId: string,
-    updates: { duration?: number; ease?: string; position?: number },
-  ) => void;
-  onDeleteGsapAnimation?: (animId: string) => void;
-  onAddGsapProperty?: (animId: string, prop: string) => void;
-  onRemoveGsapProperty?: (animId: string, prop: string) => void;
-  onUpdateGsapFromProperty?: (animId: string, prop: string, value: number | string) => void;
-  onAddGsapFromProperty?: (animId: string, prop: string) => void;
-  onRemoveGsapFromProperty?: (animId: string, prop: string) => void;
-  onAddGsapAnimation?: (method: "to" | "from" | "set" | "fromTo") => void;
-  onAddKeyframe?: (
-    animationId: string,
-    percentage: number,
-    property: string,
-    value: number | string,
-  ) => void;
-  onRemoveKeyframe?: (animationId: string, percentage: number) => void;
-  onConvertToKeyframes?: (animationId: string) => void;
-  onCommitAnimatedProperty?: (
-    selection: DomEditSelection,
-    property: string,
-    value: number | string,
-  ) => Promise<void>;
-  onSeekToTime?: (time: number) => void;
-}
 
 /* ------------------------------------------------------------------ */
 /*  PropertyPanel                                                      */
@@ -439,6 +384,29 @@ export const PropertyPanel = memo(function PropertyPanel({
                 />
               )}
             </div>
+            {element.capabilities.canApplyManualSize && (
+              <button
+                type="button"
+                className="flex-shrink-0 rounded p-1 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-300"
+                title="Fit to children"
+                onClick={() => {
+                  const size = computeFitToChildrenSize(element);
+                  if (size) onSetManualSize(element, size);
+                }}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 14 14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                >
+                  <rect x="2" y="2" width="10" height="10" strokeDasharray="2 1.5" rx="1" />
+                  <path d="M2 4.5h1m-1 5h1m8-5h1m-1 5h1M4.5 2v1m5-1v1M4.5 11v1m5-1v1" />
+                </svg>
+              </button>
+            )}
             <div className="flex items-center gap-1">
               <div className="flex-1">
                 <MetricField

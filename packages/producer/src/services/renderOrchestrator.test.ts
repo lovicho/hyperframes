@@ -406,6 +406,7 @@ function createConfig(): EngineConfig {
     browserTimeout: 120000,
     protocolTimeout: 300000,
     forceScreenshot: false,
+    lowMemoryMode: false,
     enableChunkedEncode: false,
     chunkSizeFrames: 360,
     enableStreamingEncode: false,
@@ -622,6 +623,53 @@ describe("resolveRenderWorkerCount", () => {
     expect(log.warn).toHaveBeenCalledOnce();
   });
 
+  // fallow-ignore-next-line code-duplication
+  it("pins to 1 worker in low-memory mode when no explicit --workers is set", () => {
+    const log = {
+      error: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const workers = resolveRenderWorkerCount(
+      900,
+      undefined,
+      { ...cfg, lowMemoryMode: true },
+      {
+        hasShaderTransitions: false,
+        renderModeHints: { recommendScreenshot: false, reasons: [] },
+      },
+      log,
+    );
+
+    expect(workers).toBe(1);
+    expect(log.info).toHaveBeenCalledOnce();
+  });
+
+  // fallow-ignore-next-line code-duplication
+  it("respects explicit --workers in low-memory mode (only the pin is bypassed)", () => {
+    const log = {
+      error: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const workers = resolveRenderWorkerCount(
+      900,
+      4,
+      { ...cfg, lowMemoryMode: true, coresPerWorker: 2.5 },
+      {
+        hasShaderTransitions: false,
+        renderModeHints: { recommendScreenshot: false, reasons: [] },
+      },
+      log,
+    );
+
+    expect(workers).toBe(4);
+  });
+
   it("keeps baseline auto workers after screenshot fallback when measured capture is cheap", () => {
     const log = {
       error: vi.fn(),
@@ -737,21 +785,22 @@ describe("selectCaptureCalibrationFrames", () => {
 });
 
 describe("capture calibration safeguards", () => {
-  it("respects user protocol timeout when higher than calibration default", () => {
+  it("caps protocol timeout at calibration ceiling for fast fallback", () => {
     const cfg = createConfig();
     const calibrationCfg = createCaptureCalibrationConfig(cfg);
 
-    // User's 300s timeout is higher than the 30s calibration default — use the user's value
-    expect(calibrationCfg.protocolTimeout).toBe(300000);
+    // Default 300s is above the 30s calibration ceiling — cap at 30s
+    // so a wedged BeginFrame times out fast and falls back to screenshot
+    expect(calibrationCfg.protocolTimeout).toBe(30000);
     expect(cfg.protocolTimeout).toBe(300000);
   });
 
-  it("uses calibration floor when user timeout is lower", () => {
+  it("preserves user timeout when already below calibration ceiling", () => {
     const cfg = createConfig();
     cfg.protocolTimeout = 5000;
 
-    // 5s is below the 30s calibration floor — use the floor
-    expect(createCaptureCalibrationConfig(cfg).protocolTimeout).toBe(30000);
+    // 5s is below the 30s ceiling — keep the user's value
+    expect(createCaptureCalibrationConfig(cfg).protocolTimeout).toBe(5000);
   });
 
   it("falls back to screenshot mode after beginFrame calibration failures", () => {
