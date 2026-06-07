@@ -57,6 +57,10 @@ export interface CaptureSession {
   pageReleased?: boolean;
   browserReleased?: boolean;
   browserConsoleBuffer: string[];
+  initTelemetry?: {
+    initDurationMs: number;
+    tweenCount: number;
+  };
   capturePerf: {
     frames: number;
     seekMs: number;
@@ -78,6 +82,134 @@ export interface CaptureSession {
 // Complex compositions produce 100+ messages; 50 was too small to capture relevant errors.
 const BROWSER_CONSOLE_BUFFER_SIZE = 200;
 const CAPTURE_SESSION_CLOSE_TIMEOUT_MS = 5_000;
+
+function appendBrowserDiagnostic(session: CaptureSession, text: string): void {
+  session.browserConsoleBuffer.push(text);
+  if (session.browserConsoleBuffer.length > BROWSER_CONSOLE_BUFFER_SIZE) {
+    session.browserConsoleBuffer.shift();
+  }
+}
+
+async function collectSessionInitTelemetry(
+  page: Page,
+  initStart: number,
+): Promise<{ initDurationMs: number; tweenCount: number }> {
+  const initDurationMs = Date.now() - initStart;
+  let tweenCount = 0;
+  try {
+    tweenCount = await page.evaluate(() => {
+      const timelines =
+        (window as unknown as { __timelines?: Record<string, unknown> }).__timelines || {};
+      const seen = new Set<object>();
+      let count = 0;
+      for (const timeline of Object.values(timelines)) {
+        const maybeTimeline = timeline as { getChildren?: unknown };
+        if (typeof maybeTimeline?.getChildren !== "function") continue;
+        const children = maybeTimeline.getChildren(true, true, false) as unknown[];
+        for (const child of children) {
+          if (child && typeof child === "object" && !seen.has(child)) {
+            seen.add(child);
+            count++;
+          }
+        }
+      }
+      return count;
+    });
+  } catch {
+    tweenCount = 0;
+  }
+  return { initDurationMs, tweenCount };
+}
+
+async function recordSessionInitTelemetry(
+  session: CaptureSession,
+  initStart: number,
+): Promise<void> {
+  const telemetry = await collectSessionInitTelemetry(session.page, initStart);
+  session.initTelemetry = telemetry;
+  appendBrowserDiagnostic(
+    session,
+    `[FrameCapture:INIT] complete initDurationMs=${telemetry.initDurationMs} tweenCount=${telemetry.tweenCount}`,
+  );
+}
+
+export function sanitizeDiagnosticUrl(input: string): string {
+  if (!input) return "(empty)";
+  if (input.startsWith("data:")) return "data:<redacted>";
+  if (input.startsWith("blob:")) return "blob:<redacted>";
+  if (input.startsWith("/")) {
+    try {
+      const url = new URL(input, "http://hyperframes.local");
+      return url.pathname;
+    } catch {
+      return input;
+    }
+  }
+
+  try {
+    const url = new URL(input);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return input;
+  }
+}
+
+export function formatNavigationFailureDiagnostic(input: {
+  captureMode: CaptureMode;
+  url: string;
+  timeoutMs: number;
+  elapsedMs: number;
+  error: unknown;
+}): string {
+  const message = input.error instanceof Error ? input.error.message : String(input.error);
+  return (
+    `[FrameCapture:ERROR] page.goto failed ` +
+    `mode=${input.captureMode} timeoutMs=${input.timeoutMs} elapsedMs=${input.elapsedMs} ` +
+    `url=${sanitizeDiagnosticUrl(input.url)} error=${message}`
+  );
+}
+
+export function formatNavigationStartDiagnostic(input: {
+  captureMode: CaptureMode;
+  url: string;
+  timeoutMs: number;
+}): string {
+  return (
+    `[FrameCapture:NAV] page.goto start ` +
+    `mode=${input.captureMode} timeoutMs=${input.timeoutMs} ` +
+    `url=${sanitizeDiagnosticUrl(input.url)}`
+  );
+}
+
+export function formatRequestFailureDiagnostic(input: {
+  method: string;
+  resourceType: string;
+  url: string;
+  failureText: string;
+}): string {
+  return (
+    `[Browser:REQUESTFAILED] ${input.method} ${sanitizeDiagnosticUrl(input.url)} ` +
+    `resource=${input.resourceType} error=${input.failureText}`
+  );
+}
+
+export function formatHttpErrorDiagnostic(input: {
+  method: string;
+  resourceType: string;
+  url: string;
+  status: number;
+  statusText: string;
+}): string {
+  const statusText = input.statusText ? ` ${input.statusText}` : "";
+  return (
+    `[Browser:HTTP${input.status}] ${input.method} ${sanitizeDiagnosticUrl(input.url)} ` +
+    `resource=${input.resourceType}${statusText}`
+  );
+}
 
 /**
  * Fixed warmup-loop iteration count used when `CaptureOptions.lockWarmupTicks`
@@ -721,10 +853,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       console.log(`${prefix} ${text}`);
     }
 
-    session.browserConsoleBuffer.push(`${prefix} ${text}`);
-    if (session.browserConsoleBuffer.length > BROWSER_CONSOLE_BUFFER_SIZE) {
-      session.browserConsoleBuffer.shift();
-    }
+    appendBrowserDiagnostic(session, `${prefix} ${text}`);
   });
 
   page.on("pageerror", (err) => {
@@ -738,10 +867,36 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       console.error(text);
     }
 
-    session.browserConsoleBuffer.push(text);
-    if (session.browserConsoleBuffer.length > BROWSER_CONSOLE_BUFFER_SIZE) {
-      session.browserConsoleBuffer.shift();
-    }
+    appendBrowserDiagnostic(session, text);
+  });
+
+  page.on("requestfailed", (request) => {
+    appendBrowserDiagnostic(
+      session,
+      formatRequestFailureDiagnostic({
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        failureText: request.failure()?.errorText ?? "unknown",
+      }),
+    );
+  });
+
+  page.on("response", (response) => {
+    const status = response.status();
+    if (status < 400) return;
+
+    const request = response.request();
+    appendBrowserDiagnostic(
+      session,
+      formatHttpErrorDiagnostic({
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: response.url(),
+        status,
+        statusText: response.statusText(),
+      }),
+    );
   });
 
   // Navigate to the file server
@@ -752,10 +907,36 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
   const logInitPhase = (phase: string) => {
     console.log(`[initSession:${session.captureMode}] ${phase} (${Date.now() - initStart}ms)`);
   };
+  const gotoEntryPage = async (): Promise<void> => {
+    appendBrowserDiagnostic(
+      session,
+      formatNavigationStartDiagnostic({
+        captureMode: session.captureMode,
+        url,
+        timeoutMs: pageNavigationTimeout,
+      }),
+    );
+    logInitPhase("page.goto start");
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: pageNavigationTimeout });
+    } catch (error) {
+      appendBrowserDiagnostic(
+        session,
+        formatNavigationFailureDiagnostic({
+          captureMode: session.captureMode,
+          url,
+          timeoutMs: pageNavigationTimeout,
+          elapsedMs: Date.now() - initStart,
+          error,
+        }),
+      );
+      throw error;
+    }
+  };
 
   if (session.captureMode === "screenshot") {
     // Screenshot mode: standard navigation, rAF works normally
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: pageNavigationTimeout });
+    await gotoEntryPage();
     logInitPhase("page.goto complete");
 
     const pageReadyTimeout =
@@ -827,6 +1008,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     logInitPhase("fonts ready");
     await waitForOptionalTailwindReady(page, pageReadyTimeout);
     logInitPhase("tailwind ready");
+    await recordSessionInitTelemetry(session, initStart);
 
     // For PNG captures, force the page background fully transparent so the
     // captured screenshots carry a real alpha channel. Must run AFTER
@@ -894,7 +1076,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
   warmupLoopPromise.catch(() => {});
   logInitPhase("warmup loop started");
 
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: pageNavigationTimeout });
+  await gotoEntryPage();
   logInitPhase("page.goto complete");
 
   // Poll for window.__hf readiness using manual evaluate loop (waitForFunction
@@ -963,6 +1145,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
   logInitPhase("fonts ready");
   await waitForOptionalTailwindReady(page, pageReadyTimeout);
   logInitPhase("tailwind ready");
+  await recordSessionInitTelemetry(session, initStart);
 
   // Stop warmup. Unlocked mode exits on this flag; locked mode keeps ticking
   // until LOCKED_WARMUP_TICKS, so we await its promise to ensure the count is

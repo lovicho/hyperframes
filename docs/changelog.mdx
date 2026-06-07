@@ -9,6 +9,34 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.79"
+  description="Released - 2026-06-06"
+  tags={["Release", "Engine"]}
+>
+Switches the parity harness page navigation to `domcontentloaded` instead of `load`, preventing timeouts caused by slow video preload on compositions with large or numerous media sources.
+
+## Fixes
+
+- **Engine:** Use domcontentloaded to avoid video preload navigation timeout ([62b7137e](https://github.com/heygen-com/hyperframes/commit/62b7137e723c3e3ef590950eed99ec5a671749cd), [#1239](https://github.com/heygen-com/hyperframes/pull/1239))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.78...v0.6.79).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.78"
+  description="Released - 2026-06-06"
+  tags={["Release", "Engine"]}
+>
+Adds detailed diagnostics around page navigation timeouts — captures failed requests, HTTP errors, and timing context to help debug environment-specific render failures.
+
+## Internal
+
+- **Engine:** Add capture navigation timeout diagnostics ([dc71f411](https://github.com/heygen-com/hyperframes/commit/dc71f411c770b5ee2a758959e84655ac10a7fcb5), [#1238](https://github.com/heygen-com/hyperframes/pull/1238))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.77...v0.6.78).
+</Update>
+
+<Update
   label="HyperFrames v0.6.77"
   description="Released - 2026-06-06"
   tags={["Release", "Producer"]}
