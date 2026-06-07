@@ -279,6 +279,181 @@ describe("HF_EARLY_STUB + HF_BRIDGE_SCRIPT integration", () => {
       { time: 5, duration: 0.5, shader: "domain-warp", fromScene: "a", toScene: "b" },
     ]);
     expect(typeof sandbox.window.__hf?.seek).toBe("function");
+    expect(sandbox.window.__hf?.duration).toBe(0);
+
+    sandbox.window.__renderReady = true;
     expect(sandbox.window.__hf?.duration).toBe(30);
+  });
+
+  it("keeps render-time timeline seeks synchronous during large renders", () => {
+    const sandbox: {
+      window: Record<string, unknown> & {
+        __hf?: Record<string, unknown>;
+        __hfTimelinesBuilding?: boolean;
+        gsap?: { timeline: () => { totalTime: (time?: number) => number | unknown } };
+        requestAnimationFrame: typeof requestAnimationFrame;
+        setTimeout: typeof setTimeout;
+      };
+      document: Record<string, never>;
+      CustomEvent: typeof CustomEvent;
+    } = {
+      window: {
+        requestAnimationFrame: (() => 1) as typeof requestAnimationFrame,
+        setTimeout: (() => 1) as typeof setTimeout,
+      },
+      document: {},
+      CustomEvent,
+    };
+    sandbox.window.window = sandbox.window;
+    sandbox.window.document = sandbox.document;
+    sandbox.window.CustomEvent = sandbox.CustomEvent;
+
+    new Function("window", "document", "CustomEvent", `with (window) {\n${HF_EARLY_STUB}\n}`)(
+      sandbox.window,
+      sandbox.document,
+      sandbox.CustomEvent,
+    );
+
+    const totalTimeCalls: number[] = [];
+    sandbox.window.gsap = {
+      timeline: () => ({
+        to: () => {},
+        from: () => {},
+        fromTo: () => {},
+        set: () => {},
+        pause: () => {},
+        play: () => {},
+        seek: () => {},
+        totalTime: (time?: number) => {
+          if (typeof time === "number") totalTimeCalls.push(time);
+          return totalTimeCalls.at(-1) ?? 0;
+        },
+        time: () => 0,
+        duration: () => 10,
+        add: () => {},
+        getChildren: () => [],
+        paused: () => true,
+        timeScale: () => 1,
+        kill: () => {},
+      }),
+    };
+
+    const timeline = sandbox.window.gsap.timeline();
+    for (let i = 0; i < 5100; i += 1) {
+      timeline.totalTime(i / 30);
+    }
+
+    expect(totalTimeCalls).toHaveLength(5100);
+    expect(sandbox.window.__hfTimelinesBuilding).toBe(false);
+  });
+
+  it("flushes queued construction calls before forwarding timeline children", () => {
+    const sandbox: {
+      window: Record<string, unknown> & {
+        __hf?: Record<string, unknown>;
+        __hfTimelinesBuilding?: boolean;
+        gsap?: {
+          timeline: () => { to: (...args: unknown[]) => unknown; getChildren: () => unknown[] };
+        };
+        requestAnimationFrame: typeof requestAnimationFrame;
+        setTimeout: typeof setTimeout;
+      };
+      document: Record<string, never>;
+      CustomEvent: typeof CustomEvent;
+    } = {
+      window: {
+        requestAnimationFrame: (() => 1) as typeof requestAnimationFrame,
+        setTimeout: ((callback: () => void) => {
+          callback();
+          return 1;
+        }) as typeof setTimeout,
+      },
+      document: {},
+      CustomEvent,
+    };
+    sandbox.window.window = sandbox.window;
+    sandbox.window.document = sandbox.document;
+    sandbox.window.CustomEvent = sandbox.CustomEvent;
+
+    new Function("window", "document", "CustomEvent", `with (window) {\n${HF_EARLY_STUB}\n}`)(
+      sandbox.window,
+      sandbox.document,
+      sandbox.CustomEvent,
+    );
+
+    const constructionCalls: unknown[][] = [];
+    const child = { id: "child" };
+    sandbox.window.gsap = {
+      timeline: () => ({
+        to: (...args: unknown[]) => {
+          constructionCalls.push(args);
+        },
+        from: () => {},
+        fromTo: () => {},
+        set: () => {},
+        pause: () => {},
+        play: () => {},
+        seek: () => {},
+        totalTime: () => 0,
+        time: () => 0,
+        duration: () => 10,
+        add: () => {},
+        getChildren: () => [child],
+        paused: () => true,
+        timeScale: () => 1,
+        kill: () => {},
+      }),
+    };
+
+    const timeline = sandbox.window.gsap.timeline();
+    timeline.to("#box", { x: 100 });
+
+    expect(constructionCalls).toHaveLength(0);
+    expect(timeline.getChildren()).toEqual([child]);
+    expect(constructionCalls).toHaveLength(1);
+    expect(sandbox.window.__hfTimelinesBuilding).toBe(false);
+  });
+
+  it("keeps bridge duration at zero until the runtime publishes render readiness", () => {
+    const sandbox: {
+      window: Record<string, unknown> & {
+        __hf?: { seek?: (t: number) => void; duration?: number };
+        __player?: { renderSeek: (t: number) => void; getDuration: () => number };
+        __renderReady?: boolean;
+        __hfTimelinesBuilding?: boolean;
+        setInterval: typeof setInterval;
+        clearInterval: typeof clearInterval;
+      };
+      document: { querySelector: () => { getAttribute: (name: string) => string | null } };
+    } = {
+      window: {
+        setInterval: globalThis.setInterval,
+        clearInterval: globalThis.clearInterval,
+      },
+      document: {
+        querySelector: () => ({
+          getAttribute: (name: string) => (name === "data-duration" ? "15" : null),
+        }),
+      },
+    };
+    sandbox.window.window = sandbox.window;
+    sandbox.window.document = sandbox.document;
+    sandbox.window.__player = {
+      renderSeek: () => {},
+      getDuration: () => 0,
+    };
+
+    new Function("window", "document", `with (window) {\n${HF_BRIDGE_SCRIPT}\n}`)(
+      sandbox.window,
+      sandbox.document,
+    );
+
+    expect(sandbox.window.__hf?.duration).toBe(0);
+
+    sandbox.window.__renderReady = true;
+    expect(sandbox.window.__hf?.duration).toBe(15);
+
+    sandbox.window.__hfTimelinesBuilding = true;
+    expect(sandbox.window.__hf?.duration).toBe(0);
   });
 });

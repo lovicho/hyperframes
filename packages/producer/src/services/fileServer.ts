@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication complexity
 /**
  * File Server for Render Mode
  *
@@ -14,6 +15,7 @@ import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { join, extname, resolve, sep } from "node:path";
 import { injectScriptsAtHeadStart, injectScriptsIntoHtml } from "@hyperframes/core/compiler";
 import { getVerifiedHyperframeRuntimeSource } from "./hyperframeRuntimeLoader.js";
+import { getHfEarlyStub } from "../generated/hf-early-stub-inline.js";
 
 export { injectScriptsAtHeadStart };
 
@@ -401,7 +403,6 @@ const RENDER_MODE_SCRIPT = `(function() {
     if (hasComposition) {
       if (window.__player && typeof window.__player.renderSeek === "function") {
         window.__playerReady = true;
-        window.__renderReady = true;
         return;
       }
       __realSetTimeout(waitForPlayer, 50);
@@ -417,18 +418,15 @@ const RENDER_MODE_SCRIPT = `(function() {
 
 /**
  * Early stub: ensures `window.__hf` exists *before* any user `<script>` in
- * `<body>` executes. Without this, libraries that opportunistically write to
- * `__hf` during page-script execution (notably `@hyperframes/shader-transitions`,
- * which writes the active transition map to `__hf.transitions` inside its
- * `init()` call) silently no-op because `__hf` hasn't been created yet — the
- * full bridge script is injected at end-of-body and runs *after* user scripts.
+ * `<body>` executes, and batches GSAP timeline construction via
+ * requestAnimationFrame to prevent the main-thread hang described in
+ * https://github.com/heygen-com/hyperframes/issues/1231.
  *
+ * Source: packages/producer/stubs/hf-early-stub.ts
+ * Generated: packages/producer/src/generated/hf-early-stub-inline.ts
  * Injected at the very start of `<head>` so it runs before all other scripts.
  */
-const HF_EARLY_STUB = `(function() {
-  if (typeof window === "undefined") return;
-  if (!window.__hf) window.__hf = {};
-})();`;
+const HF_EARLY_STUB = getHfEarlyStub();
 
 /**
  * Page-side compositing opt-in flag stub.
@@ -511,6 +509,13 @@ const HF_BRIDGE_SCRIPT = `(function() {
       configurable: true,
       enumerable: true,
       get: function() {
+        // While the GSAP tween-batching interceptor (HF_EARLY_STUB) is draining
+        // queued tweens via rAF, the real timelines are still empty. Return 0
+        // here so pollHfReady in the engine keeps waiting (its condition is
+        // __hf.duration > 0), preventing the capture pipeline from seeking
+        // empty timelines and producing blank/incorrect frames.
+        if (window.__hfTimelinesBuilding) return 0;
+        if (!window.__renderReady) return 0;
         var d = p.getDuration();
         return d > 0 ? d : getDeclaredDuration();
       },
