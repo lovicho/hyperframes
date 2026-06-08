@@ -66,6 +66,9 @@ tmp/
 packages/core/src/generated/
 packages/producer/src/services/fontData.generated.ts
 
+# Plan documents (working artifacts, not committed)
+docs/plans/
+
 # Local proof / test artifacts
 qa-artifacts/
 my-video/
@@ -75,6 +78,10 @@ examples/*
 !examples/aws-lambda/**
 !examples/k8s-jobs
 !examples/k8s-jobs/**
+!examples/gcp-cloud-run
+!examples/gcp-cloud-run/**
+# …but never the local smoke run's build/render artifacts.
+examples/gcp-cloud-run/scripts/gcp-smoke-artifacts/
 packages/studio/data/
 
 .desloppify/

@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/cli",
-  "version": "0.6.80",
+  "version": "0.6.81",
   "description": "HyperFrames CLI — create, preview, and render HTML video compositions",
   "repository": {
     "type": "git",
@@ -46,6 +46,7 @@
     "@hyperframes/aws-lambda": "workspace:*",
     "@hyperframes/core": "workspace:*",
     "@hyperframes/engine": "workspace:*",
+    "@hyperframes/gcp-cloud-run": "workspace:*",
     "@hyperframes/producer": "workspace:*",
     "@hyperframes/studio": "workspace:*",
     "@types/adm-zip": "^0.5.7",

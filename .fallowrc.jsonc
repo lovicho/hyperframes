@@ -3,6 +3,7 @@
   "entry": [
     "packages/producer/src/**/*.test.ts",
     "packages/aws-lambda/src/**/*.test.ts",
+    "packages/gcp-cloud-run/src/**/*.test.ts",
     "packages/producer/src/regression-harness.ts",
     "packages/producer/src/regression-harness-distributed.test.ts",
     "packages/producer/src/regression-harness-lambda-local.ts",
@@ -38,6 +39,8 @@
     "packages/engine/tests/**",
     "skills/**/test-corpus/**",
     "skills/**/scripts/**",
+    // Golden snapshot files: data consumed by toMatchFileSnapshot, not importable modules.
+    "packages/**/__goldens__/**",
     "registry/**",
     "examples/**",
     ".github/workflows/fixtures/**",
