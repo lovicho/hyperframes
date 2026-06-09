@@ -9,7 +9,7 @@ import { createThreeAdapter } from "./adapters/three";
 import { createTypegpuAdapter } from "./adapters/typegpu";
 import { patchVideoTextureCompat } from "./adapters/video-texture-compat";
 import { createWaapiAdapter } from "./adapters/waapi";
-import { refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
+import { readElementPlaybackRate, refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
 import { probeAndCacheElementVolume, type VolumeKeyframe } from "./mediaVolumeEnvelope.js";
 import { createPickerModule } from "./picker";
 import { createRuntimePlayer } from "./player";
@@ -1356,6 +1356,7 @@ export function initSandboxRuntimeModular(): void {
         const mediaStart =
           Number.parseFloat(element.dataset.playbackStart ?? element.dataset.mediaStart ?? "0") ||
           0;
+        const playbackRate = readElementPlaybackRate(element);
         const hostRemaining =
           context.inheritedStart != null &&
           context.inheritedDuration != null &&
@@ -1364,7 +1365,7 @@ export function initSandboxRuntimeModular(): void {
             : null;
         const sourceDuration =
           Number.isFinite(element.duration) && element.duration > mediaStart
-            ? Math.max(0, element.duration - mediaStart)
+            ? Math.max(0, (element.duration - mediaStart) / playbackRate)
             : null;
         if (sourceDuration != null && hostRemaining != null) {
           return Math.min(sourceDuration, hostRemaining);
@@ -1757,27 +1758,28 @@ export function initSandboxRuntimeModular(): void {
     postState(true);
   };
 
+  let buildListenerPending = false;
+
   maybePublishRenderReady = () => {
-    if (!externalCompositionsReady || window.__hfTimelinesBuilding) {
+    if (!externalCompositionsReady) {
       window.__renderReady = false;
+      return;
+    }
+    if (window.__hfTimelinesBuilding) {
+      window.__renderReady = false;
+      if (!buildListenerPending) {
+        buildListenerPending = true;
+        const onBuilt = () => {
+          buildListenerPending = false;
+          maybePublishRenderReady();
+        };
+        window.addEventListener("hf-timelines-built", onBuilt, { once: true });
+      }
       return;
     }
     publishRenderReadyAfterTimelineBinding();
   };
 
-  // When the GSAP tween-batching interceptor (HF_EARLY_STUB, fileServer.ts) is
-  // active, composition scripts queue tl.to() calls instead of executing them
-  // synchronously. Wait for the "hf-timelines-built" event before the first
-  // binding attempt so the transport clock receives the finished timeline
-  // duration instead of permanently publishing duration=0.
-  if (window.__hfTimelinesBuilding) {
-    window.__renderReady = false;
-    const onTimelinesBuilt = () => {
-      window.removeEventListener("hf-timelines-built", onTimelinesBuilt);
-      maybePublishRenderReady();
-    };
-    window.addEventListener("hf-timelines-built", onTimelinesBuilt);
-  }
   maybePublishRenderReady();
 
   // When the bundler inlines compositions, data-composition-src is removed so

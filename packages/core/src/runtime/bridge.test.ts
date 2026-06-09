@@ -168,4 +168,14 @@ describe("installRuntimeControlBridge", () => {
       handler(makeControlMessage("flash-elements", { selectors: [".test"], duration: 500 })),
     ).not.toThrow();
   });
+
+  it("posts a ready message to window.parent on install", () => {
+    // The bridge announces itself so the parent can replay any control
+    // messages it posted before the iframe runtime's listener was installed.
+    const postSpy = vi.spyOn(window.parent, "postMessage");
+    const deps = createMockDeps();
+    installRuntimeControlBridge(deps);
+    expect(postSpy).toHaveBeenCalledWith({ source: "hf-preview", type: "ready" }, "*");
+    postSpy.mockRestore();
+  });
 });

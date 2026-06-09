@@ -83,6 +83,14 @@ When a composition uses `@hyperframes/shader-transitions`, the player can own pr
 
 `shader-loading="player"` shows the player-owned transition-prep overlay from shader progress messages. `composition` leaves direct composition fallback behavior alone, and `none` suppresses the loader.
 
+### Audio lock (host-mandated silent playback)
+
+`audio-locked` forces `muted` on and hides the volume controls, with no UI path for the viewer to turn sound back on. Use it when embedding in a chat host (Claude.ai, ChatGPT, etc.) where audio must stay off regardless of viewer intent. Setting `muted` directly is _not_ enough — viewers can flip it back via the controls bar.
+
+Removing `audio-locked` only unhides the controls; it does **not** auto-unmute. Callers manage `muted` explicitly after unlocking.
+
+**Host-environment fallback.** Some host renderers — notably the Claude desktop Electron client — strip unknown custom-element attributes before they reach the DOM, defeating the attribute. As a safety net, the player also self-imposes the lock when it detects such an environment via `navigator.userAgent`, so audio stays muted even if the attribute never arrives. The public `audioLocked` property still reflects only the attribute, so external consumers (e.g. host widgets that mirror state) are not affected by the fallback.
+
 ### Mobile audio
 
 Mobile browsers block `audio.play()` inside iframes when the user gesture happened in the parent frame (the [User Activation spec](https://html.spec.whatwg.org/multipage/interaction.html#tracking-user-activation) does not propagate activation across frame boundaries via `postMessage`).

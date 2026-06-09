@@ -154,6 +154,20 @@ export type RuntimeMediaAutoplayBlockedMessage = {
 };
 
 /**
+ * Posted by the runtime when `installRuntimeControlBridge` finishes registering
+ * its message listener — signals that subsequent control messages
+ * (`set-muted`, `set-volume`, `set-playback-rate`, etc.) will now be received
+ * and processed. The parent (web component / host app) listens for this and
+ * replays current playback state to repair any race where bridge messages
+ * were posted before the listener was installed. Emitted again on every iframe
+ * reload because the new runtime instance starts with no state.
+ */
+export type RuntimeReadyMessage = {
+  source: "hf-preview";
+  type: "ready";
+};
+
+/**
  * Analytics events emitted by the runtime.
  *
  * The host app receives these via postMessage and forwards to its analytics
@@ -199,6 +213,7 @@ export type RuntimeOutboundMessage =
   | RuntimePickerCancelledMessage
   | RuntimeStageSizeMessage
   | RuntimeMediaAutoplayBlockedMessage
+  | RuntimeReadyMessage
   | RuntimeAnalyticsMessage
   | RuntimePerformanceMessage;
 

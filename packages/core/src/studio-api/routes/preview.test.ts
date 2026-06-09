@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -326,5 +327,67 @@ describe("registerPreviewRoutes", () => {
     const signature = await getPreviewSignature(projectDir);
 
     expect(signature).toMatch(/^[a-f0-9]{24}$/);
+  });
+});
+
+describe("hf-id surfacing in preview route", () => {
+  it("serves HTML with data-hf-id on body elements (R7 write-back)", async () => {
+    const projectDir = createProjectDir();
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!doctype html><html><head></head><body><div class="card"><p>text</p></div></body></html>`,
+    );
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    const res = await app.request("http://localhost/projects/demo/preview");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const ids = html.match(/data-hf-id="hf-[a-z0-9]{4}"/g);
+    // div and p both tagged
+    expect(ids?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("writes data-hf-id back to disk on first serve", async () => {
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const indexPath = join(projectDir, "index.html");
+    writeFileSync(
+      indexPath,
+      `<!doctype html><html><head></head><body><div>hello</div></body></html>`,
+    );
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    await app.request("http://localhost/projects/demo/preview");
+    const onDisk = readFileSync(indexPath, "utf-8");
+    expect(onDisk).toContain('data-hf-id="hf-');
+  });
+
+  it("bundle returning untagged HTML gets same ids as disk — content-hash is stable across mint contexts", async () => {
+    // Regression guard for bundle-vs-disk id divergence: if the bundler reads from
+    // a pre-write cache snapshot (no ids), ensureHfIds mints ids on the bundle output.
+    // Because ids are content-keyed (FNV1a of element content), the minted ids must
+    // equal the ids persisted to disk for the same source HTML — otherwise a
+    // drag-to-edit patch keyed by a wire-time id would fail to apply on disk.
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const indexPath = join(projectDir, "index.html");
+    const sourceHtml = `<!doctype html><html><head></head><body><div class="card"><p>hello</p></div></body></html>`;
+    writeFileSync(indexPath, sourceHtml);
+
+    const app = new Hono();
+    // Bundler returns the same untagged source HTML (simulates stale cache read)
+    registerPreviewRoutes(app, createAdapter(projectDir, { bundle: async () => sourceHtml }));
+    const res = await app.request("http://localhost/projects/demo/preview");
+    expect(res.status).toBe(200);
+
+    const servedHtml = await res.text();
+    const diskHtml = readFileSync(indexPath, "utf-8");
+
+    // Extract ids from served HTML and disk HTML
+    const servedIds = [...servedHtml.matchAll(/data-hf-id="(hf-[a-z0-9]+)"/g)].map((m) => m[1]);
+    const diskIds = [...diskHtml.matchAll(/data-hf-id="(hf-[a-z0-9]+)"/g)].map((m) => m[1]);
+
+    expect(servedIds.length).toBeGreaterThanOrEqual(2);
+    expect(servedIds).toEqual(diskIds);
   });
 });

@@ -11,6 +11,8 @@ import {
   createStudioMotionRenderBodyScript,
   STUDIO_MOTION_PATH,
 } from "../helpers/studioMotionRenderScript.js";
+import { ensureHfIds } from "../../parsers/hfIds.js";
+import { persistHfIdsIfNeeded } from "../helpers/hfIdPersist.js";
 
 const PROJECT_SIGNATURE_META = "hyperframes-project-signature";
 const GSAP_CDN_VERSION = "3.15.0";
@@ -194,6 +196,7 @@ export function registerPreviewRoutes(api: Hono, adapter: StudioApiAdapter): voi
   });
 
   // Bundled composition preview
+  // fallow-ignore-next-line complexity
   api.get("/projects/:id/preview", async (c) => {
     const project = await adapter.resolveProject(c.req.param("id"));
     if (!project) return c.json({ error: "not found" }, 404);
@@ -205,14 +208,19 @@ export function registerPreviewRoutes(api: Hono, adapter: StudioApiAdapter): voi
       return new Response(null, { status: 304, headers: previewCacheHeaders(etag) });
     }
 
+    // Normalize + persist data-hf-id to disk before bundle reads it. Idempotent.
+    const diskMain = resolveProjectMainHtml(project.dir, project.id);
+    const normalizedDisk = diskMain
+      ? persistHfIdsIfNeeded(join(project.dir, diskMain.compositionPath), diskMain.html)
+      : null;
+
     try {
       let bundled = await adapter.bundle(project.dir);
       let mainCompositionPath = "index.html";
       if (!bundled) {
-        const main = resolveProjectMainHtml(project.dir, project.id);
-        if (!main) return c.text("not found", 404);
-        bundled = main.html;
-        mainCompositionPath = main.compositionPath;
+        if (!diskMain) return c.text("not found", 404);
+        bundled = normalizedDisk ?? diskMain.html;
+        mainCompositionPath = diskMain.compositionPath;
       }
 
       // Inject runtime if not already present (check URL pattern and bundler attribute)
@@ -232,22 +240,33 @@ export function registerPreviewRoutes(api: Hono, adapter: StudioApiAdapter): voi
         bundled = bundled.replace(/<head>/i, `<head><base href="${baseHref}">`);
       }
 
+      // ensureHfIds runs after transformPreviewHtml in case the adapter injected
+      // new elements. On the no-bundle path bundled=normalizedDisk (already tagged)
+      // so this is idempotent. On the bundled path the bundler may return untagged
+      // HTML (stale cache); because ids are content-keyed the minted ids will match
+      // the ids already written to disk by persistHfIdsIfNeeded above.
       bundled = injectStudioPreviewAugmentations(
-        await transformPreviewHtml(bundled, adapter, project, mainCompositionPath),
+        ensureHfIds(await transformPreviewHtml(bundled, adapter, project, mainCompositionPath)),
         adapter,
         project.dir,
         mainCompositionPath,
       );
       return c.html(bundled, 200, previewCacheHeaders(etag));
     } catch {
-      const main = resolveProjectMainHtml(project.dir, project.id);
-      if (main) {
+      // Re-read disk on bundle failure so we serve the latest file content,
+      // not the pre-request snapshot that may have been saved over.
+      const fallback = resolveProjectMainHtml(project.dir, project.id);
+      if (fallback) {
+        const fallbackHtml = persistHfIdsIfNeeded(
+          join(project.dir, fallback.compositionPath),
+          fallback.html,
+        );
         return c.html(
           injectStudioPreviewAugmentations(
-            await transformPreviewHtml(main.html, adapter, project, main.compositionPath),
+            await transformPreviewHtml(fallbackHtml, adapter, project, fallback.compositionPath),
             adapter,
             project.dir,
-            main.compositionPath,
+            fallback.compositionPath,
           ),
           200,
           previewCacheHeaders(etag),
@@ -284,7 +303,7 @@ export function registerPreviewRoutes(api: Hono, adapter: StudioApiAdapter): voi
     const baseHref = `/api/projects/${project.id}/preview/`;
     let html = buildSubCompositionHtml(project.dir, compPath, adapter.runtimeUrl, baseHref);
     if (!html) return c.text("not found", 404);
-    html = await transformPreviewHtml(html, adapter, project, compPath);
+    html = ensureHfIds(await transformPreviewHtml(html, adapter, project, compPath));
     return c.html(
       injectStudioPreviewAugmentations(html, adapter, project.dir, compPath),
       200,
@@ -293,6 +312,7 @@ export function registerPreviewRoutes(api: Hono, adapter: StudioApiAdapter): voi
   });
 
   // Static asset serving (with range request support for audio/video seeking)
+  // fallow-ignore-next-line complexity
   api.get("/projects/:id/preview/*", async (c) => {
     const project = await adapter.resolveProject(c.req.param("id"));
     if (!project) return c.json({ error: "not found" }, 404);

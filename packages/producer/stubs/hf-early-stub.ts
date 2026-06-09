@@ -38,11 +38,12 @@
  * completes (the captured timeline reference remains valid — the proxy delegates
  * all non-mutating calls to the real timeline throughout).
  *
- * Render-mode correctness: `window.__renderReady` is intentionally not gated
- * here because the bridge script's `window.__hf.duration` getter already waits
- * for `window.__player.getDuration() > 0`, which only becomes true after
- * `bindRootTimelineIfAvailable()` completes in `init.ts`, which happens after
- * the `"hf-timelines-built"` listener fires. No separate gate is needed.
+ * Render-mode correctness: `init.ts` gates `__renderReady` on
+ * `__hfTimelinesBuilding` via `maybePublishRenderReady()`. When batching
+ * starts after init (setTimeout-deferred timelines), `maybePublishRenderReady`
+ * re-registers a `hf-timelines-built` listener to retry once the batch
+ * completes. The bridge's `__hf.duration` getter returns 0 until
+ * `__renderReady` is true, keeping `pollHfReady` waiting.
  *
  * Batch size: ~100 tweens per rAF budget. Each batch completes in <4 ms on a
  * 2023 laptop at the 8 562-tween scale; 16 ms rAF budgets are never exhausted.
@@ -243,10 +244,53 @@ function scheduleBatch(): void {
 // ─── Timeline proxy factory ───────────────────────────────────────────────────
 
 /**
+ * Methods queued for rAF-based batch flush (mutating tween additions).
+ * These return the proxy for chaining and never synchronously flush.
+ */
+const BATCHED_METHODS = new Set(["to", "from", "fromTo", "set", "add"]);
+
+/**
+ * Walk the real timeline's prototype chain and generate forwarding stubs on
+ * `proxy` for every public method not already present. Each stub flushes
+ * pending operations, calls the real method, and returns `proxy` when the
+ * real method returns `this` (for chaining). Private GSAP internals (keys
+ * starting with `_`) and `then` are skipped — `then` makes GSAP timelines
+ * thenable, which would cause `Promise.resolve(proxy)` / `await proxy` to
+ * hang for paused timelines.
+ */
+// fallow-ignore-next-line complexity
+function forwardRemainingMethods(proxy: TimelineProxy, real: GsapTimeline): void {
+  let obj: object | null = real as object;
+  while (obj !== null && obj !== Object.prototype) {
+    for (const key of Object.getOwnPropertyNames(obj)) {
+      if (key === "constructor" || key === "then" || key in proxy || BATCHED_METHODS.has(key))
+        continue;
+      if (key.charAt(0) === "_") continue;
+      const desc = Object.getOwnPropertyDescriptor(obj, key);
+      if (!desc || typeof desc.value !== "function") continue;
+      const fn = desc.value as (...a: unknown[]) => unknown;
+      (proxy as Record<string, unknown>)[key] = function (
+        this: unknown,
+        ...args: unknown[]
+      ): unknown {
+        flushPendingOperations();
+        const result = fn.call(real, ...args);
+        return result === real ? proxy : result;
+      };
+    }
+    obj = Object.getPrototypeOf(obj);
+  }
+}
+
+/**
  * Create a queuing proxy around a real GSAP timeline.
  *
- * All methods return `proxy` so that callers who chain off the returned value
- * continue to go through the proxy for the duration of the batching phase.
+ * Batched methods (to/from/fromTo/set/add) queue operations for rAF flush.
+ * All other methods on the real timeline are forwarded via dynamically
+ * generated stubs that flush pending operations before delegating. This
+ * uses a plain object — not `new Proxy` — because Chrome's headless shell
+ * hangs when Proxy traps are exposed during page.goto navigation (Symbol
+ * probing, thenable checks, DevTools serialization).
  */
 function wrapTimeline(real: GsapTimeline): TimelineProxy {
   const proxy: TimelineProxy = {
@@ -335,6 +379,8 @@ function wrapTimeline(real: GsapTimeline): TimelineProxy {
       real.kill();
     },
   };
+
+  forwardRemainingMethods(proxy, real);
 
   activeProxies.push(proxy);
   return proxy;

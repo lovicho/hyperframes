@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
+import { readElementPlaybackRate, refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
 import type { RuntimeMediaClip } from "./media";
 
 function createVideo(attrs: Record<string, string>): HTMLVideoElement {
@@ -22,6 +22,37 @@ function createAudio(attrs: Record<string, string>): HTMLAudioElement {
   document.body.appendChild(el);
   return el;
 }
+
+describe("readElementPlaybackRate", () => {
+  it("reads defaultPlaybackRate from element", () => {
+    const el = document.createElement("video");
+    Object.defineProperty(el, "defaultPlaybackRate", { value: 0.5, writable: true });
+    expect(readElementPlaybackRate(el)).toBe(0.5);
+  });
+
+  it("defaults to 1 when not set", () => {
+    const el = document.createElement("video");
+    expect(readElementPlaybackRate(el)).toBe(1);
+  });
+
+  it("clamps to [0.1, 5]", () => {
+    const el = document.createElement("video");
+    Object.defineProperty(el, "defaultPlaybackRate", { value: 0.01, writable: true });
+    expect(readElementPlaybackRate(el)).toBe(0.1);
+    Object.defineProperty(el, "defaultPlaybackRate", { value: 10, writable: true });
+    expect(readElementPlaybackRate(el)).toBe(5);
+  });
+
+  it("defaults to 1 for NaN/negative/zero", () => {
+    const el = document.createElement("video");
+    Object.defineProperty(el, "defaultPlaybackRate", { value: NaN, writable: true });
+    expect(readElementPlaybackRate(el)).toBe(1);
+    Object.defineProperty(el, "defaultPlaybackRate", { value: -1, writable: true });
+    expect(readElementPlaybackRate(el)).toBe(1);
+    Object.defineProperty(el, "defaultPlaybackRate", { value: 0, writable: true });
+    expect(readElementPlaybackRate(el)).toBe(1);
+  });
+});
 
 describe("refreshRuntimeMediaCache", () => {
   afterEach(() => {
@@ -129,6 +160,26 @@ describe("refreshRuntimeMediaCache", () => {
     const result = refreshRuntimeMediaCache();
     // 10s source at 0.5x = 20s on timeline
     expect(result.mediaClips[0].duration).toBe(20);
+  });
+
+  it("resolveDurationSeconds must account for playbackRate (regression: clip clipped early)", () => {
+    const el = createVideo({ "data-start": "0", "data-duration": "10" });
+    Object.defineProperty(el, "defaultPlaybackRate", { value: 0.5, writable: true });
+    Object.defineProperty(el, "duration", { value: 5, writable: true });
+    const result = refreshRuntimeMediaCache({
+      resolveDurationSeconds: (element) => {
+        const mediaStart =
+          Number.parseFloat(element.dataset.playbackStart ?? element.dataset.mediaStart ?? "0") ||
+          0;
+        const playbackRate = readElementPlaybackRate(element);
+        return Number.isFinite(element.duration) && element.duration > mediaStart
+          ? Math.max(0, (element.duration - mediaStart) / playbackRate)
+          : null;
+      },
+    });
+    // 5s source at 0.5x = 10s effective; should NOT be capped to 5s
+    expect(result.mediaClips[0].duration).toBe(10);
+    expect(result.mediaClips[0].end).toBe(10);
   });
 
   it("reads native loop attribute", () => {

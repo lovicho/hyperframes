@@ -23,6 +23,10 @@ export interface MessageHandlerCallbacks extends PlaybackStateCallbacks {
   setCompositionSize: (width: number, height: number) => void;
   sendControl: (action: string, extra?: Record<string, unknown>) => void;
   getIframeDoc: () => Document | null;
+  /** Invoked when the iframe runtime posts `{type: "ready"}` — the player
+   *  uses it to replay current bridge state (mute, volume, playback rate) so
+   *  control messages sent before the iframe's listener registered aren't lost. */
+  onRuntimeReady: () => void;
 }
 
 export function handleRuntimeMessage(
@@ -45,6 +49,11 @@ export function handleRuntimeMessage(
         detail: { compositionId: data["compositionId"], state },
       }),
     );
+    return;
+  }
+
+  if (data["type"] === "ready") {
+    callbacks.onRuntimeReady();
     return;
   }
 

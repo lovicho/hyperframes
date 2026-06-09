@@ -143,6 +143,13 @@ class HyperframesPlayer extends HTMLElement {
       this.iframe.srcdoc = prepareSrcdocForElement(this, this.getAttribute("srcdoc")!);
     if (this.hasAttribute("src"))
       this.iframe.src = prepareSrcForElement(this, this.getAttribute("src")!);
+
+    // Host-environment audio lock: when the embedding host (e.g. Claude
+    // desktop) drops the `audio-locked` attribute, attributeChangedCallback
+    // never fires for it, so apply the lock here based on UA detection.
+    if (!this.hasAttribute("audio-locked") && this._isLockedHostEnvironment()) {
+      this._applyAudioLock(true);
+    }
   }
 
   disconnectedCallback() {
@@ -349,13 +356,32 @@ class HyperframesPlayer extends HTMLElement {
     else this.removeAttribute("audio-locked");
   }
 
+  /**
+   * Host renderers that strip unknown custom-element attributes before they
+   * reach the DOM (observed on the Claude desktop Electron client) can defeat
+   * `audio-locked` even when the host *intends* to lock audio. When we detect
+   * such an environment, self-impose the same restriction the attribute would
+   * apply. Web (browser) hosts preserve the attribute and don't need this.
+   */
+  private _isLockedHostEnvironment(): boolean {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    // Claude desktop ships as an Electron app with a "Claude/<version>" UA token.
+    return /\bClaude\/\d/.test(ua) && /\bElectron\b/.test(ua);
+  }
+
+  /** True when audio playback must be locked: attribute OR host fallback. */
+  private _isAudioLocked(): boolean {
+    return this.hasAttribute("audio-locked") || this._isLockedHostEnvironment();
+  }
+
   /** Apply a change to the `muted` attribute: re-assert under an audio lock,
    *  else mute/unmute the media, sync the controls, and fire `volumechange`. */
   private _handleMutedChange(val: string | null): void {
     // While audio is locked, ignore any attempt to clear `muted` (host control,
     // stray script, raw `removeAttribute`) and re-assert it. The re-set fires
     // this callback again with val="" (not null) so it mutes normally — no loop.
-    if (val === null && this.hasAttribute("audio-locked")) {
+    if (val === null && this._isAudioLocked()) {
       this.setAttribute("muted", "");
       return;
     }
@@ -400,6 +426,21 @@ class HyperframesPlayer extends HTMLElement {
     } catch {
       /* cross-origin */
     }
+  }
+
+  /**
+   * Replay current bridge state to the iframe runtime. Triggered when the
+   * runtime announces `{type: "ready"}` — repairs the race where the parent
+   * posts control messages before the iframe's bridge listener is installed
+   * (warm-cache reloads, the Claude desktop Electron client, anywhere the
+   * iframe finishes loading after we've already called `set-muted` etc).
+   * Re-sending current state is idempotent — even at default values it just
+   * confirms what the runtime would have done anyway.
+   */
+  private _replayBridgeState(): void {
+    this._sendControl("set-muted", { muted: this.muted });
+    this._sendControl("set-volume", { volume: this._volume });
+    this._sendControl("set-playback-rate", { playbackRate: this.playbackRate });
   }
 
   private _reloadShaderOptions(): void {
@@ -503,6 +544,7 @@ class HyperframesPlayer extends HTMLElement {
       },
       sendControl: (action, extra) => this._sendControl(action, extra),
       getIframeDoc: () => this.iframe.contentDocument,
+      onRuntimeReady: () => this._replayBridgeState(),
       updateControlsTime: (t, d) => this.controlsApi?.updateTime(t, d),
       updateControlsPlaying: (p) => this.controlsApi?.updatePlaying(p),
       dispatchEvent: (ev) => this.dispatchEvent(ev),
@@ -561,7 +603,7 @@ class HyperframesPlayer extends HTMLElement {
         onMuteToggle: () => void (this.muted = !this.muted),
         onVolumeChange: (v) => void (this.volume = v),
       },
-      this.audioLocked,
+      this._isAudioLocked(),
     );
   }
 

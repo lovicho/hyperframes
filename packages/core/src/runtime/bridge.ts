@@ -79,6 +79,12 @@ export function installRuntimeControlBridge(deps: BridgeDeps): (event: MessageEv
     }
   };
   window.addEventListener("message", handler);
+  // Announce that the bridge listener is installed so the parent can replay
+  // any control messages it posted before the iframe runtime was ready
+  // (avoids losing the initial `set-muted` / `set-volume` / `set-playback-rate`
+  // when the parent finishes loading before the iframe does — a deterministic
+  // race on warm-cache reloads and inside the Claude desktop Electron client).
+  postRuntimeMessage({ source: "hf-preview", type: "ready" });
   return handler;
 }
 

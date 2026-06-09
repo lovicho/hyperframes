@@ -41,6 +41,7 @@ type ReleaseOptions = {
   version: string;
   skipTag: boolean;
   skipChangelogCheck: boolean;
+  skipMonotonicityCheck: boolean;
 };
 
 function main() {
@@ -61,7 +62,7 @@ function main() {
     return;
   }
 
-  createReleaseCommitAndTag(options.version);
+  createReleaseCommitAndTag(options.version, options.skipMonotonicityCheck);
   printReleaseNextSteps(options.version);
 }
 
@@ -69,9 +70,12 @@ export function parseReleaseOptions(args: string[]): ReleaseOptions {
   const version = args.find((a) => !a.startsWith("--"));
   const skipTag = args.includes("--no-tag");
   const skipChangelogCheck = args.includes("--skip-changelog-check");
+  const skipMonotonicityCheck = args.includes("--skip-monotonicity-check");
 
   if (!version) {
-    console.error("Usage: bun run set-version <version> [--no-tag] [--skip-changelog-check]");
+    console.error(
+      "Usage: bun run set-version <version> [--no-tag] [--skip-changelog-check] [--skip-monotonicity-check]",
+    );
     console.error("Example: bun run set-version 0.1.1");
     process.exit(1);
   }
@@ -81,7 +85,7 @@ export function parseReleaseOptions(args: string[]): ReleaseOptions {
     process.exit(1);
   }
 
-  return { version, skipTag, skipChangelogCheck };
+  return { version, skipTag, skipChangelogCheck, skipMonotonicityCheck };
 }
 
 function updatePackageVersions(version: string) {
@@ -109,7 +113,11 @@ function updatePluginVersions(version: string) {
   }
 }
 
-function createReleaseCommitAndTag(version: string) {
+function createReleaseCommitAndTag(version: string, skipMonotonicityCheck: boolean = false) {
+  if (!skipMonotonicityCheck) {
+    assertTagMonotonicity(version);
+  }
+
   const allowedPaths = releaseAllowedPaths(version);
   assertNoUnexpectedChanges(collectChangedPaths(), allowedPaths);
 
@@ -123,6 +131,50 @@ function createReleaseCommitAndTag(version: string) {
   });
   execFileSync("git", ["tag", `v${version}`], { cwd: ROOT, stdio: "inherit" });
   console.log(`\nCreated commit and tag v${version}`);
+}
+
+export function compareSemver(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  }
+  return 0;
+}
+
+function assertTagMonotonicity(version: string) {
+  if (isPrerelease(version)) return;
+
+  let tags: string;
+  try {
+    tags = execFileSync("git", ["tag", "--list", "v[0-9]*"], {
+      cwd: ROOT,
+      encoding: "utf-8",
+    });
+  } catch {
+    return;
+  }
+
+  const stableVersions = tags
+    .trim()
+    .split("\n")
+    .filter((t) => t && !t.includes("-"))
+    .map((t) => t.replace(/^v/, ""));
+
+  for (const existing of stableVersions) {
+    if (compareSemver(existing, version) > 0) {
+      console.error(`\nTag v${existing} already exists and is semver-higher than v${version}.`);
+      console.error(`Tag-sorting installers (npx skills, etc.) would resolve the wrong version.`);
+      console.error(`\nOptions:`);
+      console.error(
+        `  Delete the stale tag: git tag -d v${existing} && git push origin :refs/tags/v${existing}`,
+      );
+      console.error(
+        `  Skip this check:     bun run set-version ${version} --skip-monotonicity-check`,
+      );
+      process.exit(1);
+    }
+  }
 }
 
 export function releaseRequiresChangelog(options: ReleaseOptions) {
