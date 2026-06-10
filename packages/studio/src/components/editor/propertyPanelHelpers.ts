@@ -2,6 +2,7 @@ import { parseCssColor, type ParsedColor } from "./colorValue";
 import { COMMON_LOCAL_FONT_FAMILIES } from "./fontCatalog";
 import type { DomEditSelection } from "./domEditing";
 import type { ImportedFontAsset } from "./fontAssets";
+import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 
 export interface PropertyPanelProps {
   projectId: string;
@@ -41,6 +42,19 @@ export interface PropertyPanelProps {
   onAddGsapFromProperty?: (animId: string, prop: string) => void;
   onRemoveGsapFromProperty?: (animId: string, prop: string) => void;
   onAddGsapAnimation?: (method: "to" | "from" | "set" | "fromTo") => void;
+  onSetArcPath?: (
+    animId: string,
+    config: {
+      enabled: boolean;
+      autoRotate?: boolean | number;
+      segments?: import("@hyperframes/core/gsap-parser").ArcPathSegment[];
+    },
+  ) => void;
+  onUpdateArcSegment?: (
+    animId: string,
+    segmentIndex: number,
+    update: Partial<import("@hyperframes/core/gsap-parser").ArcPathSegment>,
+  ) => void;
   onAddKeyframe?: (
     animationId: string,
     percentage: number,
@@ -55,6 +69,9 @@ export interface PropertyPanelProps {
     value: number | string,
   ) => Promise<void>;
   onSeekToTime?: (time: number) => void;
+  recordingState?: "idle" | "recording" | "preview";
+  recordingDuration?: number;
+  onToggleRecording?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -184,8 +201,8 @@ function fontSourceRank(source: FontSource): number {
 /* ------------------------------------------------------------------ */
 
 export const FIELD =
-  "min-w-0 rounded-xl border border-neutral-800 bg-neutral-900/95 px-3 py-2 text-neutral-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors focus-within:border-neutral-600";
-export const LABEL = "text-[11px] font-medium uppercase tracking-[0.18em] text-neutral-500";
+  "min-w-0 rounded-md bg-panel-input px-3 py-[7px] text-panel-text-1 transition-colors focus-within:ring-1 focus-within:ring-panel-accent/30";
+export const LABEL = "text-[11px] font-medium text-panel-text-3";
 export const RESPONSIVE_GRID = "grid grid-cols-[repeat(auto-fit,minmax(118px,1fr))] gap-3";
 export const EMPTY_STYLES: Record<string, string> = {};
 
@@ -488,4 +505,79 @@ export function computeFitToChildrenSize(
   const width = Math.round((maxX - minX) * scaleX);
   const height = Math.round((maxY - minY) * scaleY);
   return width > 0 && height > 0 ? { width, height } : null;
+}
+
+// ── GSAP runtime value readers (used by PropertyPanel) ────────────────────
+
+export function readGsapRuntimeValuesForPanel(
+  gsapAnimId: string | null,
+  gsapAnimations: GsapAnimation[],
+  element: DomEditSelection,
+  previewIframeRef: React.RefObject<HTMLIFrameElement | null>,
+): Record<string, number> | null {
+  if (!gsapAnimId || gsapAnimations.length === 0) return null;
+  const iframe = previewIframeRef?.current;
+  if (!iframe?.contentWindow) return null;
+  const selector = element.id ? `#${element.id}` : element.selector;
+  if (!selector) return null;
+  try {
+    const gsap = (
+      iframe.contentWindow as unknown as {
+        gsap?: { getProperty: (el: Element, prop: string) => number | string };
+      }
+    ).gsap;
+    if (!gsap?.getProperty) return null;
+    const el = iframe.contentDocument?.querySelector(selector);
+    if (!el) return null;
+    const propKeys = new Set<string>();
+    for (const anim of gsapAnimations) {
+      if (anim.keyframes) {
+        for (const kf of anim.keyframes.keyframes) {
+          for (const p of Object.keys(kf.properties)) propKeys.add(p);
+        }
+      }
+      for (const p of Object.keys(anim.properties)) propKeys.add(p);
+    }
+    const result: Record<string, number> = {};
+    for (const prop of propKeys) {
+      const v = Number(gsap.getProperty(el, prop));
+      if (Number.isFinite(v)) result[prop] = Math.round(v * 100) / 100;
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readGsapBorderRadiusForPanel(
+  gsapRuntimeValues: Record<string, number> | null,
+  gsapAnimations: GsapAnimation[],
+  element: DomEditSelection,
+  previewIframeRef: React.RefObject<HTMLIFrameElement | null>,
+): { tl: number; tr: number; br: number; bl: number } | null {
+  if (!gsapRuntimeValues || !("borderRadius" in gsapRuntimeValues)) {
+    const hasBRProp = gsapAnimations.some(
+      (a) =>
+        "borderRadius" in a.properties ||
+        a.keyframes?.keyframes.some((kf) => "borderRadius" in kf.properties),
+    );
+    if (!hasBRProp) return null;
+  }
+  const iframe = previewIframeRef?.current;
+  const selector = element.id ? `#${element.id}` : element.selector;
+  if (!iframe?.contentDocument || !selector) return null;
+  try {
+    const el = iframe.contentDocument.querySelector(selector);
+    if (!el) return null;
+    const cs = iframe.contentWindow!.getComputedStyle(el);
+    const parse = (v: string) => Number.parseFloat(v) || 0;
+    return {
+      tl: parse(cs.borderTopLeftRadius),
+      tr: parse(cs.borderTopRightRadius),
+      br: parse(cs.borderBottomRightRadius),
+      bl: parse(cs.borderBottomLeftRadius),
+    };
+  } catch {
+    return null;
+  }
 }

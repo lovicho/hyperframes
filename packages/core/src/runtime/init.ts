@@ -9,7 +9,7 @@ import { createThreeAdapter } from "./adapters/three";
 import { createTypegpuAdapter } from "./adapters/typegpu";
 import { patchVideoTextureCompat } from "./adapters/video-texture-compat";
 import { createWaapiAdapter } from "./adapters/waapi";
-import { readElementPlaybackRate, refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
+import { refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
 import { probeAndCacheElementVolume, type VolumeKeyframe } from "./mediaVolumeEnvelope.js";
 import { createPickerModule } from "./picker";
 import { createRuntimePlayer } from "./player";
@@ -954,33 +954,13 @@ export function initSandboxRuntimeModular(): void {
         state.capturedTimeline.totalTime(seekTime, false);
       }
 
-      // Strip stale CSS offset artifacts from GSAP-targeted elements.
-      // These leak into the HTML when the CSS offset path fires for a
-      // GSAP-animated element (stale cache race). On reload, both the
-      // offset and GSAP transform stack, doubling the visual position.
-      const staleEls = document.querySelectorAll("[data-hf-studio-path-offset]");
-      if (staleEls.length > 0 && state.capturedTimeline.getChildren) {
-        const tweenTargets = new Set<Element>();
-        try {
-          for (const child of state.capturedTimeline.getChildren(true)) {
-            if (typeof child.targets === "function") {
-              for (const t of child.targets()) tweenTargets.add(t);
-            }
-          }
-        } catch {
-          /* timeline access guard */
-        }
-        for (const el of staleEls) {
-          if (!tweenTargets.has(el)) continue;
-          const htmlEl = el as HTMLElement;
-          htmlEl.removeAttribute("data-hf-studio-path-offset");
-          htmlEl.removeAttribute("data-hf-studio-original-translate");
-          htmlEl.removeAttribute("data-hf-studio-original-inline-translate");
-          htmlEl.style.removeProperty("--hf-studio-offset-x");
-          htmlEl.style.removeProperty("--hf-studio-offset-y");
-          htmlEl.style.removeProperty("translate");
-        }
-      }
+      // GSAP bakes the CSS `translate` into style.transform on seek.
+      // The Studio seek wrapper (installStudioManualEditSeekReapply) calls
+      // reapplyPositionEditsAfterSeek to un-bake it. Call the apply hook
+      // directly here as well, since the wrapper may not be installed yet
+      // during initial rebind (timing race on first load / soft reload).
+      const applyFn = (window as Record<string, unknown>).__hfStudioManualEditsApply;
+      if (typeof applyFn === "function") applyFn();
     }
     if (resolution.diagnostics) {
       postRuntimeMessage({
@@ -1000,6 +980,53 @@ export function initSandboxRuntimeModular(): void {
         mediaDurationFloorSeconds: resolution.mediaDurationFloorSeconds ?? null,
       },
     });
+    // Stamp data-start / data-duration on GSAP-targeted elements that lack
+    // them so the Studio timeline can discover individual animated elements.
+    // Only when embedded in an iframe (Studio preview) — production renders
+    // run as the top-level page and must not mutate element timing.
+    if (window.parent !== window) {
+      const rootComp = resolveRootCompositionElement();
+      const rootDuration = boundDuration > 0 ? boundDuration : 0;
+      const dur = String(rootDuration > 0 ? rootDuration : 1);
+      const seen = new Set<Element>();
+
+      // Stamp GSAP-targeted elements
+      if (state.capturedTimeline.getChildren) {
+        try {
+          for (const child of state.capturedTimeline.getChildren(true)) {
+            if (typeof child.targets !== "function") continue;
+            for (const target of child.targets()) {
+              if (!(target instanceof HTMLElement)) continue;
+              if (target === rootComp) continue;
+              if (target.hasAttribute("data-start")) continue;
+              if (seen.has(target)) continue;
+              seen.add(target);
+              target.setAttribute("data-start", "0");
+              target.setAttribute("data-duration", dur);
+            }
+          }
+        } catch {
+          /* timeline access guard */
+        }
+      }
+
+      // Stamp all ID'd children of the composition root so they appear
+      // in the timeline even without animations. Enables selecting and
+      // adding animations from the design panel on a blank canvas.
+      if (rootComp instanceof HTMLElement) {
+        for (const el of rootComp.querySelectorAll("[id]")) {
+          if (!(el instanceof HTMLElement)) continue;
+          if (el === rootComp) continue;
+          if (el.hasAttribute("data-start")) continue;
+          if (seen.has(el)) continue;
+          if (el.tagName === "SCRIPT" || el.tagName === "STYLE" || el.tagName === "LINK") continue;
+          seen.add(el);
+          el.setAttribute("data-start", "0");
+          el.setAttribute("data-duration", dur);
+        }
+      }
+    }
+
     // (Re-)probe all already-bound media elements against the new timeline.
     // Clear the cache first so elements probed against a prior timeline get fresh keyframes.
     for (const el of metadataBoundMedia) {
@@ -1356,7 +1383,6 @@ export function initSandboxRuntimeModular(): void {
         const mediaStart =
           Number.parseFloat(element.dataset.playbackStart ?? element.dataset.mediaStart ?? "0") ||
           0;
-        const playbackRate = readElementPlaybackRate(element);
         const hostRemaining =
           context.inheritedStart != null &&
           context.inheritedDuration != null &&
@@ -1365,7 +1391,7 @@ export function initSandboxRuntimeModular(): void {
             : null;
         const sourceDuration =
           Number.isFinite(element.duration) && element.duration > mediaStart
-            ? Math.max(0, (element.duration - mediaStart) / playbackRate)
+            ? Math.max(0, element.duration - mediaStart)
             : null;
         if (sourceDuration != null && hostRemaining != null) {
           return Math.min(sourceDuration, hostRemaining);
@@ -1758,28 +1784,27 @@ export function initSandboxRuntimeModular(): void {
     postState(true);
   };
 
-  let buildListenerPending = false;
-
   maybePublishRenderReady = () => {
-    if (!externalCompositionsReady) {
+    if (!externalCompositionsReady || window.__hfTimelinesBuilding) {
       window.__renderReady = false;
-      return;
-    }
-    if (window.__hfTimelinesBuilding) {
-      window.__renderReady = false;
-      if (!buildListenerPending) {
-        buildListenerPending = true;
-        const onBuilt = () => {
-          buildListenerPending = false;
-          maybePublishRenderReady();
-        };
-        window.addEventListener("hf-timelines-built", onBuilt, { once: true });
-      }
       return;
     }
     publishRenderReadyAfterTimelineBinding();
   };
 
+  // When the GSAP tween-batching interceptor (HF_EARLY_STUB, fileServer.ts) is
+  // active, composition scripts queue tl.to() calls instead of executing them
+  // synchronously. Wait for the "hf-timelines-built" event before the first
+  // binding attempt so the transport clock receives the finished timeline
+  // duration instead of permanently publishing duration=0.
+  if (window.__hfTimelinesBuilding) {
+    window.__renderReady = false;
+    const onTimelinesBuilt = () => {
+      window.removeEventListener("hf-timelines-built", onTimelinesBuilt);
+      maybePublishRenderReady();
+    };
+    window.addEventListener("hf-timelines-built", onTimelinesBuilt);
+  }
   maybePublishRenderReady();
 
   // When the bundler inlines compositions, data-composition-src is removed so

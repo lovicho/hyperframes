@@ -2,11 +2,10 @@ import { useCallback, useEffect, useRef } from "react";
 import type { TimelineElement } from "../player";
 import { usePlayerStore } from "../player";
 import {
-  STUDIO_INSPECTOR_PANELS_ENABLED,
   STUDIO_GSAP_PANEL_ENABLED,
 } from "../components/editor/manualEditingAvailability";
-import { findElementForSelection, type DomEditSelection } from "../components/editor/domEditing";
-import { reapplyPositionEditsAfterSeek } from "../components/editor/manualEdits";
+import { type DomEditSelection } from "../components/editor/domEditing";
+import { useDomEditPreviewSync } from "./useDomEditPreviewSync";
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { EditHistoryKind } from "../utils/editHistory";
 import type { RightPanelTab } from "../utils/studioHelpers";
@@ -50,7 +49,6 @@ export interface UseDomEditSessionParams {
   compositionLoading: boolean;
   previewIframeRef: React.MutableRefObject<HTMLIFrameElement | null>;
   timelineElements: TimelineElement[];
-  currentTime: number;
   setSelectedTimelineElementId: (id: string | null) => void;
   setRightCollapsed: (collapsed: boolean) => void;
   setRightPanelTab: (tab: RightPanelTab) => void;
@@ -59,6 +57,7 @@ export interface UseDomEditSessionParams {
   queueDomEditSave: (save: () => Promise<void>) => Promise<void>;
   readProjectFile: (path: string) => Promise<string>;
   writeProjectFile: (path: string, content: string) => Promise<void>;
+  updateEditingFileContent: (path: string, content: string) => void;
   domEditSaveTimestampRef: React.MutableRefObject<number>;
   editHistory: { recordEdit: (entry: RecordEditInput) => Promise<void> };
   fileTree: string[];
@@ -91,7 +90,6 @@ export function useDomEditSession({
   compositionLoading,
   previewIframeRef,
   timelineElements,
-  currentTime,
   setSelectedTimelineElementId,
   setRightCollapsed,
   setRightPanelTab,
@@ -100,6 +98,7 @@ export function useDomEditSession({
   queueDomEditSave,
   readProjectFile: _readProjectFile,
   writeProjectFile,
+  updateEditingFileContent,
   domEditSaveTimestampRef,
   editHistory,
   fileTree,
@@ -182,7 +181,6 @@ export function useDomEditSession({
     activeCompPath,
     projectDir,
     projectIdRef,
-    currentTime,
     showToast,
     domEditSelectionRef,
     domEditSelection,
@@ -224,12 +222,25 @@ export function useDomEditSession({
 
   const { version: gsapCacheVersion, bump: bumpGsapCache } = useGsapCacheVersion();
 
+  // Bump GSAP cache when refreshKey changes (code-tab edits trigger iframe
+  // reload via refreshKey but don't go through commitMutation, so the cache
+  // would otherwise retain stale keyframe entries).
+  const prevRefreshKeyRef = useRef(refreshKey);
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
+    if (refreshKey !== prevRefreshKeyRef.current) {
+      prevRefreshKeyRef.current = refreshKey;
+      bumpGsapCache();
+    }
+  }, [refreshKey, bumpGsapCache]);
+
   const gsapSourceFile = domEditSelection?.sourceFile || activeCompPath || "index.html";
 
   usePopulateKeyframeCacheForFile(
     STUDIO_GSAP_PANEL_ENABLED ? (projectId ?? null) : null,
     gsapSourceFile,
     gsapCacheVersion,
+    previewIframeRef,
   );
 
   const {
@@ -257,9 +268,12 @@ export function useDomEditSession({
     addGsapFromProperty,
     removeGsapFromProperty,
     addKeyframe,
+    addKeyframeBatch,
     removeKeyframe,
     convertToKeyframes,
     removeAllKeyframes,
+    setArcPath,
+    updateArcSegment,
   } = useGsapScriptCommits({
     projectIdRef,
     activeCompPath,
@@ -268,6 +282,7 @@ export function useDomEditSession({
     domEditSaveTimestampRef,
     reloadPreview,
     onCacheInvalidate: bumpGsapCache,
+    onFileContentChanged: updateEditingFileContent,
   });
 
   // ── Commit handlers (delegated to useDomEditCommits) ──
@@ -416,6 +431,7 @@ export function useDomEditSession({
     handleGsapAddFromProperty,
     handleGsapRemoveFromProperty,
     handleGsapAddKeyframe,
+    handleGsapAddKeyframeBatch,
     handleGsapRemoveKeyframe,
     handleGsapConvertToKeyframes,
     handleGsapRemoveAllKeyframes,
@@ -432,10 +448,10 @@ export function useDomEditSession({
     addGsapFromProperty,
     removeGsapFromProperty,
     addKeyframe,
+    addKeyframeBatch,
     removeKeyframe,
     convertToKeyframes,
     removeAllKeyframes,
-    currentTime,
     handleDomManualEditsReset,
     selectedGsapAnimations,
   });
@@ -449,85 +465,36 @@ export function useDomEditSession({
     bumpGsapCache,
   });
 
-  // Sync selection from preview document on load / refresh
-  // eslint-disable-next-line no-restricted-syntax
-  useEffect(() => {
-    if (!previewIframe) return;
+  const handleSetArcPath = useCallback(
+    (animId: string, config: Parameters<typeof setArcPath>[2]) => {
+      if (!domEditSelection) return;
+      setArcPath(domEditSelection, animId, config);
+    },
+    [domEditSelection, setArcPath],
+  );
 
-    // fallow-ignore-next-line complexity
-    const syncSelectionFromDocument = async () => {
-      if (!STUDIO_INSPECTOR_PANELS_ENABLED || captionEditMode) return;
-      const currentSelection = domEditSelectionRef.current;
-      if (!currentSelection) return;
-      let doc: Document | null = null;
-      try {
-        doc = previewIframe.contentDocument;
-      } catch {
-        return;
-      }
-      if (!doc) return;
+  const handleUpdateArcSegment = useCallback(
+    (animId: string, segmentIndex: number, update: Parameters<typeof updateArcSegment>[3]) => {
+      if (!domEditSelection) return;
+      updateArcSegment(domEditSelection, animId, segmentIndex, update);
+    },
+    [domEditSelection, updateArcSegment],
+  );
 
-      reapplyPositionEditsAfterSeek(doc);
-
-      const nextElement = findElementForSelection(doc, currentSelection, activeCompPath);
-      if (!nextElement) {
-        applyDomSelection(null, { revealPanel: false });
-        return;
-      }
-
-      const nextSelection = await buildDomSelectionFromTarget(nextElement);
-      if (nextSelection) {
-        applyDomSelection(nextSelection, { revealPanel: false, preserveGroup: true });
-      }
-    };
-
-    syncPreviewHistoryHotkey(previewIframe);
-    void applyStudioManualEditsToPreviewRef.current(previewIframe);
-    void syncSelectionFromDocument();
-    refreshPreviewDocumentVersion();
-
-    const handleLoad = () => {
-      syncPreviewHistoryHotkey(previewIframe);
-      void applyStudioManualEditsToPreviewRef.current(previewIframe);
-      void syncSelectionFromDocument();
-      refreshPreviewDocumentVersion();
-    };
-
-    previewIframe.addEventListener("load", handleLoad);
-    return () => {
-      previewIframe.removeEventListener("load", handleLoad);
-    };
-  }, [
+  useDomEditPreviewSync({
+    previewIframe,
     activeCompPath,
-    applyDomSelection,
-    buildDomSelectionFromTarget,
     captionEditMode,
     domEditSelectionRef,
-    previewIframe,
+    domEditSelection,
+    applyDomSelection,
+    buildDomSelectionFromTarget,
     refreshPreviewDocumentVersion,
     syncPreviewHistoryHotkey,
     applyStudioManualEditsToPreviewRef,
-  ]);
-
-  // Auto-reveal source when an element is selected while the Code tab is active.
-  // Use a ref for the callback so the effect only fires on selection changes,
-  // not when openSourceForSelection is recreated due to editingFile content updates.
-  const openSourceRef = useRef(openSourceForSelection);
-  openSourceRef.current = openSourceForSelection;
-  useEffect(
-    // fallow-ignore-next-line complexity
-    () => {
-      if (!domEditSelection || !openSourceRef.current || !getSidebarTab) return;
-      if (!domEditSelection.sourceFile) return;
-      if (getSidebarTab() !== "code") return;
-      openSourceRef.current(domEditSelection.sourceFile, {
-        id: domEditSelection.id,
-        selector: domEditSelection.selector,
-        selectorIndex: domEditSelection.selectorIndex,
-      });
-    },
-    [domEditSelection, getSidebarTab],
-  );
+    openSourceForSelection,
+    getSidebarTab,
+  });
 
   return {
     // State
@@ -589,12 +556,22 @@ export function useDomEditSession({
     handleGsapAddFromProperty,
     handleGsapRemoveFromProperty,
     handleGsapAddKeyframe,
+    handleGsapAddKeyframeBatch,
     handleGsapRemoveKeyframe,
     handleGsapConvertToKeyframes,
     handleGsapRemoveAllKeyframes,
     handleResetSelectedElementKeyframes,
     commitAnimatedProperty,
+    handleSetArcPath,
+    handleUpdateArcSegment,
     invalidateGsapCache: bumpGsapCache,
     previewIframeRef,
+    commitMutation: async (
+      mutation: Record<string, unknown>,
+      options: { label: string; softReload?: boolean },
+    ) => {
+      if (!domEditSelection) return;
+      await gsapCommitMutation(domEditSelection, mutation, options);
+    },
   };
 }

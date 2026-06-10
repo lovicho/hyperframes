@@ -57,15 +57,15 @@ export const RenderQueueItem = memo(function RenderQueueItem({
       onPointerLeave={() => setHovered(false)}
       onClick={isComplete ? handleOpen : undefined}
       className={[
-        "px-3 py-2.5 border-b border-neutral-800/30 last:border-0 transition-colors duration-150",
-        isComplete ? "cursor-pointer hover:bg-neutral-800/30" : "",
+        "px-3 py-2.5 border-b border-panel-border last:border-0 transition-colors duration-150",
+        isComplete ? "cursor-pointer hover:bg-panel-hover/30" : "",
       ]
         .filter(Boolean)
         .join(" ")}
     >
       <div className="flex items-center gap-2.5">
         {/* Thumbnail — static frame; swaps to live video on hover */}
-        <div className="w-20 h-[45px] rounded overflow-hidden bg-neutral-900 flex-shrink-0 relative">
+        <div className="w-20 h-[45px] rounded-md overflow-hidden bg-panel-input flex-shrink-0 relative">
           {isComplete && (
             <>
               {/* Live video — visible on hover */}
@@ -90,7 +90,7 @@ export const RenderQueueItem = memo(function RenderQueueItem({
           )}
           {job.status === "rendering" && (
             <div className="w-full h-full flex items-center justify-center">
-              <div className="w-2 h-2 rounded-full bg-studio-accent animate-pulse" />
+              <div className="w-2 h-2 rounded-full bg-panel-accent animate-pulse" />
             </div>
           )}
           {job.status === "failed" && (
@@ -108,11 +108,11 @@ export const RenderQueueItem = memo(function RenderQueueItem({
         {/* Info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-[11px] font-medium text-neutral-300 truncate">
+            <span className="text-[11px] font-medium text-panel-text-2 truncate">
               {job.filename}
             </span>
             {job.durationMs && (
-              <span className="text-[9px] text-neutral-600 flex-shrink-0">
+              <span className="text-[9px] text-panel-text-5 flex-shrink-0">
                 {formatDuration(job.durationMs)}
               </span>
             )}
@@ -121,12 +121,12 @@ export const RenderQueueItem = memo(function RenderQueueItem({
           {job.status === "rendering" && (
             <div className="mt-1">
               <div className="flex items-center justify-between mb-0.5">
-                <span className="text-[9px] text-neutral-500">{job.stage || "Rendering"}</span>
-                <span className="text-[9px] font-mono text-studio-accent">{job.progress}%</span>
+                <span className="text-[9px] text-panel-text-4">{job.stage || "Rendering"}</span>
+                <span className="text-[9px] font-mono text-panel-accent">{job.progress}%</span>
               </div>
-              <div className="w-full h-1 bg-neutral-800 rounded-full overflow-hidden">
+              <div className="w-full h-1 bg-panel-border rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-studio-accent rounded-full transition-all duration-300"
+                  className="h-full bg-panel-accent rounded-full transition-all duration-300"
                   style={{ width: `${job.progress}%` }}
                 />
               </div>
@@ -138,7 +138,7 @@ export const RenderQueueItem = memo(function RenderQueueItem({
           )}
 
           {job.status !== "rendering" && (
-            <span className="text-[9px] text-neutral-600">{formatTimeAgo(job.createdAt)}</span>
+            <span className="text-[9px] text-panel-text-5">{formatTimeAgo(job.createdAt)}</span>
           )}
         </div>
 
@@ -148,7 +148,7 @@ export const RenderQueueItem = memo(function RenderQueueItem({
             {isComplete && (
               <button
                 onClick={handleDownload}
-                className="p-1 rounded text-neutral-500 hover:text-green-400 transition-colors"
+                className="p-1 rounded text-panel-text-4 hover:text-panel-accent transition-colors"
                 title="Download"
               >
                 <svg
@@ -172,7 +172,7 @@ export const RenderQueueItem = memo(function RenderQueueItem({
                 e.stopPropagation();
                 onDelete();
               }}
-              className="p-1 rounded text-neutral-500 hover:text-red-400 transition-colors"
+              className="p-1 rounded text-panel-text-4 hover:text-red-400 transition-colors"
               title="Remove"
             >
               <svg

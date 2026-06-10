@@ -32,6 +32,7 @@ import {
 } from "./manualEditsTypes";
 import { roundRotationAngle } from "./manualEditsParsing";
 import { applyStudioMotionFromDom } from "./studioMotion";
+import { gsapAnimatesProperty } from "./gsapAnimatesProperty";
 
 /* ── Gesture tracking ─────────────────────────────────────────────── */
 let studioManualEditGestureId = 0;
@@ -273,11 +274,25 @@ export function applyStudioPathOffsetDraft(
 ): void {
   promoteInlineForTransform(element);
   writeStudioPathOffsetVars(element, offset, { updateBase: false });
-  element.style.setProperty(
-    "translate",
-    composeTranslateValue(element, `${Math.round(offset.x)}px`, `${Math.round(offset.y)}px`),
-  );
-  stripGsapTranslateFromTransform(element);
+
+  const isGsapAnimated = gsapAnimatesProperty(element, "x", "y");
+  if (isGsapAnimated) {
+    // For GSAP-animated elements: use gsap.set for positioning (the timeline
+    // is paused during drag). Set translate:none explicitly to prevent
+    // double-counting with the transform.
+    element.style.setProperty("translate", "none");
+    const win = element.ownerDocument.defaultView as
+      | (Window & { gsap?: { set: (el: Element, vars: Record<string, unknown>) => void } })
+      | null;
+    win?.gsap?.set(element, { x: offset.x, y: offset.y });
+  } else {
+    // Non-GSAP elements: use CSS translate as before.
+    element.style.setProperty(
+      "translate",
+      composeTranslateValue(element, `${Math.round(offset.x)}px`, `${Math.round(offset.y)}px`),
+    );
+    stripGsapTranslateFromTransform(element);
+  }
 }
 
 /* ── Box size apply ───────────────────────────────────────────────── */
@@ -505,6 +520,10 @@ function queryStudioElements(doc: Document, attr: string): HTMLElement[] {
 
 function reapplyPathOffsets(doc: Document): void {
   for (const el of queryStudioElements(doc, STUDIO_PATH_OFFSET_ATTR)) {
+    // Skip elements where GSAP actively animates position — GSAP bakes the
+    // CSS translate into its transform and sets translate: none every tick.
+    // Stripping/restoring would oscillate against GSAP's rendering.
+    if (gsapAnimatesProperty(el, "x", "y")) continue;
     const x = el.style.getPropertyValue(STUDIO_OFFSET_X_PROP);
     const y = el.style.getPropertyValue(STUDIO_OFFSET_Y_PROP);
     if (x || y) {
@@ -514,55 +533,6 @@ function reapplyPathOffsets(doc: Document): void {
       });
     }
   }
-}
-
-function gsapAnimatesProperty(el: HTMLElement, ...props: string[]): boolean {
-  const win = el.ownerDocument.defaultView as
-    | (Window & {
-        __timelines?: Record<
-          string,
-          {
-            getChildren?: (
-              deep: boolean,
-            ) => Array<{ targets?: () => Element[]; vars?: Record<string, unknown> }>;
-          }
-        >;
-      })
-    | null;
-  if (!win?.__timelines) return false;
-  const propSet = new Set(props);
-  for (const tl of Object.values(win.__timelines)) {
-    if (!tl?.getChildren) continue;
-    try {
-      for (const child of tl.getChildren(true)) {
-        if (!child.targets || !child.vars) continue;
-        let targetsEl = false;
-        for (const t of child.targets()) {
-          if (t === el || (el.id && t.id === el.id)) {
-            targetsEl = true;
-            break;
-          }
-        }
-        if (!targetsEl) continue;
-        const vars = child.vars;
-        for (const p of propSet) {
-          if (p in vars) return true;
-        }
-        if (vars.keyframes && typeof vars.keyframes === "object") {
-          for (const kfVal of Object.values(vars.keyframes as Record<string, unknown>)) {
-            if (kfVal && typeof kfVal === "object") {
-              for (const p of propSet) {
-                if (p in (kfVal as Record<string, unknown>)) return true;
-              }
-            }
-          }
-        }
-      }
-    } catch {
-      /* */
-    }
-  }
-  return false;
 }
 
 function reapplyBoxSizes(doc: Document): void {

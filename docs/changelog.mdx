@@ -9,6 +9,30 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.88"
+  description="Released - 2026-06-09"
+  tags={["Release", "Core"]}
+>
+Fixes a regression where Studio's element stamping code ran during production renders, causing sub-composition elements to become incorrectly visible.
+
+## Fixes
+
+- **Core:** Guard element stamping to iframe-only (Studio preview) ([192417b7](https://github.com/heygen-com/hyperframes/commit/192417b7cd7384c2001b2be926246260bd728367))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.85...v0.6.88).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.87"
+  description="Released - 2026-06-09"
+  tags={["Release"]}
+>
+Studio keyframe system, render queue improvements, and GSAP parser arc path mutations. Feature-gated behind `VITE_STUDIO_ENABLE_KEYFRAMES`.
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.85...v0.6.87).
+</Update>
+
+<Update
   label="HyperFrames v0.6.86"
   description="Released - 2026-06-09"
   tags={["Release", "Runtime,player"]}

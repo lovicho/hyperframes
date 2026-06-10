@@ -10,10 +10,9 @@ import { usePanelLayout } from "./hooks/usePanelLayout";
 import { useFileManager } from "./hooks/useFileManager";
 import { usePreviewPersistence } from "./hooks/usePreviewPersistence";
 import { useTimelineEditing } from "./hooks/useTimelineEditing";
-import { addBlockToProject } from "./utils/blockInstaller";
-import type { BlockParam } from "@hyperframes/core/registry";
 import type { BlockPreviewInfo } from "./components/sidebar/BlocksTab";
 import { useDomEditSession } from "./hooks/useDomEditSession";
+import { useBlockHandlers } from "./hooks/useBlockHandlers";
 import { useAppHotkeys } from "./hooks/useAppHotkeys";
 import { useClipboard } from "./hooks/useClipboard";
 import { readStudioUiPreferences, writeStudioUiPreferences } from "./utils/studioUiPreferences";
@@ -35,6 +34,9 @@ import type { DomEditSelection } from "./components/editor/domEditing";
 import { AskAgentModal } from "./components/AskAgentModal";
 import { StudioGlobalDragOverlay } from "./components/StudioGlobalDragOverlay";
 import { StudioHeader } from "./components/StudioHeader";
+import { useGestureCommit } from "./hooks/useGestureCommit";
+
+import { GestureTrailOverlay } from "./components/editor/GestureTrailOverlay";
 import { StudioLeftSidebar } from "./components/StudioLeftSidebar";
 import { StudioPreviewArea } from "./components/StudioPreviewArea";
 import { StudioRightPanel } from "./components/StudioRightPanel";
@@ -78,12 +80,6 @@ export function StudioApp() {
   const [compositionLoading, setCompositionLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [, setPreviewDocumentVersion] = useState(0);
-  const [activeBlockParams, setActiveBlockParams] = useState<{
-    blockName: string;
-    blockTitle: string;
-    params: BlockParam[];
-    compositionPath: string;
-  } | null>(null);
   const [blockPreview, setBlockPreview] = useState<BlockPreviewInfo | null>(null);
 
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -94,7 +90,6 @@ export function StudioApp() {
   const captionEditMode = useCaptionStore((s) => s.isEditMode);
   const captionHasSelection = useCaptionStore((s) => s.selectedSegmentIds.size > 0);
   const captionSync = useCaptionSync(projectId);
-  const currentTime = usePlayerStore((s) => s.currentTime);
   const timelineElements = usePlayerStore((s) => s.elements);
   const setSelectedTimelineElementId = usePlayerStore((s) => s.setSelectedElementId);
   const timelineDuration = usePlayerStore((s) => s.duration);
@@ -128,7 +123,7 @@ export function StudioApp() {
       return !v;
     });
   }, []);
-  const { appToast, showToast } = useToast();
+  const { appToast, showToast, dismissToast } = useToast();
   const panelLayout = usePanelLayout({
     rightCollapsed: initialUrlStateRef.current.rightCollapsed,
     rightPanelTab: initialUrlStateRef.current.rightPanelTab,
@@ -136,6 +131,7 @@ export function StudioApp() {
   const editHistory = usePersistentEditHistory({ projectId });
   const domEditSaveTimestampRef = useRef(0);
   const pendingTimelineEditPathRef = useRef(new Set<string>());
+  const isGestureRecordingRef = useRef(false);
   const reloadPreview = useCallback(() => {
     setRefreshKey((k) => k + 1);
   }, []);
@@ -185,10 +181,18 @@ export function StudioApp() {
     previewIframeRef,
     pendingTimelineEditPathRef,
     uploadProjectFiles: fileManager.uploadProjectFiles,
+    isRecordingRef: isGestureRecordingRef,
   });
 
-  const blockCtx = useMemo(
-    () => ({
+  const {
+    activeBlockParams,
+    setActiveBlockParams,
+    handleAddBlock,
+    handleTimelineBlockDrop,
+    handlePreviewBlockDrop,
+  } = useBlockHandlers({
+    projectId,
+    blockCtxDeps: {
       activeCompPath,
       timelineElements,
       readProjectFile: fileManager.readProjectFile,
@@ -197,70 +201,11 @@ export function StudioApp() {
       refreshFileTree: fileManager.refreshFileTree,
       reloadPreview,
       showToast,
-    }),
-    [
-      activeCompPath,
-      timelineElements,
-      fileManager,
-      editHistory.recordEdit,
-      reloadPreview,
-      showToast,
-    ],
-  );
-  const handleAddBlock = useCallback(
-    (blockName: string) => {
-      if (!projectId) return;
-      void (async () => {
-        const result = await addBlockToProject({
-          projectId,
-          blockName,
-          ...blockCtx,
-          previewIframe: previewIframeRef.current,
-          currentTime: usePlayerStore.getState().currentTime,
-        });
-        const params = result?.block.type === "hyperframes:block" ? result.block.params : undefined;
-        if (params?.length) {
-          setActiveBlockParams({
-            blockName: result!.block.name,
-            blockTitle: result!.block.title,
-            params,
-            compositionPath: result!.compositionPath,
-          });
-          panelLayout.setRightCollapsed(false);
-          panelLayout.setRightPanelTab("block-params");
-        }
-      })();
     },
-    [projectId, blockCtx, panelLayout],
-  );
-  const handleTimelineBlockDrop = useCallback(
-    (blockName: string, placement: { start: number; track: number }) => {
-      if (!projectId) return;
-      void addBlockToProject({
-        projectId,
-        blockName,
-        placement,
-        ...blockCtx,
-        previewIframe: previewIframeRef.current,
-        currentTime: usePlayerStore.getState().currentTime,
-      });
-    },
-    [projectId, blockCtx],
-  );
-  const handlePreviewBlockDrop = useCallback(
-    (blockName: string, position: { left: number; top: number }) => {
-      if (!projectId) return;
-      void addBlockToProject({
-        projectId,
-        blockName,
-        visualPosition: position,
-        ...blockCtx,
-        previewIframe: previewIframeRef.current,
-        currentTime: usePlayerStore.getState().currentTime,
-      });
-    },
-    [projectId, blockCtx],
-  );
+    previewIframeRef,
+    setRightCollapsed: panelLayout.setRightCollapsed,
+    setRightPanelTab: panelLayout.setRightPanelTab,
+  });
 
   const clearDomSelectionRef = useRef<() => void>(() => {});
   const domEditSelectionBridgeRef = useRef<DomEditSelection | null>(null);
@@ -306,6 +251,7 @@ export function StudioApp() {
     onResetKeyframes: () => resetKeyframesRef.current(),
     onDeleteSelectedKeyframes: () => deleteSelectedKeyframesRef.current(),
     onAfterUndoRedo: () => invalidateGsapCacheRef.current(),
+    onToggleRecording: () => handleToggleRecordingRef.current(),
   });
   const selectSidebarTabStable = useCallback(
     (tab: SidebarTab) => leftSidebarRef.current?.selectTab(tab),
@@ -325,7 +271,6 @@ export function StudioApp() {
     compositionLoading,
     previewIframeRef,
     timelineElements,
-    currentTime,
     setSelectedTimelineElementId,
     setRightCollapsed: panelLayout.setRightCollapsed,
     setRightPanelTab: panelLayout.setRightPanelTab,
@@ -334,6 +279,7 @@ export function StudioApp() {
     queueDomEditSave: previewPersistence.queueDomEditSave,
     readProjectFile: fileManager.readProjectFile,
     writeProjectFile: fileManager.writeProjectFile,
+    updateEditingFileContent: fileManager.updateEditingFileContent,
     domEditSaveTimestampRef,
     editHistory: { recordEdit: editHistory.recordEdit },
     fileTree: fileManager.fileTree,
@@ -399,6 +345,19 @@ export function StudioApp() {
 
   const dragOverlay = useDragOverlay(fileManager.handleImportFiles);
 
+  // Gesture recording
+  const handleToggleRecordingRef = useRef<() => void>(() => {});
+  const domEditSessionRef = useRef(domEditSession);
+  domEditSessionRef.current = domEditSession;
+
+  const { gestureState, gestureRecording, handleToggleRecording } = useGestureCommit({
+    domEditSessionRef,
+    previewIframeRef,
+    showToast,
+    isGestureRecordingRef,
+  });
+  handleToggleRecordingRef.current = handleToggleRecording;
+
   const handlePreviewIframeRef = useCallback(
     (iframe: HTMLIFrameElement | null) => {
       previewIframeRef.current = iframe;
@@ -434,12 +393,12 @@ export function StudioApp() {
     panelLayout.rightCollapsed,
     isPlaying,
     domEditSession.domEditSelection,
+    gestureState === "recording",
   );
 
   useStudioUrlState({
     projectId,
     activeCompPath,
-    currentTime,
     duration: effectiveTimelineDuration,
     isPlaying,
     compositionLoading,
@@ -465,7 +424,6 @@ export function StudioApp() {
     compositionLoading,
     refreshKey,
     setRefreshKey,
-    currentTime,
     timelineElements,
     isPlaying,
     editHistory,
@@ -513,6 +471,7 @@ export function StudioApp() {
                 refreshCaptureFrameTime={frameCapture.refreshCaptureFrameTime}
                 inspectorButtonActive={inspectorButtonActive}
                 inspectorPanelActive={inspectorPanelActive}
+                onExport={() => void renderQueue.startRender()}
               />
 
               <div className="flex flex-1 min-h-0">
@@ -539,7 +498,23 @@ export function StudioApp() {
                   setCompIdToSrc={setCompIdToSrc}
                   setCompositionLoading={setCompositionLoading}
                   shouldShowSelectedDomBounds={shouldShowSelectedDomBounds}
+                  isGestureRecording={gestureState === "recording"}
                   blockPreview={blockPreview}
+                  gestureOverlay={
+                    gestureState === "recording" && previewIframe ? (
+                      <GestureTrailOverlay
+                        samples={gestureRecording.samplesRef.current}
+                        sampleCount={gestureRecording.samplesRef.current.length}
+                        trail={gestureRecording.trailRef.current}
+                        canvasRect={(() => {
+                          const r = previewIframe.getBoundingClientRect();
+                          return { left: r.left, top: r.top, width: r.width, height: r.height };
+                        })()}
+                        compositionSize={compositionDimensions ?? undefined}
+                        mode="recording"
+                      />
+                    ) : undefined
+                  }
                 />
 
                 {!panelLayout.rightCollapsed && (
@@ -552,6 +527,9 @@ export function StudioApp() {
                       setActiveBlockParams(null);
                       panelLayout.setRightPanelTab("design");
                     }}
+                    recordingState={gestureState}
+                    recordingDuration={gestureRecording.recordingDuration}
+                    onToggleRecording={handleToggleRecording}
                   />
                 )}
               </div>
@@ -584,7 +562,13 @@ export function StudioApp() {
               )}
 
               {dragOverlay.active && <StudioGlobalDragOverlay />}
-              {appToast && <StudioToast message={appToast.message} tone={appToast.tone} />}
+              {appToast && (
+                <StudioToast
+                  message={appToast.message}
+                  tone={appToast.tone}
+                  onDismiss={dismissToast}
+                />
+              )}
             </div>
           </DomEditProvider>
         </FileManagerProvider>

@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import type { DomEditSelection } from "../components/editor/domEditing";
+import { usePlayerStore } from "../player";
 
 /**
  * Thin useCallback wrappers that guard on `domEditSelection` before
@@ -19,10 +20,10 @@ export function useGsapSelectionHandlers({
   addGsapFromProperty,
   removeGsapFromProperty,
   addKeyframe,
+  addKeyframeBatch,
   removeKeyframe,
   convertToKeyframes,
   removeAllKeyframes,
-  currentTime,
   handleDomManualEditsReset,
   selectedGsapAnimations,
 }: {
@@ -61,10 +62,20 @@ export function useGsapSelectionHandlers({
     property: string,
     value: number | string,
   ) => void;
+  addKeyframeBatch: (
+    sel: DomEditSelection,
+    animId: string,
+    percentage: number,
+    properties: Record<string, number | string>,
+  ) => Promise<void>;
   removeKeyframe: (sel: DomEditSelection, animId: string, percentage: number) => void;
-  convertToKeyframes: (sel: DomEditSelection, animId: string) => void;
+  convertToKeyframes: (
+    sel: DomEditSelection,
+    animId: string,
+    resolvedFromValues?: Record<string, number | string>,
+  ) => void;
   removeAllKeyframes: (sel: DomEditSelection, animId: string) => void;
-  currentTime: number;
+
   handleDomManualEditsReset: (sel: DomEditSelection) => void;
   selectedGsapAnimations: { id: string; keyframes?: unknown }[];
 }) {
@@ -95,12 +106,12 @@ export function useGsapSelectionHandlers({
   const handleGsapAddAnimation = useCallback(
     (method: "to" | "from" | "set" | "fromTo") => {
       if (!domEditSelection) return;
-      addGsapAnimation(domEditSelection, method, currentTime);
+      addGsapAnimation(domEditSelection, method, usePlayerStore.getState().currentTime);
       if (domEditSelection.element.hasAttribute("data-hf-studio-path-offset")) {
         handleDomManualEditsReset(domEditSelection);
       }
     },
-    [domEditSelection, addGsapAnimation, currentTime, handleDomManualEditsReset],
+    [domEditSelection, addGsapAnimation, handleDomManualEditsReset],
   );
 
   const handleGsapAddProperty = useCallback(
@@ -151,6 +162,13 @@ export function useGsapSelectionHandlers({
     [domEditSelection, addKeyframe],
   );
 
+  const handleGsapAddKeyframeBatch = useCallback(
+    (animId: string, percentage: number, properties: Record<string, number | string>) => {
+      if (!domEditSelection) return Promise.resolve();
+      return addKeyframeBatch(domEditSelection, animId, percentage, properties);
+    },
+    [domEditSelection, addKeyframeBatch],
+  );
   const handleGsapRemoveKeyframe = useCallback(
     (animId: string, percentage: number) => {
       if (!domEditSelection) return;
@@ -160,9 +178,9 @@ export function useGsapSelectionHandlers({
   );
 
   const handleGsapConvertToKeyframes = useCallback(
-    (animId: string) => {
-      if (!domEditSelection) return;
-      convertToKeyframes(domEditSelection, animId);
+    (animId: string, resolvedFromValues?: Record<string, number | string>) => {
+      if (!domEditSelection) return Promise.resolve();
+      return convertToKeyframes(domEditSelection, animId, resolvedFromValues);
     },
     [domEditSelection, convertToKeyframes],
   );
@@ -194,6 +212,7 @@ export function useGsapSelectionHandlers({
     handleGsapAddFromProperty,
     handleGsapRemoveFromProperty,
     handleGsapAddKeyframe,
+    handleGsapAddKeyframeBatch,
     handleGsapRemoveKeyframe,
     handleGsapConvertToKeyframes,
     handleGsapRemoveAllKeyframes,

@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { ParsedGsap } from "@hyperframes/core/gsap-parser";
+import type { GsapAnimation, ParsedGsap } from "@hyperframes/core/gsap-parser";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import type { EditHistoryKind } from "../utils/editHistory";
 import { applySoftReload } from "../utils/gsapSoftReload";
 import { executeOptimistic } from "../utils/optimisticUpdate";
 import { usePlayerStore, type KeyframeCacheEntry } from "../player/store/playerStore";
+import { commitKeyframeAtTimeImpl } from "./gsapKeyframeCommit";
+import {
+  updateKeyframeCacheFromParsed,
+  readKeyframeSnapshot,
+  writeKeyframeCache,
+} from "./gsapKeyframeCacheHelpers";
 
 const PROPERTY_DEFAULTS: Record<string, number> = {
   opacity: 1,
@@ -71,28 +77,6 @@ async function mutateGsapScript(
     return null;
   }
 }
-
-function buildCacheKey(sourceFile: string, elementId: string): string {
-  return `${sourceFile}#${elementId}`;
-}
-
-function readKeyframeSnapshot(
-  sourceFile: string,
-  elementId: string | null | undefined,
-): KeyframeCacheEntry | undefined {
-  if (!elementId) return undefined;
-  return usePlayerStore.getState().keyframeCache.get(buildCacheKey(sourceFile, elementId));
-}
-
-function writeKeyframeCache(
-  sourceFile: string,
-  elementId: string | null | undefined,
-  data: KeyframeCacheEntry | undefined,
-): void {
-  if (!elementId) return;
-  usePlayerStore.getState().setKeyframeCache(buildCacheKey(sourceFile, elementId), data);
-}
-
 interface GsapScriptCommitsParams {
   projectIdRef: React.MutableRefObject<string | null>;
   activeCompPath: string | null;
@@ -108,8 +92,8 @@ interface GsapScriptCommitsParams {
   domEditSaveTimestampRef: React.MutableRefObject<number>;
   reloadPreview: () => void;
   onCacheInvalidate: () => void;
+  onFileContentChanged?: (path: string, content: string) => void;
 }
-
 const DEBOUNCE_MS = 150;
 
 // fallow-ignore-next-line complexity unit-size
@@ -121,6 +105,7 @@ export function useGsapScriptCommits({
   domEditSaveTimestampRef,
   reloadPreview,
   onCacheInvalidate,
+  onFileContentChanged,
 }: GsapScriptCommitsParams) {
   const pendingPropertyEditRef = useRef<{
     selection: DomEditSelection;
@@ -129,7 +114,6 @@ export function useGsapScriptCommits({
     value: number | string;
   } | null>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   /** Send a mutation and record the edit in undo history. */
   const commitMutation = useCallback(
     // fallow-ignore-next-line complexity
@@ -162,20 +146,22 @@ export function useGsapScriptCommits({
         });
       }
 
-      onCacheInvalidate();
-
-      if (result.parsed?.animations) {
-        const { setKeyframeCache } = usePlayerStore.getState();
-        for (const anim of result.parsed.animations) {
-          if (!anim.keyframes) continue;
-          const id = anim.targetSelector.match(/^#([\w-]+)/)?.[1];
-          if (!id) continue;
-          setKeyframeCache(`${targetPath}#${id}`, anim.keyframes);
-          if (targetPath !== "index.html") setKeyframeCache(`index.html#${id}`, anim.keyframes);
-        }
+      if (result.after != null) {
+        onFileContentChanged?.(targetPath, result.after);
       }
 
       if (options.skipReload) return;
+
+      // Write the keyframe cache immediately from the parsed response
+      // (synchronous — the timeline diamonds appear on the next render).
+      if (result.parsed?.animations) {
+        updateKeyframeCacheFromParsed(
+          result.parsed.animations,
+          targetPath,
+          selection.id ?? undefined,
+          mutation,
+        );
+      }
 
       options.beforeReload?.();
 
@@ -186,6 +172,11 @@ export function useGsapScriptCommits({
       } else {
         reloadPreview();
       }
+
+      // Bump the cache version AFTER reload so the async re-fetch in
+      // useGsapAnimationsForElement reads the post-reload script, not
+      // the stale pre-reload version that would overwrite fresh data.
+      onCacheInvalidate();
     },
     [
       projectIdRef,
@@ -195,9 +186,9 @@ export function useGsapScriptCommits({
       domEditSaveTimestampRef,
       reloadPreview,
       onCacheInvalidate,
+      onFileContentChanged,
     ],
   );
-
   const flushPendingPropertyEdit = useCallback(() => {
     const pending = pendingPropertyEditRef.current;
     if (!pending) return;
@@ -227,7 +218,6 @@ export function useGsapScriptCommits({
     },
     [flushPendingPropertyEdit],
   );
-
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
@@ -252,7 +242,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const deleteGsapAnimation = useCallback(
     (selection: DomEditSelection, animationId: string) => {
       void commitMutation(
@@ -263,7 +252,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const addGsapAnimation = useCallback(
     // fallow-ignore-next-line complexity
     async (
@@ -285,6 +273,7 @@ export function useGsapScriptCommits({
             body: JSON.stringify({
               target: {
                 id: selection.id,
+                hfId: selection.hfId,
                 selector: selection.selector,
                 selectorIndex: selection.selectorIndex,
               },
@@ -325,7 +314,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation, projectIdRef, activeCompPath],
   );
-
   const addGsapProperty = useCallback(
     // fallow-ignore-next-line complexity
     (selection: DomEditSelection, animationId: string, property: string) => {
@@ -346,7 +334,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const removeGsapProperty = useCallback(
     (selection: DomEditSelection, animationId: string, property: string) => {
       void commitMutation(
@@ -357,7 +344,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const updateGsapFromProperty = useCallback(
     (
       selection: DomEditSelection,
@@ -376,7 +362,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const addGsapFromProperty = useCallback(
     (selection: DomEditSelection, animationId: string, property: string) => {
       const defaultValue = PROPERTY_DEFAULTS[property] ?? 0;
@@ -388,7 +373,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const removeGsapFromProperty = useCallback(
     (selection: DomEditSelection, animationId: string, property: string) => {
       void commitMutation(
@@ -399,7 +383,6 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
   const addKeyframe = useCallback(
     (
       selection: DomEditSelection,
@@ -435,7 +418,21 @@ export function useGsapScriptCommits({
     },
     [commitMutation, activeCompPath],
   );
-
+  const addKeyframeBatch = useCallback(
+    (
+      selection: DomEditSelection,
+      animationId: string,
+      percentage: number,
+      properties: Record<string, number | string>,
+    ) => {
+      return commitMutation(
+        selection,
+        { type: "add-keyframe", animationId, percentage, properties },
+        { label: `Add keyframe at ${percentage}%`, softReload: true },
+      );
+    },
+    [commitMutation],
+  );
   const removeKeyframe = useCallback(
     (selection: DomEditSelection, animationId: string, percentage: number) => {
       const sf = selection.sourceFile || activeCompPath || "index.html";
@@ -462,18 +459,20 @@ export function useGsapScriptCommits({
     },
     [commitMutation, activeCompPath],
   );
-
   const convertToKeyframes = useCallback(
-    (selection: DomEditSelection, animationId: string) => {
-      void commitMutation(
+    (
+      selection: DomEditSelection,
+      animationId: string,
+      resolvedFromValues?: Record<string, number | string>,
+    ) => {
+      return commitMutation(
         selection,
-        { type: "convert-to-keyframes", animationId },
+        { type: "convert-to-keyframes", animationId, resolvedFromValues },
         { label: "Convert to keyframes" },
       );
     },
     [commitMutation],
   );
-
   const removeAllKeyframes = useCallback(
     (selection: DomEditSelection, animationId: string) => {
       void commitMutation(
@@ -484,7 +483,66 @@ export function useGsapScriptCommits({
     },
     [commitMutation],
   );
-
+  const setArcPath = useCallback(
+    (
+      selection: DomEditSelection,
+      animationId: string,
+      config: {
+        enabled: boolean;
+        autoRotate?: boolean | number;
+        segments?: Array<{
+          curviness: number;
+          cp1?: { x: number; y: number };
+          cp2?: { x: number; y: number };
+        }>;
+      },
+    ) => {
+      void commitMutation(
+        selection,
+        { type: "set-arc-path" as const, animationId, ...config },
+        { label: config.enabled ? "Enable arc path" : "Disable arc path", softReload: true },
+      );
+    },
+    [commitMutation],
+  );
+  const updateArcSegment = useCallback(
+    (
+      selection: DomEditSelection,
+      animationId: string,
+      segmentIndex: number,
+      update: {
+        curviness?: number;
+        cp1?: { x: number; y: number };
+        cp2?: { x: number; y: number };
+      },
+    ) => {
+      void commitMutation(
+        selection,
+        { type: "update-arc-segment" as const, animationId, segmentIndex, ...update },
+        { label: "Update arc segment", softReload: true },
+      );
+    },
+    [commitMutation],
+  );
+  const removeArcPath = useCallback(
+    (selection: DomEditSelection, animationId: string) => {
+      void commitMutation(
+        selection,
+        { type: "remove-arc-path" as const, animationId },
+        { label: "Remove arc path", softReload: true },
+      );
+    },
+    [commitMutation],
+  );
+  const commitKeyframeAtTime = useCallback(
+    (
+      selection: DomEditSelection,
+      absoluteTime: number,
+      animations: GsapAnimation[],
+      properties: Record<string, number | string>,
+    ) => commitKeyframeAtTimeImpl(selection, absoluteTime, animations, properties, commitMutation),
+    [commitMutation],
+  );
   return {
     commitMutation,
     updateGsapProperty,
@@ -497,8 +555,13 @@ export function useGsapScriptCommits({
     addGsapFromProperty,
     removeGsapFromProperty,
     addKeyframe,
+    addKeyframeBatch,
     removeKeyframe,
     convertToKeyframes,
     removeAllKeyframes,
+    setArcPath,
+    updateArcSegment,
+    removeArcPath,
+    commitKeyframeAtTime,
   };
 }
