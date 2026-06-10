@@ -934,7 +934,9 @@ export function getFrameAtTime(
   if (loop && loopDuration > 0 && localTime >= loopDuration) {
     localTime %= loopDuration;
   }
-  const frameIndex = Math.floor(localTime * extracted.fps);
+  // Add epsilon before flooring to avoid IEEE 754 boundary errors where
+  // e.g. 0.28 * 25 === 6.999999999999999 instead of 7.
+  const frameIndex = Math.floor(localTime * extracted.fps + 1e-9);
   if (loop && frameIndex >= extracted.totalFrames && extracted.totalFrames > 0) {
     return extracted.framePaths.get(extracted.totalFrames - 1) || null;
   }
@@ -1044,7 +1046,7 @@ export class FrameLookupTable {
       if (video.loop && loopDuration > 0 && localTime >= loopDuration) {
         localTime %= loopDuration;
       }
-      const frameIndex = Math.floor(localTime * video.extracted.fps);
+      const frameIndex = Math.floor(localTime * video.extracted.fps + 1e-9);
       if (video.loop && frameIndex >= video.extracted.totalFrames) {
         const framePath = video.extracted.framePaths.get(video.extracted.totalFrames - 1);
         if (framePath) {
