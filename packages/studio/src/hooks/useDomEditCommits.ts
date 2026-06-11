@@ -1,5 +1,6 @@
 import { useCallback, useRef } from "react";
 import { usePlayerStore } from "../player";
+import { STUDIO_GSAP_DRAG_INTERCEPT_ENABLED } from "../components/editor/manualEditingAvailability";
 import { FONT_EXT } from "../utils/mediaTypes";
 import type { PatchOperation } from "../utils/sourcePatcher";
 import { trackStudioEvent } from "../utils/studioTelemetry";
@@ -41,10 +42,13 @@ import type { EditHistoryKind } from "../utils/editHistory";
 import { useDomEditTextCommits } from "./useDomEditTextCommits";
 
 // ── Helpers ──
-
 type TimelineLike = { getChildren?: (nested: boolean) => Array<{ targets?: () => Element[] }> };
 
+// fallow-ignore-next-line complexity
 function isElementGsapTargeted(iframe: HTMLIFrameElement | null, element: HTMLElement): boolean {
+  // When the GSAP drag intercept is disabled for debugging, treat every
+  // element as un-targeted so commits take the plain CSS persist path.
+  if (!STUDIO_GSAP_DRAG_INTERCEPT_ENABLED) return false;
   if (!iframe?.contentWindow) return false;
   let timelines: Record<string, TimelineLike> | undefined;
   try {
@@ -168,6 +172,7 @@ export function useDomEditCommits({
 
   // fallow-ignore-next-line complexity
   const persistDomEditOperations: PersistDomEditOperations = useCallback(
+    // fallow-ignore-next-line complexity
     async (selection, operations, options) => {
       const pid = projectIdRef.current;
       if (!pid) throw new Error("No active project");
@@ -455,6 +460,7 @@ export function useDomEditCommits({
 
   // fallow-ignore-next-line complexity
   const handleDomEditElementDelete = useCallback(
+    // fallow-ignore-next-line complexity
     async (selection: DomEditSelection) => {
       const pid = projectIdRef.current;
       if (!pid) return;
