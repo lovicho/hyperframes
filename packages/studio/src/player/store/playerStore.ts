@@ -45,6 +45,7 @@ export interface TimelineElement {
 }
 
 export type ZoomMode = "fit" | "manual";
+type TimelineTool = "select" | "razor";
 
 interface PlayerState {
   isPlaying: boolean;
@@ -64,6 +65,9 @@ interface PlayerState {
   inPoint: number | null;
   /** Work-area out-point (seconds). When set, loop ends here and E jumps here. */
   outPoint: number | null;
+
+  activeTool: TimelineTool;
+  setActiveTool: (tool: TimelineTool) => void;
 
   /** Set of selected keyframe keys in format `${elementId}:${percentage}`. */
   selectedKeyframes: Set<string>;
@@ -117,6 +121,12 @@ interface PlayerState {
   requestedSeekTime: number | null;
   requestSeek: (time: number) => void;
   clearSeekRequest: () => void;
+
+  autoKeyframeEnabled: boolean;
+  setAutoKeyframeEnabled: (enabled: boolean) => void;
+
+  lintFindingsByElement: Map<string, { count: number; messages: string[] }>;
+  setLintFindingsByElement: (map: Map<string, { count: number; messages: string[] }>) => void;
 }
 
 // Lightweight pub-sub for current time during playback.
@@ -146,6 +156,9 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   manualZoomPercent: 100,
   inPoint: null,
   outPoint: null,
+
+  activeTool: "select",
+  setActiveTool: (tool) => set({ activeTool: tool }),
 
   selectedKeyframes: new Set(),
   toggleSelectedKeyframe: (key) =>
@@ -191,6 +204,12 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   requestedSeekTime: null,
   requestSeek: (time) => set({ requestedSeekTime: time }),
   clearSeekRequest: () => set({ requestedSeekTime: null }),
+
+  autoKeyframeEnabled: true,
+  setAutoKeyframeEnabled: (enabled) => set({ autoKeyframeEnabled: enabled }),
+
+  lintFindingsByElement: new Map(),
+  setLintFindingsByElement: (map) => set({ lintFindingsByElement: map }),
 
   setIsPlaying: (playing) => set({ isPlaying: playing }),
   setPlaybackRate: (rate) => {
@@ -250,6 +269,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       selectedElementId: null,
       inPoint: null,
       outPoint: null,
+      activeTool: "select",
       selectedKeyframes: new Set(),
       selectedElementIds: new Set(),
       expandedTimelineElements: new Set(),

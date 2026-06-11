@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { platform, release } from "node:os";
 import { detectWSL } from "./platform.js";
 
@@ -30,6 +30,11 @@ export type AgentRuntime =
   | "hermes"
   | "openclaw"
   | "pi"
+  | "gemini_managed_agent"
+  | "windsurf"
+  | "cline"
+  | "gemini_cli"
+  | "crush"
   | null;
 
 interface VendorRule {
@@ -69,12 +74,24 @@ const VENDOR_RULES: VendorRule[] = [
       typeof env["CODEX_CI"] === "string" ||
       typeof env["CODEX_SANDBOX_NETWORK_DISABLED"] === "string",
   },
-  // Cursor IDE integrated terminal — exports TERM_PROGRAM=cursor.
-  // Cursor Background Agent env vars are not publicly documented; if a
-  // canonical marker is identified later, add it here.
+  // Cursor IDE integrated terminal — exports TERM_PROGRAM=cursor (exact,
+  // lowercase). Cursor Background Agent env vars are not publicly documented;
+  // if a canonical marker is identified later, add it here.
   {
     name: "cursor",
     check: (env) => env["TERM_PROGRAM"] === "cursor",
+  },
+  // Windsurf (Codeium) integrated terminal — exports TERM_PROGRAM=windsurf.
+  // Attested across many independent detectors (nx
+  // packages/nx/src/native/ide/detection.rs, adonisjs/application, ag-grid
+  // git-hooks). Compared case-INsensitively (unlike the exact Cursor rule
+  // above) because Windsurf sources disagree on casing ("windsurf" vs
+  // "Windsurf"); Cursor's do not, so it stays exact. Like Cursor this marks the
+  // editor's integrated terminal, not specifically that the Cascade agent is
+  // driving; under WSL/remote it can also fall back to TERM_PROGRAM=vscode.
+  {
+    name: "windsurf",
+    check: (env) => env["TERM_PROGRAM"]?.toLowerCase() === "windsurf",
   },
   // GitHub Copilot Coding Agent — runs inside GitHub Actions and the
   // workflow injects an additional marker to distinguish from generic CI.
@@ -124,7 +141,73 @@ const VENDOR_RULES: VendorRule[] = [
     name: "pi",
     check: (env) => typeof env["PI_CODING_AGENT"] === "string",
   },
+  // Cline (cline/cline) VS Code extension — injects CLINE_ACTIVE=true into the
+  // integrated terminal via vscode.TerminalOptions.env, which the terminal
+  // exports to every shell command run in it
+  // (apps/vscode/src/hosts/vscode/terminal/VscodeTerminalRegistry.ts:29).
+  // Caveat: present only on the default "vscodeTerminal" exec path — the opt-in
+  // backgroundExec/YOLO path spawns via child_process without the marker. Same
+  // integrated-terminal-only scope as the Cursor/Windsurf rules above.
+  // Source: https://github.com/cline/cline (VscodeTerminalRegistry.ts:29)
+  {
+    name: "cline",
+    check: (env) => typeof env["CLINE_ACTIVE"] === "string",
+  },
+  // Google Gemini CLI (open-source @google/gemini-cli) — DISTINCT from the
+  // Gemini managed-agent sandbox. (If a /.agents/ filesystem detector is
+  // present in detectAgentRuntime() it runs ahead of this loop and wins for a
+  // managed-agent sandbox, leaving this rule to match only the local CLI.)
+  // The shell-execution service
+  // sets GEMINI_CLI=1 on the child env of every shell command it spawns, so
+  // downstream executables can tell they were launched by Gemini CLI
+  // (packages/core/src/services/shellExecutionService.ts:56,486-487 — spread
+  // onto baseEnv after sanitizeEnvironment, passed as env: to both the
+  // child_process and node-pty spawn paths).
+  // Caveat: under STRICT sanitization (when GITHUB_SHA is set / the GitHub
+  // Action surface) GEMINI_CLI is not allow-listed and gets stripped — reliable
+  // for the local CLI, not inside Gemini's GitHub Action runner.
+  // Source: https://github.com/google-gemini/gemini-cli (shellExecutionService.ts:56,486-487)
+  {
+    name: "gemini_cli",
+    check: (env) => typeof env["GEMINI_CLI"] === "string",
+  },
+  // Crush (charmbracelet/crush) — internal/shell/shell.go:43-48,98
+  // unconditionally appends CRUSH=1 (plus generic AGENT=crush / AI_AGENT=crush)
+  // to the env of every shell it spawns: both the interactive bash tool and the
+  // hook runner. We key on CRUSH since AGENT/AI_AGENT are generic and collide.
+  // Source: https://github.com/charmbracelet/crush (internal/shell/shell.go:43-48,98)
+  {
+    name: "crush",
+    check: (env) => typeof env["CRUSH"] === "string",
+  },
 ];
+
+// Agents evaluated and deliberately NOT added. Each fails the bar the rules
+// above meet — a marker reliably present in the environment of the
+// shell/subprocess the agent spawns. Recorded here (not only in the PR) so the
+// next person doesn't re-derive it:
+//   - OpenHands — OPENHANDS_BUILD_GIT_SHA/_REF exists in the agent-server
+//     Dockerfile (base-image-minimal stage, added 2025-11-09 in PR #1100) but
+//     is empirically ABSENT from the runtime env of every published
+//     ghcr.io/openhands/agent-server image inspected (12+ tags, 2025-10 →
+//     2026-01, incl. the introducing PR's merge commit). The declared ENV
+//     never reaches the published image. Re-add only if a real published image
+//     carries it in `docker inspect .Config.Env`.
+//   - Aider — sets no self-identifying env var; both shell-spawn sites
+//     (run_cmd.py Popen / pexpect.spawn) pass no env=, so children inherit
+//     os.environ verbatim.
+//   - Goose — AGENT=goose/GOOSE_TERMINAL=1 are set on the recipe-retry path
+//     and the computercontroller MCP extension, but NOT on the default
+//     developer `shell` tool (sets only PATH+cwd), so the primary path is
+//     undetected.
+//   - opencode — OPENCODE_TERMINAL=1 is set only on the interactive PTY panel,
+//     not on the model's bash/shell tool.
+//   - Roo Code — ROO_ACTIVE is set only on the `vscode` terminal provider; the
+//     shipped default is the execa provider (terminalShellIntegrationDisabled
+//     defaults true), which sets no marker.
+//   - Amp / Devin / Jules / Factory Droid — no verifiable unconditional runtime
+//     marker (Amp is closed/minified; Devin/Jules are closed sandboxes;
+//     Factory's FACTORY_PROJECT_DIR / DROID_PLUGIN_ROOT are hook-scoped only).
 
 /**
  * Identify the managed sandbox runtime hosting this CLI invocation.
@@ -144,10 +227,17 @@ export function detectSandboxRuntime(): SandboxRuntime {
 
 /**
  * Identify the coding-agent vendor that spawned this process, if any.
- * Returns null on a regular interactive shell. Only checks for the
- * EXISTENCE of well-known env vars — never reads their values.
+ * Returns null on a regular interactive shell. Most rules only check the
+ * EXISTENCE of well-known env vars (never their values), but a few agents
+ * are best identified by filesystem markers — those run via dedicated
+ * detector functions ahead of the env-var rule loop.
  */
 export function detectAgentRuntime(): AgentRuntime {
+  // Gemini managed agent — keyed on the `/.agents/` platform mount with a
+  // gVisor guard against false positives. See `isGeminiManagedAgent` for the
+  // uniqueness-anchor-vs-guard split. Env vars alone are insufficient
+  // (`GEMINI_API_KEY` is user-settable), so this runs ahead of VENDOR_RULES.
+  if (isGeminiManagedAgent()) return "gemini_managed_agent";
   for (const rule of VENDOR_RULES) {
     if (rule.check(process.env)) return rule.name;
   }
@@ -215,4 +305,68 @@ function isKVM(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Gemini managed-agent sandbox — Google's Managed Agents runtime (the
+ * Antigravity base agent). The platform auto-discovers the agent definition
+ * under `/.agents/` and runs it inside a gVisor kernel.
+ *
+ * Signal hierarchy (the two checks are NOT co-equal):
+ *   - `/.agents/` is the *uniqueness anchor*: the platform's agent-definition
+ *     mount root. Per Google's Managed Agents docs the runtime scans `/.agents/`
+ *     for the agent's instructions (`/.agents/AGENTS.md`) and skills
+ *     (`/.agents/skills/<name>/SKILL.md`). Nothing in the generic
+ *     Google-Cloud-on-gVisor universe (Cloud Run gen2, GKE Sandbox, Fly.io)
+ *     mounts `/.agents/` at the filesystem root.
+ *
+ *     We key on the `/.agents/` DIRECTORY, not `/.agents/AGENTS.md`: AGENTS.md
+ *     is OPTIONAL. Google's docs state "AGENTS.md is optional ... the
+ *     system_instruction and AGENTS.md are additive; both apply when present",
+ *     so an agent may declare its instructions inline via `system_instruction`
+ *     in agent.yaml and ship no AGENTS.md file. Keying on the file would
+ *     silently miss every managed agent that uses inline instructions or a
+ *     skills-only definition; the directory mount generalizes across all
+ *     managed agents that ship any definition.
+ *   - `isGVisor()` is a *guard*, not a co-uniqueness signal. gVisor itself
+ *     is shared with GKE Sandbox + Cloud Run gen2 — it does not discriminate
+ *     the managed-agent surface from those. Its job here is to rule out the
+ *     unlikely case of a human creating `/.agents/` on a non-sandbox host.
+ *
+ * Known coverage gap: an agent defined with ONLY inline `system_instruction`
+ * (no skills, no AGENTS.md) may not materialize a `/.agents/` mount — that
+ * tail can't be closed from the docs and needs an empirical spin to confirm.
+ * The common case (skills and/or AGENTS.md present) is covered.
+ *
+ * Things deliberately NOT keyed on (each fails the uniqueness test —
+ * shared across the broader Google-Cloud-on-gVisor universe or trivially
+ * user-settable on any host):
+ *   - gVisor alone
+ *   - `Google Compute Engine` DMI (entire GCP reports this)
+ *   - `job` cgroup (Google-internal but broadly present)
+ *   - egress-proxy env / CA-cert env cluster (any MITM container sets these)
+ *   - `/workspace/` (the agent's data mount — generic, not unique)
+ *   - `GEMINI_API_KEY` (user-settable on any host)
+ *
+ * Source: Google Managed Agents docs (ai.google.dev/gemini-api/docs/custom-agents
+ * + managed-agents-quickstart) for the `/.agents/` mount contract and AGENTS.md
+ * optionality; empirical introspection of live managed-agent sandboxes by
+ * gemini-agent (2026-06-09) for the gVisor pairing — present across 3
+ * independent fresh sandbox spins (spike + `b9db4e56` + `d59d6361`).
+ */
+function isGeminiManagedAgent(): boolean {
+  if (platform() !== "linux") return false;
+  // The uniqueness anchor: the managed-agent definition mount root. We key on
+  // the `/.agents/` directory (not the optional AGENTS.md file) so skills-only
+  // and inline-instruction agents are still detected. Nothing else on gVisor
+  // (Cloud Run, GKE Sandbox, Fly.io) creates this path. Require an actual
+  // directory — a stray file or symlink named `/.agents` must not match.
+  try {
+    if (!statSync("/.agents").isDirectory()) return false;
+  } catch {
+    return false; // ENOENT / EACCES — no mount, not a managed agent.
+  }
+  // The guard: rule out a stray user-created `/.agents/` on a non-sandbox
+  // host. Not a second uniqueness signal — gVisor isn't unique on its own.
+  return isGVisor();
 }

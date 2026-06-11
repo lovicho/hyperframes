@@ -9,6 +9,55 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.90"
+  description="Released - 2026-06-11"
+  tags={["Release", "Producer,core", "CLI", "Cli,producer"]}
+>
+GIF support: render to GIF with two-pass palette encoding, and animated GIF inputs now play frame-synced via VP9 transcode. Plus new agent detection for Windsurf, Cline, Gemini CLI, and Crush.
+
+## Features
+
+- **Producer,core:** Play animated GIF inputs frame-synced via prep-time VP9 transcode ([edd85473](https://github.com/heygen-com/hyperframes/commit/edd85473e7b9273a85f0f842f2dd54ce9b8eca78), [#1335](https://github.com/heygen-com/hyperframes/pull/1335))
+- **Cli,producer:** Add gif output format with two-pass palette encode ([e6b8d66c](https://github.com/heygen-com/hyperframes/commit/e6b8d66c2da1df4f42628dbeef09de5255f20dea), [#1333](https://github.com/heygen-com/hyperframes/pull/1333))
+- **CLI:** Detect Windsurf, Cline, Gemini CLI, and Crush agents ([e0ecd4d2](https://github.com/heygen-com/hyperframes/commit/e0ecd4d2d11076e6701327c23cab4f4179331e7a), [#1328](https://github.com/heygen-com/hyperframes/pull/1328))
+- **Producer:** Optional targetChunkFrames to bound per-chunk frames ([9b18fadc](https://github.com/heygen-com/hyperframes/commit/9b18fadccd01929073da2856678acddfaa1a85ba), [#1332](https://github.com/heygen-com/hyperframes/pull/1332))
+- **Producer:** Stage wall-clock split in chunk perf telemetry ([69eac249](https://github.com/heygen-com/hyperframes/commit/69eac249d583fb4314738b0c6f4b815544802b05), [#1327](https://github.com/heygen-com/hyperframes/pull/1327))
+- **CLI:** Detect Gemini managed-agent sandbox in detectAgentRuntime ([0766eb81](https://github.com/heygen-com/hyperframes/commit/0766eb8144772cd072eb9746b2f2b35a8e0712c7), [#1294](https://github.com/heygen-com/hyperframes/pull/1294))
+
+## Internal
+
+- **CLI:** Restore exact-match Cursor rule (revert unsourced loosening) ([30fcede4](https://github.com/heygen-com/hyperframes/commit/30fcede44e64aea5f9e6c3a6dedeae6c7bfe5a72), [#1334](https://github.com/heygen-com/hyperframes/pull/1334))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.89...v0.6.90).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.89"
+  description="Released - 2026-06-10"
+  tags={["Release", "Runtime", "Studio", "Engine"]}
+>
+Fixes audio dropout during playback (WebAudio source cleanup), muted video audio leak in renders, IEEE 754 frame-index precision, and keyframe editing stability.
+
+## Fixes
+
+- **Runtime:** Preserve authored muted attr; clean up WebAudio on end ([036b991c](https://github.com/heygen-com/hyperframes/commit/036b991cbbe21312b7a03abf03f01c28fa046978), [#1319](https://github.com/heygen-com/hyperframes/pull/1319))
+- **Studio:** Keyframe bug fixes — gate delete hooks, fix value corruption, gesture recording ([f0b499b5](https://github.com/heygen-com/hyperframes/commit/f0b499b582a552df08abf4d222acb599fe0f8285), [#1314](https://github.com/heygen-com/hyperframes/pull/1314))
+- **Engine:** Add epsilon to frame index floor to prevent IEEE 754 boundary duplicates ([3a72aa52](https://github.com/heygen-com/hyperframes/commit/3a72aa528dfa742209c6565654b23c96bb81536a), [#1318](https://github.com/heygen-com/hyperframes/pull/1318))
+- **Producer:** Don't mix audio from muted videos into the render ([8133d934](https://github.com/heygen-com/hyperframes/commit/8133d9346e312beedd0fdc28faf491d46d46cc87), [#1322](https://github.com/heygen-com/hyperframes/pull/1322))
+
+## Docs & Examples
+
+- **README:** Swap hero media to hyperframes-logo-motion ([8fcbb63a](https://github.com/heygen-com/hyperframes/commit/8fcbb63a371752932027f3495dbc6ae6b5daf0f7), [#1315](https://github.com/heygen-com/hyperframes/pull/1315))
+
+## Internal
+
+- Shrink repo — untrack failure frames, recompress backgrounds, harden LFS ([e845793c](https://github.com/heygen-com/hyperframes/commit/e845793ce1d480e19780d74aa2d0259c6bb9e455), [#1326](https://github.com/heygen-com/hyperframes/pull/1326))
+- **Studio:** Split oversized files to pass 600-line check ([81416ab3](https://github.com/heygen-com/hyperframes/commit/81416ab3c9b04ca87d399e9b558ec7227b7d641c), [#1313](https://github.com/heygen-com/hyperframes/pull/1313))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.88...v0.6.89).
+</Update>
+
+<Update
   label="HyperFrames v0.6.88"
   description="Released - 2026-06-09"
   tags={["Release", "Core"]}
