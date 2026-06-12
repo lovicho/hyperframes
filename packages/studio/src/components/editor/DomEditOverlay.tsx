@@ -263,6 +263,22 @@ export const DomEditOverlay = memo(function DomEditOverlay({
     }
     const target = event.target as HTMLElement | null;
     if (target?.closest('[data-dom-edit-selection-box="true"]')) return;
+    // Don't re-resolve selection when clicking outside the composition bounds —
+    // the iframe can't resolve elements there, so it would clear the selection.
+    if (selection && compRect.width > 0) {
+      const overlayEl = overlayRef.current;
+      if (overlayEl) {
+        const overlayRect = overlayEl.getBoundingClientRect();
+        const clickX = event.clientX - overlayRect.left;
+        const clickY = event.clientY - overlayRect.top;
+        const outsideComp =
+          clickX < compRect.left ||
+          clickX > compRect.left + compRect.width ||
+          clickY < compRect.top ||
+          clickY > compRect.top + compRect.height;
+        if (outsideComp) return;
+      }
+    }
     onCanvasMouseDown(event, { preferClipAncestor: false });
     if (event.shiftKey) {
       suppressNextBoxMouseDownRef.current = true;

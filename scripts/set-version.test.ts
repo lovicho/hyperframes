@@ -116,7 +116,12 @@ describe("changed-path guard", () => {
     const allowed = releaseAllowedPaths("1.2.3");
     assert.deepEqual(
       findUnexpectedChanges(
-        ["packages/core/package.json", ".claude-plugin/plugin.json", "releases/v1.2.3.md"],
+        [
+          "packages/core/package.json",
+          "packages/sdk/package.json",
+          ".claude-plugin/plugin.json",
+          "releases/v1.2.3.md",
+        ],
         allowed,
       ),
       [],

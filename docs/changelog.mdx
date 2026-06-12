@@ -9,6 +9,79 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.95"
+  description="Released - 2026-06-12"
+  tags={["Release", "Engine"]}
+>
+Engine: adaptive memory-aware encoding with system memory monitoring, chunked encoder improvements, and streaming encoder resilience.
+
+## Features
+
+- **Engine:** Adaptive memory-aware encoding with system memory monitoring and dynamic chunk sizing
+- **Engine:** Chunked encoder improvements for parallel coordination
+- **Engine:** Streaming encoder resilience with better error recovery
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.94...v0.6.95).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.94"
+  description="Released - 2026-06-12"
+  tags={["Release", "Studio"]}
+>
+Remove off-screen element indicators for UX redesign. The NLELayout unclipped overlay split remains for selection handle interaction near composition edges.
+
+## Fixes
+
+- **Studio:** Remove off-screen element indicators (UX redesign pending) ([#1376](https://github.com/heygen-com/hyperframes/pull/1376))
+- **Studio:** Clean up unused `onSelectElementById` prop ([#1377](https://github.com/heygen-com/hyperframes/pull/1377))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.93...v0.6.94).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.93"
+  description="Released - 2026-06-12"
+  tags={["Release", "Studio"]}
+>
+Hotfix: disable keyframes feature flag by default. The flag was accidentally shipped as enabled in v0.6.92.
+
+## Fixes
+
+- **Studio:** Set `STUDIO_KEYFRAMES_ENABLED` default to `false`
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.92...v0.6.93).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.92"
+  description="Released - 2026-06-12"
+  tags={["Release", "Studio", "Core"]}
+>
+Per-property-group keyframe architecture: the keyframe system redesign ships across 7 stacked PRs. Each GSAP tween now targets a single property group (position, scale, rotation, etc.), eliminating cross-property contamination during drag, resize, and gesture recording.
+
+## Features
+
+- **Core:** Per-property-group type system (`PropertyGroupName`, `PROPERTY_GROUPS`, `classifyPropertyGroup`) ([#1354](https://github.com/heygen-com/hyperframes/pull/1354))
+- **Core:** `split-into-property-groups` and `replace-with-keyframes` server mutations ([#1355](https://github.com/heygen-com/hyperframes/pull/1355))
+- **Core:** `delete-all-for-selector` atomic mutation for bulk animation removal
+- **Studio:** GSAP drag intercept enabled by default with per-property-group routing ([#1356](https://github.com/heygen-com/hyperframes/pull/1356))
+- **Studio:** Gesture recording merges into existing position tweens instead of replacing ([#1359](https://github.com/heygen-com/hyperframes/pull/1359))
+- **Studio:** Unclipped overlay for off-screen element interaction ([#1360](https://github.com/heygen-com/hyperframes/pull/1360))
+
+## Fixes
+
+- **Studio:** Keyframe cache tags with `propertyGroup` for group-aware operations ([#1357](https://github.com/heygen-com/hyperframes/pull/1357))
+- **Studio:** Property panel routes keyframe diamonds to correct animation per property ([#1358](https://github.com/heygen-com/hyperframes/pull/1358))
+- **Studio:** Context menus portaled to `document.body` with smart overflow positioning
+- **Studio:** Delete All Keyframes uses atomic server mutation (no stale ID race)
+- **Studio:** Block CSS drag on GSAP-animated elements to prevent keyframe corruption
+- **Studio:** `onMoveKeyframe` percentage-space conversion (clip-relative to tween-relative)
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.91...v0.6.92).
+</Update>
+
+<Update
   label="HyperFrames v0.6.91"
   description="Released - 2026-06-11"
   tags={["Release", "Studio", "Core"]}

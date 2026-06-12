@@ -30,6 +30,7 @@ const PACKAGES = [
   "packages/cli",
   "packages/aws-lambda",
   "packages/gcp-cloud-run",
+  "packages/sdk",
 ];
 
 const PLUGINS = [".claude-plugin", ".codex-plugin", ".cursor-plugin"];

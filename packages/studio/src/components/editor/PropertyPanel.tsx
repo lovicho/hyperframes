@@ -11,6 +11,7 @@ import {
   readGsapBorderRadiusForPanel,
 } from "./propertyPanelHelpers";
 import { MetricField, Section } from "./propertyPanelPrimitives";
+import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
 import { isMediaElement, MediaSection } from "./propertyPanelMediaSection";
 import { TextSection, StyleSections } from "./propertyPanelSections";
 import { GsapAnimationSection } from "./GsapAnimationSection";
@@ -227,6 +228,13 @@ export const PropertyPanel = memo(function PropertyPanel({
   const navKeyframes = cacheEntry?.keyframes ?? gsapKeyframes;
   const seekFromKfPct = (pct: number) => onSeekToTime?.(elStart + (pct / 100) * elDuration);
 
+  const animIdForProp = (prop: string): string => {
+    const group = classifyPropertyGroup(prop);
+    const groupAnim = gsapAnimations?.find((a) => a.propertyGroup === group);
+    if (groupAnim) return groupAnim.id;
+    return gsapAnimId ?? "";
+  };
+
   // Read ALL GSAP-interpolated values at the current seek time.
   const gsapRuntimeValues = readGsapRuntimeValuesForPanel(
     gsapAnimId,
@@ -345,7 +353,6 @@ export const PropertyPanel = memo(function PropertyPanel({
           </div>
         </div>
       </div>
-
       <div className="flex-1 overflow-y-auto">
         <TextSection
           element={element}
@@ -361,7 +368,6 @@ export const PropertyPanel = memo(function PropertyPanel({
         {element.dataAttributes.start != null && (
           <TimingSection element={element} onSetAttribute={onSetAttribute} />
         )}
-
         {isMediaElement(element) && (
           <MediaSection
             projectDir={projectDir}
@@ -395,8 +401,8 @@ export const PropertyPanel = memo(function PropertyPanel({
                     onCommitAnimatedProperty &&
                     void onCommitAnimatedProperty(element, "x", displayX)
                   }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(gsapAnimId, pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(gsapAnimId)}
+                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("x"), pct)}
+                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("x"))}
                 />
               )}
             </div>
@@ -420,8 +426,8 @@ export const PropertyPanel = memo(function PropertyPanel({
                     onCommitAnimatedProperty &&
                     void onCommitAnimatedProperty(element, "y", displayY)
                   }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(gsapAnimId, pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(gsapAnimId)}
+                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("y"), pct)}
+                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("y"))}
                 />
               )}
             </div>
@@ -445,8 +451,8 @@ export const PropertyPanel = memo(function PropertyPanel({
                     onCommitAnimatedProperty &&
                     void onCommitAnimatedProperty(element, "width", displayW)
                   }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(gsapAnimId, pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(gsapAnimId)}
+                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("width"), pct)}
+                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("width"))}
                 />
               )}
             </div>
@@ -470,8 +476,8 @@ export const PropertyPanel = memo(function PropertyPanel({
                     onCommitAnimatedProperty &&
                     void onCommitAnimatedProperty(element, "height", displayH)
                   }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(gsapAnimId, pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(gsapAnimId)}
+                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("height"), pct)}
+                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("height"))}
                 />
               )}
             </div>
@@ -493,8 +499,8 @@ export const PropertyPanel = memo(function PropertyPanel({
                     onCommitAnimatedProperty &&
                     void onCommitAnimatedProperty(element, "rotation", displayR)
                   }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(gsapAnimId, pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(gsapAnimId)}
+                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("rotation"), pct)}
+                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("rotation"))}
                 />
               )}
             </div>
@@ -503,6 +509,7 @@ export const PropertyPanel = memo(function PropertyPanel({
             <PropertyPanel3dTransform
               gsapRuntimeValues={gsapRuntimeValues}
               gsapAnimId={gsapAnimId}
+              resolveAnimIdForProp={animIdForProp}
               gsapKeyframes={navKeyframes}
               currentPct={currentPct}
               elStart={elStart}
@@ -576,7 +583,6 @@ export const PropertyPanel = memo(function PropertyPanel({
             </button>
           </div>
         )}
-
         {showEditableSections && (
           <StyleSections
             projectId={projectId}

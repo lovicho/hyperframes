@@ -410,12 +410,34 @@ type GsapMutationRequest =
       ease?: string;
     }
   | {
+      type: "replace-with-keyframes";
+      animationId: string;
+      targetSelector: string;
+      position: number;
+      duration: number;
+      keyframes: Array<{
+        percentage: number;
+        properties: Record<string, number | string>;
+        ease?: string;
+        auto?: boolean;
+      }>;
+      ease?: string;
+    }
+  | {
       type: "split-animations";
       originalId: string;
       newId: string;
       splitTime: number;
       elementStart: number;
       elementDuration: number;
+    }
+  | {
+      type: "split-into-property-groups";
+      animationId: string;
+    }
+  | {
+      type: "delete-all-for-selector";
+      targetSelector: string;
     };
 
 // ── GSAP mutation executor ──────────────────────────────────────────────────
@@ -445,6 +467,7 @@ async function executeGsapMutation(
     removeArcPathFromScript,
     addAnimationWithKeyframesToScript,
     splitAnimationsInScript,
+    splitIntoPropertyGroups,
   } = parser;
 
   function requireAnimation(
@@ -508,6 +531,17 @@ async function executeGsapMutation(
         bakeVisibilityOnDelete(block.document, delTarget.anim);
       }
       return removeAnimationFromScript(block.scriptText, body.animationId);
+    }
+    case "delete-all-for-selector": {
+      const parsed = parseGsapScript(block.scriptText);
+      const matching = parsed.animations.filter((a) => a.targetSelector === body.targetSelector);
+      if (matching.length === 0) return block.scriptText;
+      stripStudioEditsFromTarget(block.document, body.targetSelector);
+      let script = block.scriptText;
+      for (const anim of matching.reverse()) {
+        script = removeAnimationFromScript(script, anim.id);
+      }
+      return script;
     }
     case "add-property": {
       const r = requireAnimation(block.scriptText, body.animationId);
@@ -617,6 +651,18 @@ async function executeGsapMutation(
       );
       return result.script;
     }
+    case "replace-with-keyframes": {
+      const script = removeAnimationFromScript(block.scriptText, body.animationId);
+      const added = addAnimationWithKeyframesToScript(
+        script,
+        body.targetSelector,
+        body.position,
+        body.duration,
+        body.keyframes,
+        body.ease,
+      );
+      return added.script;
+    }
     case "split-animations": {
       if (
         typeof body.originalId !== "string" ||
@@ -646,6 +692,10 @@ async function executeGsapMutation(
         elementStart: body.elementStart,
         elementDuration: body.elementDuration,
       });
+    }
+    case "split-into-property-groups": {
+      const result = splitIntoPropertyGroups(block.scriptText, body.animationId);
+      return result.script;
     }
     default:
       return respond({ error: `unknown mutation type: ${(body as { type: string }).type}` }, 400);
@@ -1061,8 +1111,9 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     if (result instanceof Response) return result;
 
     const newScript = typeof result === "string" ? result : result.script;
-    const newHtml = block.replaceScript(newScript);
-    if (newHtml !== html) {
+    const changed = newScript !== block.scriptText;
+    const newHtml = changed ? block.replaceScript(newScript) : html;
+    if (changed) {
       writeFileSync(res.absPath, newHtml, "utf-8");
     }
 
@@ -1070,6 +1121,7 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     const freshParsed = parseGsapScript(newScript);
     const responsePayload: Record<string, unknown> = {
       ok: true,
+      changed,
       parsed: freshParsed,
       before: html,
       after: newHtml,

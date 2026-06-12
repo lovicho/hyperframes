@@ -484,6 +484,15 @@ export function initSandboxRuntimeModular(): void {
       includeAuthoredTimingAttrs: true,
     });
     let maxWindowEndSeconds = 0;
+    // The root's own data-duration is the authored source of truth for
+    // composition length. Without it in the floor, a GSAP timeline that ends
+    // even slightly short of the declared duration shrinks the playable
+    // window — and duration-gated consumers (e.g. the studio's adapter
+    // selection) silently reject the runtime player, losing audio playback.
+    const rootDeclaredSeconds = Number.parseFloat(rootEl.getAttribute("data-duration") ?? "");
+    if (Number.isFinite(rootDeclaredSeconds) && rootDeclaredSeconds > 0) {
+      maxWindowEndSeconds = rootDeclaredSeconds;
+    }
     const compositionNodes = Array.from(
       rootEl.querySelectorAll("[data-composition-id][data-start]"),
     );
@@ -1960,8 +1969,11 @@ export function initSandboxRuntimeModular(): void {
       }
 
       // Keep clock duration in sync with the resolved timeline duration.
-      // Cheap (no DOM reads) and catches async timeline rebinds that happen
-      // outside the 60-tick branch (metadata hydration, deferred setTimeout).
+      // Catches async timeline rebinds that happen outside the 60-tick
+      // branch (metadata hydration, deferred setTimeout). Note: this reads
+      // the DOM each tick (duration floors query authored windows + the
+      // root's declared data-duration), which also keeps live edits to
+      // data-duration in the studio reflected without a rebind.
       if (state.capturedTimeline) {
         const dur = getSafeTimelineDurationSeconds(state.capturedTimeline, 0);
         if (dur > 0) clock.setDuration(dur);
