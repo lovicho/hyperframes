@@ -9,10 +9,12 @@ import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { withMeta } from "../utils/updateCheck.js";
 import {
   buildLayoutSampleTimes,
+  buildTransitionSampleTimes,
   collapseStaticLayoutIssues,
   dedupeLayoutIssues,
   formatLayoutIssue,
   limitLayoutIssues,
+  mergeSampleTimes,
   summarizeLayoutIssues,
   type LayoutIssue,
 } from "../utils/layoutAudit.js";
@@ -27,11 +29,17 @@ export const examples: Example[] = [
   ["Inspect a specific project", "hyperframes layout ./my-video"],
   ["Output agent-readable JSON", "hyperframes layout --json"],
   ["Use explicit hero-frame timestamps", "hyperframes layout --at 1.5,4.0,7.25"],
+  [
+    "Also sample at tween boundaries to catch transient overlaps",
+    "hyperframes layout --at-transitions",
+  ],
 ];
 
 interface LayoutAuditResult {
   duration: number;
   samples: number[];
+  transitionSamples: number[];
+  transitionSamplesDropped: number;
   rawIssues: LayoutIssue[];
 }
 
@@ -64,6 +72,19 @@ async function getCompositionDuration(page: import("puppeteer-core").Page): Prom
   });
 }
 
+async function waitForFonts(page: import("puppeteer-core").Page, timeoutMs: number): Promise<void> {
+  await page
+    .evaluate((ms: number) => {
+      const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
+      if (!fonts?.ready) return Promise.resolve();
+      return Promise.race([
+        fonts.ready.then(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, ms)),
+      ]);
+    }, timeoutMs)
+    .catch(() => {});
+}
+
 async function seekTo(page: import("puppeteer-core").Page, time: number): Promise<void> {
   await page.evaluate((t: number) => {
     const win = window as unknown as {
@@ -93,17 +114,61 @@ async function seekTo(page: import("puppeteer-core").Page, time: number): Promis
         requestAnimationFrame(() => requestAnimationFrame(() => resolveFrame())),
       ),
   );
-  await page
-    .evaluate(() => {
-      const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
-      if (!fonts?.ready) return Promise.resolve();
-      return Promise.race([
-        fonts.ready.then(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, 500)),
-      ]);
-    })
-    .catch(() => {});
+  await waitForFonts(page, 500);
   await new Promise((resolveSettle) => setTimeout(resolveSettle, SEEK_SETTLE_MS));
+}
+
+/**
+ * Collect every tween start/end boundary from the registered timelines,
+ * expressed in the registered timeline's own time (what seekTo consumes).
+ * GSAP-only: timelines without getChildren (Anime/Lottie/Three adapters) are
+ * skipped. Nested tween times are converted by climbing the parent chain,
+ * accounting for each ancestor's startTime and timeScale.
+ */
+async function collectTweenBoundaries(page: import("puppeteer-core").Page): Promise<number[]> {
+  return page.evaluate(() => {
+    type AnimLike = {
+      startTime?: () => number;
+      duration?: () => number;
+      timeScale?: () => number;
+      parent?: AnimLike | null;
+      getChildren?: (nested: boolean, tweens: boolean, timelines: boolean) => AnimLike[];
+    };
+
+    // GSAP getters read internal state through `this`, so the method must be
+    // invoked bound to its animation (an unbound call throws inside GSAP).
+    const callOr = (fn: (() => number) | undefined, self: AnimLike, fallback: number): number =>
+      typeof fn === "function" ? fn.call(self) : fallback;
+
+    const toTimelineTime = (root: AnimLike, anim: AnimLike, localTime: number): number => {
+      let time = localTime;
+      let node: AnimLike | null | undefined = anim;
+      while (node && node !== root) {
+        time = callOr(node.startTime, node, 0) + time / (callOr(node.timeScale, node, 1) || 1);
+        node = node.parent;
+      }
+      return time;
+    };
+
+    const tweenBoundaries = (root: AnimLike, tween: AnimLike): number[] => {
+      if (typeof tween.duration !== "function") return [];
+      const start = toTimelineTime(root, tween, 0);
+      const end = toTimelineTime(root, tween, tween.duration());
+      return [start, end].filter((time) => Number.isFinite(time));
+    };
+
+    const timelineBoundaries = (timeline: AnimLike): number[] => {
+      try {
+        const tweens = timeline.getChildren?.(true, true, false) ?? [];
+        return tweens.flatMap((tween) => tweenBoundaries(timeline, tween));
+      } catch {
+        return [];
+      }
+    };
+
+    const win = window as unknown as { __timelines?: Record<string, AnimLike> };
+    return Object.values(win.__timelines ?? {}).flatMap(timelineBoundaries);
+  });
 }
 
 async function bundleProjectHtml(projectDir: string): Promise<string> {
@@ -133,7 +198,14 @@ async function alignViewportToComposition(
 
 async function runLayoutAudit(
   projectDir: string,
-  opts: { samples: number; at?: number[]; timeout: number; tolerance: number },
+  opts: {
+    samples: number;
+    at?: number[];
+    atTransitions: boolean;
+    maxTransitionSamples?: number;
+    timeout: number;
+    tolerance: number;
+  },
 ): Promise<LayoutAuditResult> {
   const { ensureBrowser } = await import("../browser/manager.js");
   const puppeteer = await import("puppeteer-core");
@@ -169,21 +241,27 @@ async function runLayoutAudit(
         timeout: opts.timeout,
       })
       .catch(() => {});
-    await page
-      .evaluate(() => {
-        const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
-        if (!fonts?.ready) return Promise.resolve();
-        return Promise.race([
-          fonts.ready.then(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, 750)),
-        ]);
-      })
-      .catch(() => {});
+    await waitForFonts(page, 750);
     await new Promise((resolveSettle) => setTimeout(resolveSettle, 250));
 
     const duration = await getCompositionDuration(page);
-    const samples = buildLayoutSampleTimes({ duration, samples: opts.samples, at: opts.at });
-    if (samples.length === 0) return { duration, samples, rawIssues: [] };
+    const baseSamples = buildLayoutSampleTimes({ duration, samples: opts.samples, at: opts.at });
+    let transitionSamples: number[] = [];
+    let transitionSamplesDropped = 0;
+    if (opts.atTransitions) {
+      const boundaries = await collectTweenBoundaries(page);
+      const transitions = buildTransitionSampleTimes({
+        duration,
+        boundaries,
+        cap: opts.maxTransitionSamples,
+      });
+      transitionSamples = transitions.times;
+      transitionSamplesDropped = transitions.dropped;
+    }
+    const samples = mergeSampleTimes(baseSamples, transitionSamples);
+    if (samples.length === 0) {
+      return { duration, samples, transitionSamples, transitionSamplesDropped, rawIssues: [] };
+    }
 
     await page.addScriptTag({ content: loadLayoutAuditScript() });
 
@@ -205,6 +283,8 @@ async function runLayoutAudit(
     return {
       duration,
       samples,
+      transitionSamples,
+      transitionSamplesDropped,
       rawIssues: dedupeLayoutIssues(issues),
     };
   } finally {
@@ -253,6 +333,17 @@ export function createInspectCommand(commandName: "inspect" | "layout") {
         type: "string",
         description: "Comma-separated timestamps in seconds (e.g., --at 1.5,4,7.25)",
       },
+      "at-transitions": {
+        type: "boolean",
+        description:
+          "Also sample at every tween start/end boundary (plus segment midpoints) to catch transient overlaps at transition seams",
+        default: false,
+      },
+      "max-transition-samples": {
+        type: "string",
+        description:
+          "Optional cap on transition-derived samples; when it truncates, the omitted count is reported (default: unlimited)",
+      },
       tolerance: {
         type: "string",
         description: "Allowed pixel overflow before reporting an issue (default: 2)",
@@ -286,13 +377,18 @@ export function createInspectCommand(commandName: "inspect" | "layout") {
       const timeout = Math.max(500, parseInt(args.timeout as string, 10) || 5000);
       const maxIssues = Math.max(1, parseInt(args["max-issues"] as string, 10) || 80);
       const at = parseAt(args.at);
+      const atTransitions = !!args["at-transitions"];
+      const maxTransitionSamplesRaw = parseInt(args["max-transition-samples"] as string, 10);
+      const maxTransitionSamples =
+        Number.isFinite(maxTransitionSamplesRaw) && maxTransitionSamplesRaw > 0
+          ? maxTransitionSamplesRaw
+          : undefined;
       const strict = !!args.strict;
       const collapseStatic = args["collapse-static"] !== false;
 
       if (!args.json) {
-        const sampleLabel = at
-          ? `${at.length} explicit timestamp(s)`
-          : `${samples} timeline samples`;
+        const baseLabel = at ? `${at.length} explicit timestamp(s)` : `${samples} timeline samples`;
+        const sampleLabel = atTransitions ? `${baseLabel} + transition boundaries` : baseLabel;
         console.log(
           `${c.accent("◆")}  Inspecting layout for ${c.accent(project.name)} (${sampleLabel})`,
         );
@@ -302,9 +398,16 @@ export function createInspectCommand(commandName: "inspect" | "layout") {
         const result = await runLayoutAudit(project.dir, {
           samples,
           at,
+          atTransitions,
+          maxTransitionSamples,
           timeout,
           tolerance,
         });
+        if (!args.json && result.transitionSamplesDropped > 0) {
+          console.log(
+            `${c.warn("⚠")}  ${result.transitionSamplesDropped} transition sample(s) omitted by --max-transition-samples; raise or drop it to sample every boundary`,
+          );
+        }
         const allIssues = collapseStatic
           ? collapseStaticLayoutIssues(result.rawIssues)
           : result.rawIssues;
@@ -319,6 +422,10 @@ export function createInspectCommand(commandName: "inspect" | "layout") {
                 schemaVersion: INSPECT_SCHEMA_VERSION,
                 duration: result.duration,
                 samples: result.samples,
+                transitionSamples: atTransitions ? result.transitionSamples : undefined,
+                transitionSamplesDropped: atTransitions
+                  ? result.transitionSamplesDropped
+                  : undefined,
                 tolerance,
                 strict,
                 collapseStatic,

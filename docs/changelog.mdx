@@ -9,6 +9,38 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.97"
+  description="Released - 2026-06-13"
+  tags={["Release", "CLI", "Studio", "Core", "Engine", "Player"]}
+>
+Batch rendering, WebGL determinism, studio resilience, and security hardening.
+
+## Features
+
+- **CLI:** Batch rendering — one output per variables row with manifest ([#1336](https://github.com/heygen-com/hyperframes/pull/1336))
+- **CLI:** Add `--at-transitions` to inspect for sampling at tween boundaries ([#1386](https://github.com/heygen-com/hyperframes/pull/1386))
+
+## Fixes
+
+- **Render:** Make WebGL video textures deterministic in headless render ([#1403](https://github.com/heygen-com/hyperframes/pull/1403))
+- **Player:** Clean up controls on destroy ([#1407](https://github.com/heygen-com/hyperframes/pull/1407))
+- **Core:** Route project paths through a single `resolveWithinProject` chokepoint ([#1398](https://github.com/heygen-com/hyperframes/pull/1398))
+- **Core:** Block symlink-based path escape in studio-api `isSafePath` ([#1397](https://github.com/heygen-com/hyperframes/pull/1397))
+- **Core:** Exclude dot-directories and node_modules from studio composition discovery and lint ([#1385](https://github.com/heygen-com/hyperframes/pull/1385))
+- **Studio:** Surface gesture recording controls ([#1390](https://github.com/heygen-com/hyperframes/pull/1390))
+- **Studio:** Reject unsafe keyframe values ([#1389](https://github.com/heygen-com/hyperframes/pull/1389))
+- **Studio:** Save retries, mutation queue circuit breaker, save_failure diagnostics ([#1366](https://github.com/heygen-com/hyperframes/pull/1366))
+- **Studio:** Journal source writebacks ([#1388](https://github.com/heygen-com/hyperframes/pull/1388))
+- **SDK:** Bridge preview selection into session state ([#1362](https://github.com/heygen-com/hyperframes/pull/1362))
+- **CLI:** Validate project directory before starting preview ([#1394](https://github.com/heygen-com/hyperframes/pull/1394))
+- **CLI:** Resolve and install transitive registry dependencies ([#1396](https://github.com/heygen-com/hyperframes/pull/1396))
+- **CLI:** Respect registry compatibility metadata ([#1251](https://github.com/heygen-com/hyperframes/pull/1251))
+- **Runtime:** Respect hidden ancestor clips in Studio preview ([#1387](https://github.com/heygen-com/hyperframes/pull/1387))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.95...v0.6.97).
+</Update>
+
+<Update
   label="HyperFrames v0.6.95"
   description="Released - 2026-06-12"
   tags={["Release", "Engine"]}

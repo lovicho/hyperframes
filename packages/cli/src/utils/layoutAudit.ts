@@ -217,6 +217,64 @@ function uniqueSortedTimes(times: number[]): number[] {
   return [...new Set(rounded)].sort((a, b) => a - b);
 }
 
+export interface TransitionSampleOptions {
+  duration: number;
+  boundaries: number[];
+  /** Optional hard limit on the returned sample count. No limit when absent. */
+  cap?: number;
+}
+
+export interface TransitionSamples {
+  times: number[];
+  /** Sample times omitted because of `cap`. Always 0 when no cap is given. */
+  dropped: number;
+}
+
+/**
+ * Build sample times from tween start/end boundaries: the boundaries
+ * themselves plus the midpoint of every segment between consecutive
+ * boundaries. Boundary frames are where transient overlaps live (#1380), but
+ * sampling exactly at a boundary can land on an element at opacity 0 — the
+ * segment midpoints catch the window where both sides of a transition are
+ * partially visible. Every collected boundary is sampled unless the caller
+ * passes an explicit `cap`, in which case the result is an evenly-strided
+ * subset and `dropped` reports how many sample times were omitted.
+ */
+export function buildTransitionSampleTimes({
+  duration,
+  boundaries,
+  cap,
+}: TransitionSampleOptions): TransitionSamples {
+  if (!Number.isFinite(duration) || duration <= 0) return { times: [], dropped: 0 };
+  const inRange = uniqueSortedTimes(
+    boundaries.filter((time) => Number.isFinite(time) && time >= 0 && time <= duration),
+  );
+  const withMidpoints = [...inRange];
+  for (let i = 0; i < inRange.length - 1; i++) {
+    const current = inRange[i];
+    const next = inRange[i + 1];
+    if (current === undefined || next === undefined) continue;
+    withMidpoints.push(roundTime((current + next) / 2));
+  }
+  const merged = uniqueSortedTimes(withMidpoints);
+  if (cap === undefined || merged.length <= Math.max(2, cap)) {
+    return { times: merged, dropped: 0 };
+  }
+  const limit = Math.max(2, cap);
+  const strided: number[] = [];
+  for (let i = 0; i < limit; i++) {
+    const pick = merged[Math.floor((i * (merged.length - 1)) / (limit - 1))];
+    if (pick !== undefined) strided.push(pick);
+  }
+  const times = uniqueSortedTimes(strided);
+  return { times, dropped: merged.length - times.length };
+}
+
+/** Merge sample-time lists into one deduplicated ascending list. */
+export function mergeSampleTimes(...lists: number[][]): number[] {
+  return uniqueSortedTimes(lists.flat());
+}
+
 function formatOverflow(overflow: LayoutOverflow): string {
   return (["left", "right", "top", "bottom"] as const)
     .flatMap((side) => {
