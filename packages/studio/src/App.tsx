@@ -3,6 +3,7 @@ import type { LeftSidebarHandle, SidebarTab } from "./components/sidebar/LeftSid
 import { useRenderQueue } from "./components/renders/useRenderQueue";
 import { usePlayerStore } from "./player";
 import { LintModal } from "./components/LintModal";
+import { SaveQueuePausedBanner } from "./components/SaveQueuePausedBanner";
 import { useCaptionStore } from "./captions/store";
 import { useCaptionSync } from "./captions/hooks/useCaptionSync";
 import { usePersistentEditHistory } from "./hooks/usePersistentEditHistory";
@@ -389,9 +390,7 @@ export function StudioApp() {
   );
 
   const {
-    selectedStudioMotion,
     designPanelActive,
-    motionPanelActive,
     inspectorPanelActive,
     inspectorButtonActive,
     shouldShowSelectedDomBounds,
@@ -399,7 +398,6 @@ export function StudioApp() {
     panelLayout.rightPanelTab,
     panelLayout.rightCollapsed,
     isPlaying,
-    domEditSession.domEditSelection,
     gestureState === "recording",
   );
 
@@ -481,6 +479,13 @@ export function StudioApp() {
                 onExport={() => void renderQueue.startRender()}
               />
 
+              {previewPersistence.domEditSaveQueuePaused && (
+                <SaveQueuePausedBanner
+                  message={previewPersistence.domEditSaveQueuePaused}
+                  onDismiss={previewPersistence.resetDomEditSaveQueueBreaker}
+                />
+              )}
+
               <div className="flex flex-1 min-h-0">
                 <StudioLeftSidebar
                   leftSidebarRef={leftSidebarRef}
@@ -510,6 +515,8 @@ export function StudioApp() {
                   setCompositionLoading={setCompositionLoading}
                   shouldShowSelectedDomBounds={shouldShowSelectedDomBounds}
                   isGestureRecording={gestureState === "recording"}
+                  recordingState={gestureState}
+                  onToggleRecording={STUDIO_KEYFRAMES_ENABLED ? handleToggleRecording : undefined}
                   blockPreview={blockPreview}
                   gestureOverlay={
                     gestureState === "recording" && previewIframe ? (
@@ -530,9 +537,7 @@ export function StudioApp() {
 
                 {!panelLayout.rightCollapsed && (
                   <StudioRightPanel
-                    selectedStudioMotion={selectedStudioMotion}
                     designPanelActive={designPanelActive}
-                    motionPanelActive={motionPanelActive}
                     activeBlockParams={activeBlockParams}
                     onCloseBlockParams={() => {
                       setActiveBlockParams(null);

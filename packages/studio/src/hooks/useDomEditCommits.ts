@@ -1,4 +1,5 @@
 import { useCallback, useRef } from "react";
+import { findUnsafeDomPatchValues } from "@hyperframes/core/studio-api/finite-mutation";
 import { usePlayerStore } from "../player";
 import { STUDIO_GSAP_DRAG_INTERCEPT_ENABLED } from "../components/editor/manualEditingAvailability";
 import { FONT_EXT } from "../utils/mediaTypes";
@@ -6,6 +7,7 @@ import type { PatchOperation } from "../utils/sourcePatcher";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import { saveProjectFilesWithHistory } from "../utils/studioFileHistory";
 import { primaryFontFamilyValue } from "../utils/studioFontHelpers";
+import { createStudioSaveHttpError } from "../utils/studioSaveDiagnostics";
 import {
   buildDomEditPatchTarget,
   getDomEditTargetKey,
@@ -27,22 +29,39 @@ import {
   buildClearPathOffsetPatches,
   buildClearBoxSizePatches,
   buildClearRotationPatches,
-  buildMotionPatches,
-  buildClearMotionPatches,
 } from "../components/editor/manualEditsDom";
-import {
-  writeStudioMotionToElement,
-  clearStudioMotionFromElement,
-  applyStudioMotionFromDom,
-  type StudioGsapMotion,
-} from "../components/editor/studioMotion";
 import { fontFamilyFromAssetPath, type ImportedFontAsset } from "../components/editor/fontAssets";
 import type { DomEditGroupPathOffsetCommit } from "../components/editor/DomEditOverlay";
 import type { EditHistoryKind } from "../utils/editHistory";
+import { useDomEditPositionPatchCommit } from "./useDomEditPositionPatchCommit";
 import { useDomEditTextCommits } from "./useDomEditTextCommits";
 
 // ── Helpers ──
 type TimelineLike = { getChildren?: (nested: boolean) => Array<{ targets?: () => Element[] }> };
+
+function formatUnsafeFieldList(fields: Array<{ path: string }>): string {
+  return fields.map((field) => field.path).join(", ");
+}
+
+async function readErrorResponseBody(
+  response: Response,
+): Promise<{ error?: string; fields?: string[] } | null> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) return null;
+  return (await response.json().catch(() => null)) as { error?: string; fields?: string[] } | null;
+}
+
+function formatPatchRejectionMessage(body: { error?: string; fields?: string[] } | null): string {
+  if (!body?.error) return "Couldn't save edit";
+  const fields = Array.isArray(body.fields)
+    ? body.fields.filter((field): field is string => typeof field === "string")
+    : [];
+  const suffix = fields.length > 0 ? ` (${fields.join(", ")})` : "";
+  return `Couldn't save edit: ${body.error}${suffix}`;
+}
+
+export const GSAP_CSS_FALLBACK_BLOCKED_MESSAGE =
+  "This element is GSAP-animated — dragging via CSS would corrupt keyframes";
 
 // fallow-ignore-next-line complexity
 function isElementGsapTargeted(iframe: HTMLIFrameElement | null, element: HTMLElement): boolean {
@@ -183,7 +202,9 @@ export function useDomEditCommits({
       const readResponse = await fetch(
         `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
       );
-      if (!readResponse.ok) throw new Error(`Failed to read ${targetPath}`);
+      if (!readResponse.ok) {
+        throw await createStudioSaveHttpError(readResponse, `Failed to read ${targetPath}`);
+      }
       const readData = (await readResponse.json()) as { content?: string };
       const originalContent = readData.content;
       if (typeof originalContent !== "string") {
@@ -193,6 +214,13 @@ export function useDomEditCommits({
       if (options?.shouldSave && !options.shouldSave()) return;
 
       const patchTarget = buildDomEditPatchTarget(selection);
+      const patchBody = { target: patchTarget, operations };
+      const unsafeFields = findUnsafeDomPatchValues(patchBody);
+      if (unsafeFields.length > 0) {
+        const fields = formatUnsafeFieldList(unsafeFields);
+        showToast("Couldn't save edit because it contains invalid layout values", "error");
+        throw new Error(`DOM patch contains unsafe values: ${fields}`);
+      }
 
       // Mark the save timestamp before the file write so the SSE file-change
       // handler suppresses the reload even if the event arrives before the
@@ -204,10 +232,13 @@ export function useDomEditCommits({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target: patchTarget, operations }),
+          body: JSON.stringify(patchBody),
         },
       );
-      if (!patchResponse.ok) throw new Error(`Failed to patch ${targetPath}`);
+      if (!patchResponse.ok) {
+        showToast(formatPatchRejectionMessage(await readErrorResponseBody(patchResponse)), "error");
+        throw await createStudioSaveHttpError(patchResponse, `Failed to patch ${targetPath}`);
+      }
 
       const patchData = (await patchResponse.json()) as {
         ok?: boolean;
@@ -265,6 +296,7 @@ export function useDomEditCommits({
       projectIdRef,
       domEditSaveTimestampRef,
       reloadPreview,
+      showToast,
     ],
   );
 
@@ -290,93 +322,88 @@ export function useDomEditCommits({
     resolveImportedFontAsset,
   });
 
-  // ── Position patch helper ──
-
-  // fallow-ignore-next-line complexity
-  const commitPositionPatchToHtml = useCallback(
-    (
-      selection: DomEditSelection,
-      patches: PatchOperation[],
-      options: { label: string; coalesceKey: string; skipRefresh?: boolean },
-    ) => {
-      void queueDomEditSave(async () => {
-        await persistDomEditOperations(selection, patches, {
-          label: options.label,
-          coalesceKey: options.coalesceKey,
-          skipRefresh: options.skipRefresh ?? true,
-        });
-        // fallow-ignore-next-line complexity
-      }).catch((error) => {
-        const message = error instanceof Error ? error.message : "Failed to save position";
-        showToast(message);
-        trackStudioEvent("save_failure", {
-          source: "dom_edit",
-          label: options.label,
-          error_message: message,
-          target_id: selection.id ?? undefined,
-          target_selector: selection.selector ?? undefined,
-          target_source_file: selection.sourceFile ?? undefined,
-        });
-      });
-    },
-    [persistDomEditOperations, queueDomEditSave, showToast],
-  );
+  const commitPositionPatchToHtml = useDomEditPositionPatchCommit({
+    activeCompPath,
+    persistDomEditOperations,
+    queueDomEditSave,
+    showToast,
+  });
 
   // ── Position commits ──
 
   const handleDomPathOffsetCommit = useCallback(
     (selection: DomEditSelection, next: { x: number; y: number }) => {
+      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) {
+        const error = new Error(GSAP_CSS_FALLBACK_BLOCKED_MESSAGE);
+        showToast(error.message, "error");
+        return Promise.reject(error);
+      }
       applyStudioPathOffset(selection.element, next);
-      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) return;
-      commitPositionPatchToHtml(selection, buildPathOffsetPatches(selection.element), {
+      return commitPositionPatchToHtml(selection, buildPathOffsetPatches(selection.element), {
         label: "Move layer",
         coalesceKey: `path-offset:${getDomEditTargetKey(selection)}`,
       });
     },
-    [commitPositionPatchToHtml, previewIframeRef],
+    [commitPositionPatchToHtml, previewIframeRef, showToast],
   );
 
   const handleDomGroupPathOffsetCommit = useCallback(
     (updates: DomEditGroupPathOffsetCommit[]) => {
-      if (updates.length === 0) return;
+      if (updates.length === 0) return Promise.resolve();
+      const blockedUpdate = updates.find(({ selection }) =>
+        isElementGsapTargeted(previewIframeRef.current, selection.element),
+      );
+      if (blockedUpdate) {
+        const error = new Error(GSAP_CSS_FALLBACK_BLOCKED_MESSAGE);
+        showToast(error.message, "error");
+        return Promise.reject(error);
+      }
       const coalesceKey = updates
         .map((u) => getDomEditTargetKey(u.selection))
         .sort()
         .join(":");
-      for (const { selection, next } of updates) {
+      const saves = updates.map(({ selection, next }) => {
         applyStudioPathOffset(selection.element, next);
-        if (isElementGsapTargeted(previewIframeRef.current, selection.element)) continue;
-        commitPositionPatchToHtml(selection, buildPathOffsetPatches(selection.element), {
+        return commitPositionPatchToHtml(selection, buildPathOffsetPatches(selection.element), {
           label: `Move ${updates.length} layers`,
           coalesceKey: `group-path-offset:${coalesceKey}`,
         });
-      }
+      });
+      return Promise.all(saves).then(() => undefined);
     },
-    [commitPositionPatchToHtml, previewIframeRef],
+    [commitPositionPatchToHtml, previewIframeRef, showToast],
   );
 
   const handleDomBoxSizeCommit = useCallback(
     (selection: DomEditSelection, next: { width: number; height: number }) => {
+      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) {
+        const error = new Error(GSAP_CSS_FALLBACK_BLOCKED_MESSAGE);
+        showToast(error.message, "error");
+        return Promise.reject(error);
+      }
       applyStudioBoxSize(selection.element, next);
-      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) return;
-      commitPositionPatchToHtml(selection, buildBoxSizePatches(selection.element), {
+      return commitPositionPatchToHtml(selection, buildBoxSizePatches(selection.element), {
         label: "Resize layer box",
         coalesceKey: `box-size:${getDomEditTargetKey(selection)}`,
       });
     },
-    [commitPositionPatchToHtml, previewIframeRef],
+    [commitPositionPatchToHtml, previewIframeRef, showToast],
   );
 
   const handleDomRotationCommit = useCallback(
     (selection: DomEditSelection, next: { angle: number }) => {
+      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) {
+        const error = new Error(GSAP_CSS_FALLBACK_BLOCKED_MESSAGE);
+        showToast(error.message, "error");
+        return Promise.reject(error);
+      }
       applyStudioRotation(selection.element, next);
-      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) return;
-      commitPositionPatchToHtml(selection, buildRotationPatches(selection.element), {
+      return commitPositionPatchToHtml(selection, buildRotationPatches(selection.element), {
         label: "Rotate layer",
         coalesceKey: `rotation:${getDomEditTargetKey(selection)}`,
       });
     },
-    [commitPositionPatchToHtml, previewIframeRef],
+    [commitPositionPatchToHtml, previewIframeRef, showToast],
   );
 
   const handleDomManualEditsReset = useCallback(
@@ -391,71 +418,13 @@ export function useDomEditCommits({
       clearStudioBoxSize(element);
       clearStudioRotation(element);
       // skipRefresh:false triggers reloadPreview() which re-syncs selection on load
-      commitPositionPatchToHtml(selection, clearPatches, {
+      void commitPositionPatchToHtml(selection, clearPatches, {
         label: "Reset layer edits",
         coalesceKey: `manual-reset:${getDomEditTargetKey(selection)}`,
         skipRefresh: false,
-      });
+      }).catch(() => undefined);
     },
     [commitPositionPatchToHtml],
-  );
-
-  // ── Motion commits (HTML-attribute–backed) ──
-
-  // fallow-ignore-next-line complexity
-  const handleDomMotionCommit = useCallback(
-    (
-      selection: DomEditSelection,
-      motion: Omit<StudioGsapMotion, "kind" | "target" | "updatedAt">,
-    ) => {
-      // 1. Write motion data as JSON attribute on the element
-      writeStudioMotionToElement(selection.element, motion);
-      // 2. Apply the GSAP timeline from DOM attributes
-      let doc: Document | null = null;
-      try {
-        doc = previewIframeRef.current?.contentDocument ?? null;
-      } catch {
-        // cross-origin guard
-      }
-      if (doc) applyStudioMotionFromDom(doc);
-      // 3. Build patches and persist to HTML
-      const patches = buildMotionPatches(selection.element);
-      commitPositionPatchToHtml(selection, patches, {
-        label: "Set GSAP motion",
-        coalesceKey: `motion:${getDomEditTargetKey(selection)}`,
-      });
-      refreshDomEditSelectionFromPreview(selection);
-    },
-    [commitPositionPatchToHtml, previewIframeRef, refreshDomEditSelectionFromPreview],
-  );
-
-  // fallow-ignore-next-line complexity
-  const handleDomMotionClear = useCallback(
-    (selection: DomEditSelection) => {
-      const clearPatches = buildClearMotionPatches(selection.element);
-      // Get gsap from the preview window for proper cleanup
-      let gsap: { set?: (target: HTMLElement, vars: Record<string, unknown>) => void } | undefined;
-      try {
-        gsap = (previewIframeRef.current?.contentWindow as { gsap?: typeof gsap })?.gsap;
-      } catch {
-        // cross-origin guard
-      }
-      clearStudioMotionFromElement(selection.element, gsap);
-      let doc: Document | null = null;
-      try {
-        doc = previewIframeRef.current?.contentDocument ?? null;
-      } catch {
-        // cross-origin guard
-      }
-      if (doc) applyStudioMotionFromDom(doc);
-      commitPositionPatchToHtml(selection, clearPatches, {
-        label: "Clear GSAP motion",
-        coalesceKey: `motion:${getDomEditTargetKey(selection)}`,
-        skipRefresh: false,
-      });
-      refreshDomEditSelectionFromPreview(selection);
-    },
-    [commitPositionPatchToHtml, previewIframeRef, refreshDomEditSelectionFromPreview],
   );
 
   // fallow-ignore-next-line complexity
@@ -471,7 +440,9 @@ export function useDomEditCommits({
         const response = await fetch(
           `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
         );
-        if (!response.ok) throw new Error(`Failed to read ${targetPath}`);
+        if (!response.ok) {
+          throw await createStudioSaveHttpError(response, `Failed to read ${targetPath}`);
+        }
 
         const data = (await response.json()) as { content?: string };
         const originalContent = data.content;
@@ -492,7 +463,12 @@ export function useDomEditCommits({
             body: JSON.stringify({ target: patchTarget }),
           },
         );
-        if (!removeResponse.ok) throw new Error(`Failed to delete element from ${targetPath}`);
+        if (!removeResponse.ok) {
+          throw await createStudioSaveHttpError(
+            removeResponse,
+            `Failed to delete element from ${targetPath}`,
+          );
+        }
 
         const removeData = (await removeResponse.json()) as { changed?: boolean; content?: string };
         const patchedContent =
@@ -556,7 +532,7 @@ export function useDomEditCommits({
         } catch {
           /* cross-origin or detached — skip */
         }
-        commitPositionPatchToHtml(
+        void commitPositionPatchToHtml(
           {
             element: entry.element,
             id: entry.id ?? null,
@@ -571,7 +547,7 @@ export function useDomEditCommits({
             coalesceKey,
             skipRefresh: i < entries.length - 1,
           },
-        );
+        ).catch(() => undefined);
       }
     },
     [commitPositionPatchToHtml],
@@ -592,8 +568,6 @@ export function useDomEditCommits({
     handleDomBoxSizeCommit,
     handleDomRotationCommit,
     handleDomManualEditsReset,
-    handleDomMotionCommit,
-    handleDomMotionClear,
     handleDomEditElementDelete,
     handleDomZIndexReorderCommit,
   };

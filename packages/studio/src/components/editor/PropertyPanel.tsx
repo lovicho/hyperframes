@@ -21,6 +21,7 @@ import { STUDIO_GSAP_PANEL_ENABLED, STUDIO_KEYFRAMES_ENABLED } from "./manualEdi
 import { usePlayerStore, liveTime } from "../../player";
 import { TimingSection } from "./propertyPanelTimingSection";
 import { type PropertyPanelProps } from "./propertyPanelHelpers";
+import { GestureRecordPanelButton } from "./GestureRecordControl";
 
 // Re-export helpers that external consumers import from this module
 export {
@@ -33,10 +34,6 @@ export {
   normalizePanelPxValue,
   setCssFilterFunctionPx,
 } from "./propertyPanelHelpers";
-
-/* ------------------------------------------------------------------ */
-/*  PropertyPanel                                                      */
-/* ------------------------------------------------------------------ */
 
 // fallow-ignore-next-line complexity
 export const PropertyPanel = memo(function PropertyPanel({
@@ -177,10 +174,12 @@ export const PropertyPanel = memo(function PropertyPanel({
       return;
     }
     const current = readStudioPathOffset(element.element);
-    onSetManualOffset(element, {
-      x: axis === "x" ? parsed : current.x,
-      y: axis === "y" ? parsed : current.y,
-    });
+    void Promise.resolve(
+      onSetManualOffset(element, {
+        x: axis === "x" ? parsed : current.x,
+        y: axis === "y" ? parsed : current.y,
+      }),
+    ).catch(() => undefined);
   };
 
   // fallow-ignore-next-line complexity
@@ -204,17 +203,19 @@ export const PropertyPanel = memo(function PropertyPanel({
       current.height > 0
         ? current.height
         : (parsePxMetricValue(styles.height ?? "") ?? element.boundingBox.height);
-    onSetManualSize(element, {
-      width: axis === "width" ? parsed : width,
-      height: axis === "height" ? parsed : height,
-    });
+    void Promise.resolve(
+      onSetManualSize(element, {
+        width: axis === "width" ? parsed : width,
+        height: axis === "height" ? parsed : height,
+      }),
+    ).catch(() => undefined);
   };
 
   const manualRotation = readStudioRotation(element.element);
   const commitManualRotation = (nextValue: string) => {
     const parsed = Number.parseFloat(nextValue);
     if (!Number.isFinite(parsed)) return;
-    onSetManualRotation(element, { angle: parsed });
+    void Promise.resolve(onSetManualRotation(element, { angle: parsed })).catch(() => undefined);
   };
 
   const elStart = Number.parseFloat(element?.dataAttributes?.start ?? "0") || 0;
@@ -354,6 +355,14 @@ export const PropertyPanel = memo(function PropertyPanel({
         </div>
       </div>
       <div className="flex-1 overflow-y-auto">
+        {onToggleRecording && (
+          <GestureRecordPanelButton
+            recordingState={recordingState}
+            recordingDuration={recordingDuration}
+            onToggleRecording={onToggleRecording}
+          />
+        )}
+
         <TextSection
           element={element}
           styles={styles}
@@ -558,31 +567,6 @@ export const PropertyPanel = memo(function PropertyPanel({
             />
           )}
 
-        {onToggleRecording && (
-          <div className="px-4 pb-3">
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={onToggleRecording}
-              className={`w-full flex items-center justify-center gap-2 rounded-lg py-2 text-[11px] font-medium transition-colors ${
-                recordingState === "recording"
-                  ? "bg-red-500/15 text-red-400 border border-red-500/30 animate-pulse"
-                  : "bg-panel-input text-panel-text-2 hover:bg-panel-hover border border-panel-border"
-              }`}
-            >
-              <svg width="10" height="10" viewBox="0 0 10 10">
-                {recordingState === "recording" ? (
-                  <rect x="1" y="1" width="8" height="8" rx="1" fill="currentColor" />
-                ) : (
-                  <circle cx="5" cy="5" r="4.5" fill="currentColor" />
-                )}
-              </svg>
-              {recordingState === "recording"
-                ? `Stop recording ${(recordingDuration ?? 0).toFixed(1)}s — press R`
-                : "Record gesture (R) — move pointer to capture motion"}
-            </button>
-          </div>
-        )}
         {showEditableSections && (
           <StyleSections
             projectId={projectId}

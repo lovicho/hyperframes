@@ -16,7 +16,13 @@ import type { StudioApiAdapter } from "../types.js";
 import { isAudioFile } from "../helpers/mime.js";
 import { generateWaveformCache } from "../helpers/waveform.js";
 import { validateUploadedMediaBuffer } from "../helpers/mediaValidation.js";
-import { isSafePath } from "../helpers/safePath.js";
+import { isSafePath, resolveWithinProject } from "../helpers/safePath.js";
+import { backupPathForResponse, snapshotBeforeWrite } from "../helpers/backupJournal.js";
+import {
+  findUnsafeDomPatchValues,
+  findUnsafeMutationValues,
+  type UnsafeMutationValue,
+} from "../helpers/finiteMutation.js";
 import type { GsapAnimation } from "../../parsers/gsapSerialize.js";
 import {
   removeElementFromHtml,
@@ -60,8 +66,8 @@ async function resolveProjectPath(
     return { error: c.json({ error: "forbidden" }, 403) } as const;
   }
 
-  const absPath = resolve(project.dir, filePath);
-  if (!isSafePath(project.dir, absPath)) {
+  const absPath = resolveWithinProject(project.dir, filePath);
+  if (!absPath) {
     return { error: c.json({ error: "forbidden" }, 403) } as const;
   }
 
@@ -94,15 +100,39 @@ type MutationTarget = {
 /** Write `next` to `absPath` only if it differs from `original`, returning a standardized change response. */
 function writeIfChanged(
   c: RouteContext,
+  projectDir: string,
+  filePath: string,
   absPath: string,
   original: string,
   next: string,
 ): Response {
   if (next === original) {
-    return c.json({ ok: true, changed: false, content: original });
+    return c.json({ ok: true, changed: false, content: original, path: filePath });
   }
+  const backup = snapshotBeforeWrite(projectDir, absPath);
+  if (backup.error) console.warn(`Failed to create backup for ${filePath}: ${backup.error}`);
   writeFileSync(absPath, next, "utf-8");
-  return c.json({ ok: true, changed: true, content: next });
+  return c.json({
+    ok: true,
+    changed: true,
+    content: next,
+    path: filePath,
+    backupPath: backupPathForResponse(projectDir, backup.backupPath),
+  });
+}
+
+function rejectUnsafeMutationValues(
+  c: RouteContext,
+  unsafeFields: UnsafeMutationValue[],
+): Response {
+  return c.json(
+    {
+      error: "mutation contains unsafe values",
+      fields: unsafeFields.map((field) => field.path),
+      unsafeValues: unsafeFields,
+    },
+    400,
+  );
 }
 
 /**
@@ -815,9 +845,15 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
 
     ensureDir(res.absPath);
     const body = await c.req.text();
+    const backup = snapshotBeforeWrite(res.project.dir, res.absPath);
+    if (backup.error) console.warn(`Failed to create backup for ${res.filePath}: ${backup.error}`);
     writeFileSync(res.absPath, body, "utf-8");
 
-    return c.json({ ok: true });
+    return c.json({
+      ok: true,
+      path: res.filePath,
+      backupPath: backupPathForResponse(res.project.dir, backup.backupPath),
+    });
   });
 
   // ── Create (fail if exists) ──
@@ -844,13 +880,18 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     if ("error" in res) return res.error;
 
     const stat = statSync(res.absPath);
+    const backup = snapshotBeforeWrite(res.project.dir, res.absPath);
+    if (backup.error) console.warn(`Failed to create backup for ${res.filePath}: ${backup.error}`);
     if (stat.isDirectory()) {
       rmSync(res.absPath, { recursive: true });
     } else {
       unlinkSync(res.absPath);
     }
 
-    return c.json({ ok: true });
+    return c.json({
+      ok: true,
+      backupPath: backupPathForResponse(res.project.dir, backup.backupPath),
+    });
   });
 
   api.post("/projects/:id/file-mutations/remove-element/*", async (c) => {
@@ -867,6 +908,8 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     const originalContent = readFileSync(ctx.absPath, "utf-8");
     return writeIfChanged(
       c,
+      ctx.project.dir,
+      ctx.filePath,
       ctx.absPath,
       originalContent,
       removeElementFromHtml(originalContent, parsed.target),
@@ -900,10 +943,19 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       parsed.body.newId,
     );
     if (!result.matched) {
-      return c.json({ ok: false, changed: false, content: originalContent });
+      return c.json({ ok: false, changed: false, content: originalContent, path: ctx.filePath });
     }
+    const backup = snapshotBeforeWrite(ctx.project.dir, ctx.absPath);
+    if (backup.error) console.warn(`Failed to create backup for ${ctx.filePath}: ${backup.error}`);
     writeFileSync(ctx.absPath, result.html, "utf-8");
-    return c.json({ ok: true, changed: true, content: result.html, newId: result.newId });
+    return c.json({
+      ok: true,
+      changed: true,
+      content: result.html,
+      newId: result.newId,
+      path: ctx.filePath,
+      backupPath: backupPathForResponse(ctx.project.dir, backup.backupPath),
+    });
   });
 
   api.post("/projects/:id/file-mutations/patch-element/*", async (c) => {
@@ -918,6 +970,10 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     if (!Array.isArray(parsed.body.operations) || parsed.body.operations.length === 0) {
       return c.json({ error: "target and operations required" }, 400);
     }
+    const unsafeFields = findUnsafeDomPatchValues(parsed.body);
+    if (unsafeFields.length > 0) {
+      return rejectUnsafeMutationValues(c, unsafeFields);
+    }
 
     let originalContent: string;
     try {
@@ -931,10 +987,25 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       parsed.body.operations,
     );
     if (patched === originalContent) {
-      return c.json({ ok: true, changed: false, matched, content: originalContent });
+      return c.json({
+        ok: true,
+        changed: false,
+        matched,
+        content: originalContent,
+        path: ctx.filePath,
+      });
     }
+    const backup = snapshotBeforeWrite(ctx.project.dir, ctx.absPath);
+    if (backup.error) console.warn(`Failed to create backup for ${ctx.filePath}: ${backup.error}`);
     writeFileSync(ctx.absPath, patched, "utf-8");
-    return c.json({ ok: true, changed: true, matched, content: patched });
+    return c.json({
+      ok: true,
+      changed: true,
+      matched,
+      content: patched,
+      path: ctx.filePath,
+      backupPath: backupPathForResponse(ctx.project.dir, backup.backupPath),
+    });
   });
 
   api.post("/projects/:id/file-mutations/probe-element/*", async (c) => {
@@ -966,8 +1037,8 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       return c.json({ error: "newPath required" }, 400);
     }
 
-    const newAbs = resolve(res.project.dir, body.newPath);
-    if (!isSafePath(res.project.dir, newAbs)) {
+    const newAbs = resolveWithinProject(res.project.dir, body.newPath);
+    if (!newAbs) {
       return c.json({ error: "forbidden" }, 403);
     }
     if (existsSync(newAbs)) {
@@ -994,14 +1065,14 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       return c.json({ error: "path required" }, 400);
     }
 
-    const srcAbs = resolve(project.dir, body.path);
-    if (!isSafePath(project.dir, srcAbs) || !existsSync(srcAbs)) {
+    const srcAbs = resolveWithinProject(project.dir, body.path);
+    if (!srcAbs || !existsSync(srcAbs)) {
       return c.json({ error: "not found" }, 404);
     }
 
     const copyPath = generateCopyPath(project.dir, body.path);
-    const destAbs = resolve(project.dir, copyPath);
-    if (!isSafePath(project.dir, destAbs)) {
+    const destAbs = resolveWithinProject(project.dir, copyPath);
+    if (!destAbs) {
       return c.json({ error: "forbidden" }, 403);
     }
 
@@ -1027,8 +1098,8 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
 
       // Optional subdirectory within the project (e.g. "assets/audio")
       const subDir = c.req.query("dir") ?? "";
-      const targetDir = subDir ? resolve(project.dir, subDir) : project.dir;
-      if (!isSafePath(project.dir, targetDir)) return c.json({ error: "forbidden" }, 403);
+      const targetDir = subDir ? resolveWithinProject(project.dir, subDir) : project.dir;
+      if (!targetDir) return c.json({ error: "forbidden" }, 403);
       if (subDir && !existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
 
       const formData = await c.req.formData();
@@ -1077,6 +1148,10 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     if (!body || !body.type) {
       return c.json({ error: "mutation type required" }, 400);
     }
+    const unsafeFields = findUnsafeMutationValues(body);
+    if (unsafeFields.length > 0) {
+      return rejectUnsafeMutationValues(c, unsafeFields);
+    }
 
     let html = readFileSync(res.absPath, "utf-8");
     let block = extractGsapScriptBlock(html);
@@ -1113,7 +1188,12 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     const newScript = typeof result === "string" ? result : result.script;
     const changed = newScript !== block.scriptText;
     const newHtml = changed ? block.replaceScript(newScript) : html;
+    let backupPath: string | null = null;
     if (changed) {
+      const backup = snapshotBeforeWrite(res.project.dir, res.absPath);
+      if (backup.error)
+        console.warn(`Failed to create backup for ${res.filePath}: ${backup.error}`);
+      backupPath = backupPathForResponse(res.project.dir, backup.backupPath);
       writeFileSync(res.absPath, newHtml, "utf-8");
     }
 
@@ -1126,6 +1206,8 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       before: html,
       after: newHtml,
       scriptText: newScript,
+      path: res.filePath,
+      backupPath,
     };
     if (typeof result !== "string" && result.skippedSelectors.length > 0) {
       responsePayload.skippedSelectors = result.skippedSelectors;
