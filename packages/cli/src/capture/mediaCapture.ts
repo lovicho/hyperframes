@@ -9,8 +9,8 @@
 
 import type { Browser, Page } from "puppeteer-core";
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { safeFetch } from "./assetDownloader.js";
+import { join, extname } from "node:path";
+import { isPrivateUrl, safeFetch } from "./assetDownloader.js";
 
 /** Discovered Lottie item from network interception or DOM scan. */
 export interface DiscoveredLottie {
@@ -26,6 +26,7 @@ export interface DiscoveredLottie {
  * Handles both plain JSON and dotLottie (.lottie ZIP) formats.
  * Deduplicates by content hash. Returns the count of saved files.
  */
+// fallow-ignore-next-line complexity
 export async function saveLottieAnimations(
   discoveredLotties: DiscoveredLottie[],
   lottieDir: string,
@@ -111,6 +112,7 @@ export async function saveLottieAnimations(
  * seeks to ~30% through the animation, and takes a transparent screenshot.
  * Writes a lottie-manifest.json with metadata + preview paths.
  */
+// fallow-ignore-next-line complexity
 export async function renderLottiePreviews(
   chromeBrowser: Browser,
   lottieDir: string,
@@ -212,108 +214,249 @@ export async function renderLottiePreviews(
   }
 }
 
+const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75 MB — hero/demo clips, not full films
+const DOWNLOADABLE_VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".m4v"]);
+
 /**
- * Capture video element manifest — screenshot each <video> element and
- * extract surrounding context (heading, caption, aria-label).
+ * Download a <video> body to assets/videos/<file>, returning the
+ * capture-relative path when saved (else null).
  *
- * Writes video-manifest.json and preview screenshots to assets/videos/previews/.
+ * Guards, in order: direct-file extension only — HLS (.m3u8) / DASH (.mpd) /
+ * blob: streams are skipped · SSRF via safeFetch, which re-validates isPrivateUrl
+ * on EVERY redirect hop (a bare redirect:"follow" only checks the initial URL,
+ * so a public URL could 30x to an internal/metadata host) · Content-Type must be
+ * video/* or octet-stream · a hard byte cap enforced WHILE streaming so a
+ * missing or lying Content-Length cannot exhaust memory. Streams from the
+ * Response body rather than buffering whole because videos are large.
  */
+// fallow-ignore-next-line complexity
+async function downloadVideoBody(
+  srcUrl: string,
+  filename: string,
+  videosDir: string,
+): Promise<string | null> {
+  if (isPrivateUrl(srcUrl)) return null; // cheap pre-check; safeFetch re-checks every hop
+  let ext = "";
+  try {
+    ext = extname(new URL(srcUrl).pathname).toLowerCase();
+  } catch {
+    return null;
+  }
+  if (!DOWNLOADABLE_VIDEO_EXTS.has(ext)) return null; // streaming manifest / unknown — leave on origin
+  try {
+    // safeFetch resolves redirects manually and re-runs isPrivateUrl on each
+    // Location hop, so a public URL cannot 30x to an internal/metadata host.
+    const res = await safeFetch(srcUrl, {
+      signal: AbortSignal.timeout(120000), // up to ~75 MB on a slow link; aborts cleanly → still-frame fallback
+      headers: { "User-Agent": "HyperFrames/1.0" },
+    });
+    if (!res || !res.ok || !res.body) return null;
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (ct && !ct.startsWith("video/") && !ct.includes("octet-stream")) return null;
+    const declared = Number(res.headers.get("content-length") || 0);
+    if (declared && declared > MAX_VIDEO_BYTES) return null; // too big — leave on origin
+    // Stream with a hard cap; a chunked response has no Content-Length to trust.
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      total += chunk.length;
+      if (total > MAX_VIDEO_BYTES) return null; // abort oversized stream — no partial file written
+      chunks.push(Buffer.from(chunk));
+    }
+    if (total < 1024) return null; // too small to be a real video (likely an error blob)
+    const safe = /\.[a-z0-9]+$/i.test(filename) ? filename.replace(/[^\w.-]/g, "_") : `video${ext}`;
+    writeFileSync(join(videosDir, safe), Buffer.concat(chunks));
+    return `assets/videos/${safe}`;
+  } catch {
+    return null;
+  }
+}
+
+/** A <video> descriptor scanned from the DOM (rich: has rect + nearby text). */
+interface VideoDescriptor {
+  src: string;
+  width: number;
+  height: number;
+  top: number;
+  left: number;
+  heading: string;
+  caption: string;
+  ariaLabel: string;
+  filename: string;
+}
+
+// In-page expression: scan every <video> for src + bounding box + nearest
+// heading/caption/aria. Shared by the one-shot scan and the time-sampling pass.
+const VIDEO_SCAN_EXPR = `(() => {
+  var videos = Array.from(document.querySelectorAll('video'));
+  return videos.map(function(v) {
+    var src = v.src || v.currentSrc || (v.querySelector('source') ? v.querySelector('source').src : '');
+    if (!src || !src.startsWith('http')) return null;
+    var rect = v.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return null;
+    var heading = '';
+    var el = v;
+    for (var i = 0; i < 8; i++) {
+      el = el.parentElement;
+      if (!el) break;
+      var h = el.querySelector('h1,h2,h3,h4');
+      if (h) { heading = h.textContent.trim().slice(0, 100); break; }
+    }
+    var caption = '';
+    el = v;
+    for (var j = 0; j < 5; j++) {
+      el = el.parentElement;
+      if (!el) break;
+      var p = el.querySelector('p,figcaption,[class*="caption"],[class*="desc"]');
+      if (p) { caption = p.textContent.trim().slice(0, 200); break; }
+    }
+    var ariaLabel = v.getAttribute('aria-label') || v.getAttribute('title') || '';
+    var wrapper = v.parentElement;
+    if (!ariaLabel && wrapper) ariaLabel = wrapper.getAttribute('aria-label') || '';
+    return {
+      src: src,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      top: Math.round(rect.top),
+      left: Math.round(rect.left),
+      heading: heading,
+      caption: caption,
+      ariaLabel: ariaLabel,
+      filename: src.split('/').pop().split('?')[0],
+    };
+  }).filter(Boolean);
+})()`;
+
+async function scanVideoDom(page: Page): Promise<VideoDescriptor[]> {
+  return (await page.evaluate(VIDEO_SCAN_EXPR)) as VideoDescriptor[];
+}
+
+/**
+ * Layer 2 (passive): poll the DOM over a bounded window so auto-rotating
+ * carousels reveal each slide, AND so the Layer 1 network listener (whose live
+ * Set is `netSet`) gets time to record videos fetched on rotation. Accumulates
+ * unique-by-src descriptors. Exits early once neither the DOM set nor the
+ * network set has grown for a few rounds, so static single-video pages stay
+ * cheap (~6s) while a rotating carousel keeps sampling up to the budget.
+ */
+// fallow-ignore-next-line complexity
+async function sampleVideoDom(
+  page: Page,
+  budgetMs: number,
+  netSet: Set<string>,
+): Promise<VideoDescriptor[]> {
+  const seen = new Map<string, VideoDescriptor>();
+  const start = Date.now();
+  let stale = 0;
+  while (Date.now() - start < budgetMs && stale < 3) {
+    let grew = false;
+    const netBefore = netSet.size;
+    for (const d of await scanVideoDom(page)) {
+      if (!seen.has(d.src)) {
+        seen.set(d.src, d);
+        grew = true;
+      }
+    }
+    if (netSet.size > netBefore) grew = true;
+    stale = grew ? 0 : stale + 1;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Capture video element manifest — screenshot each <video> element, extract
+ * surrounding context (heading, caption, aria-label), and download the video
+ * body when it is a direct file (see downloadVideoBody guards).
+ *
+ * Two PASSIVE discovery layers widen coverage past a single snapshot (which
+ * misses carousels / tabs / lazy media):
+ *   • Layer 1 — opts.networkVideoUrls: a LIVE Set the caller fills from the
+ *     page "response" listener with every direct-video URL the page fetches
+ *     (load / scroll / auto-rotation), independent of DOM presence. Read after
+ *     sampling so rotation fetches during the window are included.
+ *   • Layer 2 — opts.sampleMs: poll the DOM over that window so an
+ *     auto-rotating carousel surfaces each slide.
+ * The manifest is the union, deduped by download filename. DOM-scanned videos
+ * get a still preview; network-only videos are downloaded without one. (Active
+ * click-through of carousels/tabs is intentionally NOT done here.)
+ *
+ * Writes video-manifest.json + preview screenshots to assets/videos/previews/,
+ * and the video bodies (when downloadable) to assets/videos/.
+ */
+// fallow-ignore-next-line complexity
 export async function captureVideoManifest(
   page: Page,
   outputDir: string,
   progress: (stage: string, detail?: string) => void,
+  opts?: { networkVideoUrls?: Set<string>; sampleMs?: number; downloadBudgetMs?: number },
 ): Promise<void> {
-  const videoElements = (await page.evaluate(`(() => {
-    var videos = Array.from(document.querySelectorAll('video'));
-    return videos.map(function(v) {
-      var src = v.src || v.currentSrc || (v.querySelector('source') ? v.querySelector('source').src : '');
-      if (!src || !src.startsWith('http')) return null;
+  const netSet = opts?.networkVideoUrls ?? new Set<string>();
+  const sampleMs = opts?.sampleMs ?? 0;
+  const downloadBudgetMs = opts?.downloadBudgetMs ?? 180000;
 
-      // Get bounding box for screenshot
-      var rect = v.getBoundingClientRect();
-      if (rect.width < 10 || rect.height < 10) return null;
+  // DOM scan, optionally sampled over time (Layer 2) when videos are present.
+  const initial = await scanVideoDom(page);
+  const domVideos =
+    initial.length > 0 && sampleMs > 0 ? await sampleVideoDom(page, sampleMs, netSet) : initial;
 
-      // Nearest heading above the video
-      var heading = '';
-      var el = v;
-      for (var i = 0; i < 8; i++) {
-        el = el.parentElement;
-        if (!el) break;
-        var h = el.querySelector('h1,h2,h3,h4');
-        if (h) { heading = h.textContent.trim().slice(0, 100); break; }
-      }
+  // Merge DOM (rich) + network-only (thin, Layer 1), deduped by download
+  // filename so a clip seen in both lands once. netSet is read here — AFTER
+  // sampling — so rotation fetches that arrived during the window count.
+  const fileKey = (s: string) => (s.split("/").pop() || s).split("?")[0]!;
+  const byKey = new Map<string, VideoDescriptor & { rich: boolean }>();
+  for (const d of domVideos) {
+    const k = d.filename || fileKey(d.src);
+    if (!byKey.has(k)) byKey.set(k, { ...d, rich: true });
+  }
+  for (const url of netSet) {
+    if (!url.startsWith("http")) continue;
+    const k = fileKey(url);
+    if (!byKey.has(k)) {
+      byKey.set(k, {
+        src: url,
+        filename: k,
+        width: 0,
+        height: 0,
+        top: 0,
+        left: 0,
+        heading: "",
+        caption: "",
+        ariaLabel: "",
+        rich: false,
+      });
+    }
+  }
+  const merged = [...byKey.values()];
+  if (merged.length === 0) return;
 
-      // Nearest paragraph/caption text
-      var caption = '';
-      el = v;
-      for (var j = 0; j < 5; j++) {
-        el = el.parentElement;
-        if (!el) break;
-        var p = el.querySelector('p,figcaption,[class*="caption"],[class*="desc"]');
-        if (p) { caption = p.textContent.trim().slice(0, 200); break; }
-      }
+  const videoManifestDir = join(outputDir, "assets", "videos");
+  mkdirSync(videoManifestDir, { recursive: true });
+  const previewDir = join(videoManifestDir, "previews");
+  mkdirSync(previewDir, { recursive: true });
 
-      // aria-label on video or wrapper
-      var ariaLabel = v.getAttribute('aria-label') || v.getAttribute('title') || '';
-      var wrapper = v.parentElement;
-      if (!ariaLabel && wrapper) ariaLabel = wrapper.getAttribute('aria-label') || '';
-
-      return {
-        src: src,
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-        top: Math.round(rect.top),
-        left: Math.round(rect.left),
-        heading: heading,
-        caption: caption,
-        ariaLabel: ariaLabel,
-        filename: src.split('/').pop().split('?')[0],
-      };
-    }).filter(Boolean);
-  })()`)) as Array<{
-    src: string;
+  const videoManifest: Array<{
+    index: number;
+    url: string;
+    filename: string;
     width: number;
     height: number;
-    top: number;
-    left: number;
     heading: string;
     caption: string;
     ariaLabel: string;
-    filename: string;
-  }>;
+    preview?: string;
+    localPath?: string;
+  }> = [];
 
-  // Deduplicate by src
-  const seenSrcs = new Set<string>();
-  const uniqueVideos = videoElements.filter((v) => {
-    if (seenSrcs.has(v.src)) return false;
-    seenSrcs.add(v.src);
-    return true;
-  });
+  const dlStart = Date.now();
+  for (let vi = 0; vi < merged.length && vi < 20; vi++) {
+    const v = merged[vi]!;
+    let preview: string | undefined;
 
-  if (uniqueVideos.length > 0) {
-    const videoManifestDir = join(outputDir, "assets", "videos");
-    mkdirSync(videoManifestDir, { recursive: true });
-    const previewDir = join(videoManifestDir, "previews");
-    mkdirSync(previewDir, { recursive: true });
-
-    const videoManifest: Array<{
-      index: number;
-      url: string;
-      filename: string;
-      width: number;
-      height: number;
-      heading: string;
-      caption: string;
-      ariaLabel: string;
-      preview: string;
-    }> = [];
-
-    for (let vi = 0; vi < uniqueVideos.length && vi < 20; vi++) {
-      const v = uniqueVideos[vi]!;
+    // DOM-scanned videos can be screenshotted for a still preview; network-only
+    // videos have no element on the page, so they go straight to download.
+    if (v.rich) {
       const previewName = `video-${vi}-preview.png`;
-      const previewPath = join(previewDir, previewName);
-
-      // Screenshot the video element to get a visible frame
       try {
         // Scroll to the video element so it's in the viewport
         await page.evaluate(`window.scrollTo(0, ${Math.max(0, v.top - 100)})`);
@@ -328,41 +471,64 @@ export async function captureVideoManifest(
           vid.currentTime = 0.1;
           return vid.getBoundingClientRect().toJSON();
         }, v.filename)) as { x: number; y: number; width: number; height: number } | null;
-        if (!rect || rect.width < 10) continue;
-        await new Promise((r) => setTimeout(r, 200)); // let decoder settle
-        await page.screenshot({
-          path: previewPath,
-          clip: {
-            x: Math.max(0, rect.x),
-            y: Math.max(0, rect.y),
-            width: Math.min(rect.width, 1920),
-            height: Math.min(rect.height, 1080),
-          },
-        });
+        if (rect && rect.width >= 10) {
+          await new Promise((r) => setTimeout(r, 200)); // let decoder settle
+          await page.screenshot({
+            path: join(previewDir, previewName),
+            clip: {
+              x: Math.max(0, rect.x),
+              y: Math.max(0, rect.y),
+              width: Math.min(rect.width, 1920),
+              height: Math.min(rect.height, 1080),
+            },
+          });
+          preview = `assets/videos/previews/${previewName}`;
+        }
       } catch {
         /* preview failed — non-critical */
       }
-
-      videoManifest.push({
-        index: vi,
-        url: v.src,
-        filename: v.filename,
-        width: v.width,
-        height: v.height,
-        heading: v.heading,
-        caption: v.caption,
-        ariaLabel: v.ariaLabel,
-        preview: `assets/videos/previews/${previewName}`,
-      });
     }
 
-    if (videoManifest.length > 0) {
-      writeFileSync(
-        join(outputDir, "extracted", "video-manifest.json"),
-        JSON.stringify(videoManifest, null, 2),
-        "utf-8",
-      );
-      progress("design", `${videoManifest.length} video previews captured`);
-    }
+    // Download the video body (guarded). null when skipped / too big / not a
+    // direct file. Cumulative budget caps total download time so a throttled
+    // host or many large clips can't stall capture — over budget, keep the
+    // preview (if any) and stop fetching bodies.
+    const savedPath =
+      Date.now() - dlStart < downloadBudgetMs
+        ? await downloadVideoBody(v.src, v.filename, videoManifestDir)
+        : null;
+
+    // A network-only video with neither a preview nor a downloaded body carries
+    // nothing usable downstream — drop it rather than list a dead reference.
+    if (!preview && !savedPath) continue;
+
+    videoManifest.push({
+      index: vi,
+      url: v.src,
+      filename: v.filename,
+      width: v.width,
+      height: v.height,
+      heading: v.heading,
+      caption: v.caption,
+      ariaLabel: v.ariaLabel,
+      ...(preview ? { preview } : {}),
+      ...(savedPath ? { localPath: savedPath } : {}),
+    });
+  }
+
+  if (videoManifest.length > 0) {
+    writeFileSync(
+      join(outputDir, "extracted", "video-manifest.json"),
+      JSON.stringify(videoManifest, null, 2),
+      "utf-8",
+    );
+    const downloaded = videoManifest.filter((v) => v.localPath).length;
+    const previews = videoManifest.filter((v) => v.preview).length;
+    progress(
+      "design",
+      `${videoManifest.length} video(s) discovered` +
+        (previews ? `, ${previews} preview(s)` : "") +
+        (downloaded ? `, ${downloaded} body downloaded` : ""),
+    );
   }
 }

@@ -8,6 +8,7 @@ import { simplifyGestureSamples } from "../utils/rdpSimplify";
 import { usePlayerStore } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
+import { roundTo3 } from "../utils/rounding";
 import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
 
 // Minimal subset of the session used by gesture commit
@@ -74,7 +75,8 @@ export function useGestureCommit({
         }
         return;
       }
-      const duration = frozenSamples.length > 0 ? frozenSamples[frozenSamples.length - 1]!.time : 0;
+      const duration =
+        frozenSamples.length > 0 ? (frozenSamples[frozenSamples.length - 1]?.time ?? 0) : 0;
 
       if (frozenSamples.length <= 2) {
         showToast("No gesture detected — move the pointer while recording", "error");
@@ -171,8 +173,8 @@ export function useGestureCommit({
               {
                 type: "add-with-keyframes",
                 targetSelector: selector,
-                position: Math.round(recStart * 1000) / 1000,
-                duration: Math.round(duration * 1000) / 1000,
+                position: roundTo3(recStart),
+                duration: roundTo3(duration),
                 keyframes,
               },
               { label: "Gesture recording (new range)", softReload: true },
@@ -183,8 +185,8 @@ export function useGestureCommit({
             {
               type: "add-with-keyframes",
               targetSelector: selector,
-              position: Math.round(recStart * 1000) / 1000,
-              duration: Math.round(duration * 1000) / 1000,
+              position: roundTo3(recStart),
+              duration: roundTo3(duration),
               keyframes,
             },
             { label: "Gesture recording", softReload: true },

@@ -658,7 +658,12 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
     // @hono/node-server serve() returns the http.Server directly.
     // Register the connection tracker before the listen callback fires
     // to avoid missing early connections.
-    const server = serve({ fetch: app.fetch, port }, (info) => {
+    // Bind loopback only (SECURITY F-001, matching the studio/preview servers
+    // in cli/server/portUtils.ts): this is an internal capture transport for
+    // the co-located headless Chrome (the URL above is already localhost), so
+    // it must not listen on 0.0.0.0 where an IDE's port auto-forward surfaces
+    // it as a transient, breakage-prone "preview".
+    const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, (info) => {
       resolve({
         url: `http://localhost:${info.port}`,
         port: info.port,

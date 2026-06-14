@@ -137,3 +137,5 @@ test-outputs/
 .claude/
 docs/superpowers/
 .worktrees
+hyperframes-bench/
+tmp/

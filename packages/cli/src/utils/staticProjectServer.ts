@@ -14,6 +14,7 @@ export async function serveStaticProjectHtml(
   html: string,
   bindErrorMessage = "Failed to bind local HTTP server",
 ): Promise<StaticProjectServer> {
+  // fallow-ignore-next-line complexity
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
     if (url === "/" || url === "/index.html") {
@@ -40,7 +41,10 @@ export async function serveStaticProjectHtml(
 
   const port = await new Promise<number>((resolvePort, rejectPort) => {
     server.on("error", rejectPort);
-    server.listen(0, () => {
+    // Bind loopback only (SECURITY F-001): a bare listen(0) binds 0.0.0.0/::,
+    // which an IDE's port auto-forward surfaces as a transient "preview". The
+    // snapshot browser is co-located (url below is already 127.0.0.1).
+    server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       const resolvedPort = typeof addr === "object" && addr ? addr.port : 0;
       if (!resolvedPort) rejectPort(new Error(bindErrorMessage));

@@ -430,7 +430,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
 
     The capture command extracts everything an AI agent needs to understand a website's visual identity: viewport screenshots at every scroll depth, color palette (pixel-sampled + DOM computed), font files, images with semantic names, SVGs, Lottie animations, video previews, WebGL shaders, visible text, and page structure.
 
-    Output is a self-contained directory with a `CLAUDE.md` file that any AI agent can read to understand the captured site. Used by the `/website-to-hyperframes` skill as step 1 of the video production pipeline.
+    Output is a self-contained directory with a `CLAUDE.md` file that any AI agent can read to understand the captured site. Used by the `/website-to-video` skill as step 1 of the video production pipeline.
 
     Set `GEMINI_API_KEY` in a `.env` file for AI-powered image descriptions via Gemini vision (~$0.001/image). See the [Website to Video](/guides/website-to-video#enriching-captures-with-gemini-vision) guide for details.
 

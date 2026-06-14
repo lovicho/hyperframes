@@ -16,6 +16,7 @@ const DIST = join(CLI_ROOT, "dist");
 const STUDIO_WAIT_TIMEOUT_MS = 30_000;
 const STUDIO_POLL_INTERVAL_MS = 250;
 
+// fallow-ignore-next-line complexity
 async function waitForStudioDist(dir) {
   const deadline = Date.now() + STUDIO_WAIT_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -54,6 +55,7 @@ function copyMdFiles(srcDir, destDir) {
   }
 }
 
+// fallow-ignore-next-line complexity
 async function main() {
   for (const sub of ["studio", "docs", "templates", "skills", "docker"]) {
     mkdirSync(join(DIST, sub), { recursive: true });
@@ -68,8 +70,16 @@ async function main() {
     copyDir(join(CLI_ROOT, "src", "templates", tmpl), join(DIST, "templates", tmpl));
   }
 
+  // Skills bundled into the published CLI. Branches don't all carry the same
+  // skills/ tree (it gets restructured), so each entry is existsSync-guarded:
+  // a missing skill dir warns + skips instead of crashing the build.
   for (const skill of ["hyperframes", "hyperframes-cli", "gsap"]) {
-    copyDir(join(REPO_ROOT, "skills", skill), join(DIST, "skills", skill));
+    const src = join(REPO_ROOT, "skills", skill);
+    if (!existsSync(src)) {
+      console.warn(`[build-copy] skill not found, skipping: skills/${skill}`);
+      continue;
+    }
+    copyDir(src, join(DIST, "skills", skill));
   }
 
   const dockerfile = join(CLI_ROOT, "src", "docker", "Dockerfile.render");

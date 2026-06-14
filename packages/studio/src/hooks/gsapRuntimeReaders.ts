@@ -3,31 +3,29 @@
  */
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import { classifyPropertyGroup, type PropertyGroupName } from "@hyperframes/core/gsap-parser";
-
-interface IframeGsap {
-  getProperty: (el: Element, prop: string) => number;
-}
+import { getIframeGsap, queryIframeElement } from "./gsapShared";
+import { roundTo3 } from "../utils/rounding";
 
 export function readGsapProperty(
   iframe: HTMLIFrameElement | null,
   selector: string | null,
   prop: string,
 ): number | null {
-  if (!iframe?.contentWindow || !selector) return null;
+  if (!selector) return null;
+  const gsap = getIframeGsap(iframe);
+  if (!gsap) return null;
+  const el = queryIframeElement(iframe, selector);
+  if (!el) return null;
   try {
-    const gsap = (iframe.contentWindow as unknown as { gsap?: IframeGsap }).gsap;
-    if (!gsap?.getProperty) return null;
-    const el = iframe.contentDocument?.querySelector(selector);
-    if (!el) return null;
     const val = Number(gsap.getProperty(el, prop));
     if (!Number.isFinite(val)) return null;
-    return POSITION_PROPS.has(prop) ? Math.round(val) : Math.round(val * 1000) / 1000;
+    return POSITION_PROPS.has(prop) ? Math.round(val) : roundTo3(val);
   } catch {
     return null;
   }
 }
 
-const POSITION_PROPS = new Set(["x", "y", "xPercent", "yPercent"]);
+export const POSITION_PROPS = new Set(["x", "y", "xPercent", "yPercent"]);
 const GSAP_CONFIG_KEYS = new Set([
   "duration",
   "ease",
@@ -56,22 +54,17 @@ export function readAllAnimatedProperties(
   group?: PropertyGroupName,
 ): Record<string, number> {
   const result: Record<string, number> = {};
-  if (!iframe?.contentWindow) return result;
-  let gsap: IframeGsap | undefined;
-  try {
-    gsap = (iframe.contentWindow as unknown as { gsap?: IframeGsap }).gsap;
-  } catch {
-    return result;
-  }
-  if (!gsap?.getProperty) return result;
+  if (!iframe) return result;
+  const gsap = getIframeGsap(iframe);
+  if (!gsap) return result;
+  const el = queryIframeElement(iframe, selector);
+  if (!el) return result;
   let doc: Document | null = null;
   try {
-    doc = iframe.contentDocument;
+    doc = iframe?.contentDocument ?? null;
   } catch {
-    return result;
+    /* cross-origin guard — doc stays null */
   }
-  const el = doc?.querySelector(selector);
-  if (!el) return result;
 
   const propKeys = new Set<string>();
   if (anim.keyframes) {
@@ -94,7 +87,7 @@ export function readAllAnimatedProperties(
   for (const prop of propKeys) {
     const val = Number(gsap.getProperty(el, prop));
     if (Number.isFinite(val)) {
-      result[prop] = POSITION_PROPS.has(prop) ? Math.round(val) : Math.round(val * 1000) / 1000;
+      result[prop] = POSITION_PROPS.has(prop) ? Math.round(val) : roundTo3(val);
     }
   }
 
@@ -166,7 +159,7 @@ export function readAllAnimatedProperties(
     if (!allTweenedProps.has(prop)) continue;
     const val = Number(gsap.getProperty(el, prop));
     if (Number.isFinite(val) && Math.round(val * 1000) !== Math.round(defaultVal * 1000)) {
-      result[prop] = Math.round(val * 1000) / 1000;
+      result[prop] = roundTo3(val);
     }
   }
 
@@ -208,7 +201,7 @@ export function readAllAnimatedProperties(
     }
     if (Number.isFinite(cssVal) && Math.round(gsapVal * 1000) === Math.round(cssVal * 1000))
       continue;
-    result[prop] = Math.round(gsapVal * 1000) / 1000;
+    result[prop] = roundTo3(gsapVal);
   }
 
   return result;

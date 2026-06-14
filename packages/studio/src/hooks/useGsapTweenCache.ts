@@ -3,6 +3,7 @@ import type { GsapAnimation, GsapKeyframesData, ParsedGsap } from "@hyperframes/
 import type { GsapPercentageKeyframe } from "@hyperframes/core/gsap-parser";
 import { usePlayerStore } from "../player/store/playerStore";
 import { readRuntimeKeyframes, scanAllRuntimeKeyframes } from "./gsapRuntimeBridge";
+import { PROPERTY_DEFAULTS, toAbsoluteTime } from "./gsapShared";
 
 function deduplicateKeyframes(keyframes: GsapPercentageKeyframe[]): GsapPercentageKeyframe[] {
   const byPct = new Map<number, GsapPercentageKeyframe>();
@@ -17,16 +18,6 @@ function deduplicateKeyframes(keyframes: GsapPercentageKeyframe[]): GsapPercenta
   }
   return Array.from(byPct.values()).sort((a, b) => a.percentage - b.percentage);
 }
-
-const PROPERTY_DEFAULTS: Record<string, number> = {
-  opacity: 1,
-  x: 0,
-  y: 0,
-  scale: 1,
-  scaleX: 1,
-  scaleY: 1,
-  rotation: 0,
-};
 
 function synthesizeFlatTweenKeyframes(anim: GsapAnimation): GsapKeyframesData | null {
   if (anim.method === "set") {
@@ -133,11 +124,17 @@ export function useGsapAnimationsForElement(
   const [multipleTimelines, setMultipleTimelines] = useState(false);
   const [unsupportedTimelinePattern, setUnsupportedTimelinePattern] = useState(false);
   const lastFetchKeyRef = useRef("");
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const fetchKey = `${projectId}:${sourceFile}:${version}`;
     if (fetchKey === lastFetchKeyRef.current) return;
     lastFetchKeyRef.current = fetchKey;
+
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
 
     if (!projectId) {
       setAllAnimations([]);
@@ -158,26 +155,30 @@ export function useGsapAnimationsForElement(
       setAllAnimations(parsed.animations);
       setMultipleTimelines(parsed.multipleTimelines === true);
       setUnsupportedTimelinePattern(parsed.unsupportedTimelinePattern === true);
+
+      // Retry once if initial fetch returned 0 animations — handles
+      // cold-load race where the sourceFile isn't resolved yet.
+      if (parsed.animations.length === 0 && target) {
+        retryTimerRef.current = setTimeout(() => {
+          if (cancelled) return;
+          fetchParsedAnimations(projectId, sourceFile).then((retryParsed) => {
+            if (cancelled) return;
+            if (retryParsed && retryParsed.animations.length > 0) {
+              setAllAnimations(retryParsed.animations);
+            }
+          });
+        }, 800);
+      }
     });
 
     return () => {
       cancelled = true;
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     };
-  }, [projectId, sourceFile, version]);
-
-  // Retry fetch if we have a target but no animations — handles cold-load race
-  // where the initial fetch runs before the drilled-down sourceFile is resolved
-  useEffect(() => {
-    if (!projectId || !target || allAnimations.length > 0) return;
-    const timer = setTimeout(() => {
-      fetchParsedAnimations(projectId, sourceFile).then((parsed) => {
-        if (parsed && parsed.animations.length > 0) {
-          setAllAnimations(parsed.animations);
-        }
-      });
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [projectId, sourceFile, target, allAnimations.length]);
+  }, [projectId, sourceFile, version, target]);
 
   const targetId = target?.id ?? null;
   const targetSelector = target?.selector ?? null;
@@ -281,7 +282,7 @@ export function useGsapAnimationsForElement(
         anim.resolvedStart ?? (typeof anim.position === "number" ? anim.position : 0);
       const tweenDur = anim.duration ?? elDuration;
       for (const k of kf.keyframes) {
-        const absTime = tweenPos + (k.percentage / 100) * tweenDur;
+        const absTime = toAbsoluteTime(tweenPos, tweenDur, k.percentage);
         const clipPct =
           elDuration > 0
             ? Math.round(((absTime - elStart) / elDuration) * 1000) / 10
@@ -379,7 +380,7 @@ export function usePopulateKeyframeCacheForFile(
         const elStart = timelineEl?.start ?? 0;
         const elDuration = timelineEl?.duration ?? 1;
         const clipKeyframes = kfData.keyframes.map((kf) => {
-          const absTime = tweenPos + (kf.percentage / 100) * tweenDur;
+          const absTime = toAbsoluteTime(tweenPos, tweenDur, kf.percentage);
           const clipPct =
             elDuration > 0
               ? Math.round(((absTime - elStart) / elDuration) * 1000) / 10

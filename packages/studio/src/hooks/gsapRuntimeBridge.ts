@@ -20,37 +20,20 @@ import {
 } from "./gsapDragCommit";
 import { resolveTweenStart, resolveTweenDuration } from "../utils/globalTimeCompiler";
 import type { GsapDragCommitCallbacks } from "./gsapDragCommit";
+import { getIframeGsap, queryIframeElement, selectorFromSelection } from "./gsapShared";
+import { roundTo3 } from "../utils/rounding";
 
 // ── Runtime reads ──────────────────────────────────────────────────────────
-
-interface IframeGsap {
-  getProperty: (el: Element, prop: string) => number;
-}
 
 // fallow-ignore-next-line complexity
 function readGsapPositionFromIframe(
   iframe: HTMLIFrameElement | null,
   elementSelector: string,
 ): { x: number; y: number } | null {
-  if (!iframe?.contentWindow) return null;
+  const gsap = getIframeGsap(iframe);
+  if (!gsap) return null;
 
-  let gsap: IframeGsap | undefined;
-  try {
-    gsap = (iframe.contentWindow as unknown as { gsap?: IframeGsap }).gsap;
-  } catch {
-    return null;
-  }
-  if (!gsap?.getProperty) return null;
-
-  let doc: Document | null = null;
-  try {
-    doc = iframe.contentDocument;
-  } catch {
-    return null;
-  }
-  if (!doc) return null;
-
-  const element = doc.querySelector(elementSelector);
+  const element = queryIframeElement(iframe, elementSelector);
   if (!element) return null;
 
   const x = Number(gsap.getProperty(element, "x")) || 0;
@@ -98,12 +81,6 @@ function findGsapPositionAnimation(
 }
 
 // ── Selector resolution ────────────────────────────────────────────────────
-
-function selectorForSelection(selection: DomEditSelection): string | null {
-  if (selection.id) return `#${selection.id}`;
-  if (selection.selector) return selection.selector;
-  return null;
-}
 
 // ── Property-group tween resolution ───────────────────────────────────────
 
@@ -193,7 +170,7 @@ export async function tryGsapDragIntercept(
   commitMutation: GsapDragCommitCallbacks["commitMutation"],
   fetchFallbackAnimations?: () => Promise<GsapAnimation[]>,
 ): Promise<boolean> {
-  const selector = selectorForSelection(selection);
+  const selector = selectorFromSelection(selection);
   if (!selector) return false;
 
   // Resolve the position-group tween, splitting legacy mixed tweens if needed.
@@ -284,15 +261,15 @@ export async function tryGsapResizeIntercept(
     const elDuration = Number.parseFloat(selection.dataAttributes?.duration ?? "5") || 5;
     const ct = usePlayerStore.getState().currentTime;
     const pct = elDuration > 0 ? Math.round(((ct - elStart) / elDuration) * 1000) / 10 : 0;
-    const sel = selectorForSelection(selection);
+    const sel = selectorFromSelection(selection);
     if (!sel) return false;
     await commitMutation(
       selection,
       {
         type: "add-with-keyframes",
         targetSelector: sel,
-        position: Math.round(elStart * 1000) / 1000,
-        duration: Math.round(elDuration * 1000) / 1000,
+        position: roundTo3(elStart),
+        duration: roundTo3(elDuration),
         keyframes: [
           {
             percentage: Math.max(0, Math.min(100, pct)),
@@ -310,7 +287,7 @@ export async function tryGsapResizeIntercept(
   if (activeKeyframePct != null) setActiveKeyframePct(null);
   const coalesceKey = `gsap:resize:${anim.id}`;
 
-  const selector = selectorForSelection(selection);
+  const selector = selectorFromSelection(selection);
   const runtimeProps = selector ? readAllAnimatedProperties(iframe, selector, anim) : {};
 
   let resizeProps: Record<string, number>;
@@ -320,7 +297,7 @@ export async function tryGsapResizeIntercept(
     // saved by the draft system before it ran.
     const origW = Number.parseFloat(el?.getAttribute("data-hf-studio-original-width") ?? "");
     const cssW = Number.isFinite(origW) && origW > 0 ? origW : 200;
-    const newScale = Math.round((size.width / cssW) * 1000) / 1000;
+    const newScale = roundTo3(size.width / cssW);
     resizeProps = { scale: newScale };
   } else {
     resizeProps = {
@@ -395,8 +372,8 @@ export async function tryGsapResizeIntercept(
         type: "replace-with-keyframes",
         animationId: anim.id,
         targetSelector: anim.targetSelector,
-        position: Math.round(newStart * 1000) / 1000,
-        duration: Math.round(newDuration * 1000) / 1000,
+        position: roundTo3(newStart),
+        duration: roundTo3(newDuration),
         keyframes: remapped,
       },
       { label: `Resize (extended to ${ct.toFixed(2)}s)`, softReload: true, coalesceKey },
@@ -455,25 +432,14 @@ export async function tryGsapRotationIntercept(
   }
   if (!anim) return false;
 
-  const selector = selectorForSelection(selection);
+  const selector = selectorFromSelection(selection);
   if (!selector) return false;
 
   let gsapRotation = 0;
-  if (iframe?.contentWindow) {
-    try {
-      const gsap = (
-        iframe.contentWindow as unknown as {
-          gsap?: { getProperty: (el: Element, prop: string) => number };
-        }
-      ).gsap;
-      const doc = iframe.contentDocument;
-      const el = doc?.querySelector(selector);
-      if (gsap?.getProperty && el) {
-        gsapRotation = Number(gsap.getProperty(el, "rotation")) || 0;
-      }
-    } catch {
-      /* cross-origin guard */
-    }
+  const gsap = getIframeGsap(iframe);
+  const rotEl = gsap ? queryIframeElement(iframe, selector) : null;
+  if (gsap && rotEl) {
+    gsapRotation = Number(gsap.getProperty(rotEl, "rotation")) || 0;
   }
 
   const pct = computeCurrentPercentage(selection, anim);

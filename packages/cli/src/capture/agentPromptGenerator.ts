@@ -7,7 +7,7 @@
  *
  * This file generates a DATA INVENTORY that tells the AI agent what files
  * exist and what they contain. The actual workflow lives in the
- * website-to-hyperframes skill — this file points agents there.
+ * website-to-video skill — this file points agents there.
  */
 
 import { writeFileSync, readdirSync, existsSync } from "node:fs";
@@ -20,6 +20,7 @@ import type { CatalogedAsset } from "./assetCataloger.js";
  * Infer a human-readable role hint from a hex color based on luminance and saturation.
  * Not a substitute for DESIGN.md — just helps orient agents scanning the brand summary.
  */
+// fallow-ignore-next-line complexity
 function inferColorRole(hex: string): string {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
   const g = parseInt(hex.slice(3, 5), 16) / 255;
@@ -56,6 +57,7 @@ export function generateAgentPrompt(
   writeFileSync(join(outputDir, ".cursorrules"), prompt, "utf-8");
 }
 
+// fallow-ignore-next-line complexity
 function buildPrompt(
   outputDir: string,
   url: string,
@@ -196,7 +198,7 @@ function buildPrompt(
 
 Source: ${url}
 
-To create a video from this capture, use the \`website-to-hyperframes\` skill.
+To create a video from this capture, use the \`website-to-video\` skill.
 
 ## What's in This Capture
 

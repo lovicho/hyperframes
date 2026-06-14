@@ -3,6 +3,7 @@ import { COMMON_LOCAL_FONT_FAMILIES } from "./fontCatalog";
 import type { DomEditSelection } from "./domEditing";
 import type { ImportedFontAsset } from "./fontAssets";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
+import { roundToCenti } from "../../utils/rounding";
 
 export interface PropertyPanelProps {
   projectId: string;
@@ -239,8 +240,13 @@ export function parseNumericValue(value: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export function formatTimingValue(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0.00s";
+  return `${seconds.toFixed(2)}s`;
+}
+
 export function formatNumericValue(value: number): string {
-  const rounded = Math.round(value * 100) / 100;
+  const rounded = roundToCenti(value);
   return Number.isInteger(rounded)
     ? `${rounded}`
     : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
@@ -473,40 +479,6 @@ export function extractBackgroundImageUrl(value: string | undefined): string {
   return value.slice(index, endParen).trim();
 }
 
-// ── Fit to children ──────────────────────────────────────────────────
-
-export function computeFitToChildrenSize(
-  element: DomEditSelection,
-): { width: number; height: number } | null {
-  const el = element.element;
-  const win = el.ownerDocument?.defaultView;
-  const children = Array.from(el.children).filter((c): c is HTMLElement => c.nodeType === 1);
-  if (children.length === 0) return null;
-  let minX = Infinity,
-    minY = Infinity,
-    maxX = -Infinity,
-    maxY = -Infinity;
-  for (const child of children) {
-    if (win) {
-      const cs = win.getComputedStyle(child);
-      if (cs.visibility === "hidden" || cs.display === "none") continue;
-    }
-    const r = child.getBoundingClientRect();
-    if (r.width === 0 && r.height === 0) continue;
-    minX = Math.min(minX, r.left);
-    minY = Math.min(minY, r.top);
-    maxX = Math.max(maxX, r.right);
-    maxY = Math.max(maxY, r.bottom);
-  }
-  if (!isFinite(minX)) return null;
-  const parentRect = el.getBoundingClientRect();
-  const scaleX = parentRect.width > 0 ? element.boundingBox.width / parentRect.width : 1;
-  const scaleY = parentRect.height > 0 ? element.boundingBox.height / parentRect.height : 1;
-  const width = Math.round((maxX - minX) * scaleX);
-  const height = Math.round((maxY - minY) * scaleY);
-  return width > 0 && height > 0 ? { width, height } : null;
-}
-
 // ── GSAP runtime value readers (used by PropertyPanel) ────────────────────
 
 export function readGsapRuntimeValuesForPanel(
@@ -541,7 +513,7 @@ export function readGsapRuntimeValuesForPanel(
     const result: Record<string, number> = {};
     for (const prop of propKeys) {
       const v = Number(gsap.getProperty(el, prop));
-      if (Number.isFinite(v)) result[prop] = Math.round(v * 100) / 100;
+      if (Number.isFinite(v)) result[prop] = roundToCenti(v);
     }
     return Object.keys(result).length > 0 ? result : null;
   } catch {
@@ -568,8 +540,8 @@ export function readGsapBorderRadiusForPanel(
   if (!iframe?.contentDocument || !selector) return null;
   try {
     const el = iframe.contentDocument.querySelector(selector);
-    if (!el) return null;
-    const cs = iframe.contentWindow!.getComputedStyle(el);
+    if (!el || !iframe.contentWindow) return null;
+    const cs = iframe.contentWindow.getComputedStyle(el);
     const parse = (v: string) => Number.parseFloat(v) || 0;
     return {
       tl: parse(cs.borderTopLeftRadius),
