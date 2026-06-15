@@ -297,3 +297,125 @@ describe("override-set orphan cleanup on removeElement", () => {
     expect(overrides["hf-sub.style.opacity"]).toBe("1");
   });
 });
+
+// ─── setSelection / getSelection / selectionchange ───────────────────────────
+
+describe("setSelection", () => {
+  it("getSelection returns empty array before any setSelection call", async () => {
+    const comp = await openComposition(BASE_HTML);
+    expect(comp.getSelection()).toEqual([]);
+  });
+
+  it("setSelection updates getSelection", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setSelection(["hf-title"]);
+    expect(comp.getSelection()).toEqual(["hf-title"]);
+  });
+
+  it("setSelection with multiple ids", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setSelection(["hf-title", "hf-sub"]);
+    expect(comp.getSelection()).toEqual(["hf-title", "hf-sub"]);
+  });
+
+  it("setSelection([]) clears selection", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setSelection(["hf-title"]);
+    comp.setSelection([]);
+    expect(comp.getSelection()).toEqual([]);
+  });
+
+  it("setSelection fires selectionchange with new ids", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const calls: string[][] = [];
+    comp.on("selectionchange", (ids) => calls.push(ids));
+    comp.setSelection(["hf-title"]);
+    expect(calls).toEqual([["hf-title"]]);
+  });
+
+  it("setSelection fires selectionchange with empty array when clearing", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setSelection(["hf-title"]);
+    const calls: string[][] = [];
+    comp.on("selectionchange", (ids) => calls.push(ids));
+    comp.setSelection([]);
+    expect(calls).toEqual([[]]);
+  });
+
+  it("selectionchange listener receives a fresh copy each call", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const snapshots: string[][] = [];
+    comp.on("selectionchange", (ids) => snapshots.push(ids));
+    comp.setSelection(["hf-title"]);
+    comp.setSelection(["hf-sub"]);
+    expect(snapshots[0]).toEqual(["hf-title"]);
+    expect(snapshots[1]).toEqual(["hf-sub"]);
+  });
+
+  it("unsubscribed listener does not fire", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const calls: string[][] = [];
+    const off = comp.on("selectionchange", (ids) => calls.push(ids));
+    off();
+    comp.setSelection(["hf-title"]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("selection() proxy operates on ids at call time", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setSelection(["hf-title"]);
+    const proxy = comp.selection();
+    expect(proxy.ids).toEqual(["hf-title"]);
+  });
+
+  it("setSelection does not affect undo stack", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setStyle("hf-title", { color: "#ff0000" });
+    comp.setSelection(["hf-sub"]);
+    expect(comp.canUndo()).toBe(true);
+    comp.undo();
+    // selection must not have been pushed to history
+    expect(comp.canUndo()).toBe(false);
+  });
+
+  it("setSelection does not emit a patch event", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const patches: unknown[] = [];
+    comp.on("patch", (e) => patches.push(e));
+    comp.setSelection(["hf-title"]);
+    expect(patches).toHaveLength(0);
+  });
+
+  it("setSelection with same ids does not fire selectionchange again", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const calls: string[][] = [];
+    comp.on("selectionchange", (ids) => calls.push(ids));
+    comp.setSelection(["hf-title"]);
+    comp.setSelection(["hf-title"]); // same ids — must be a no-op
+    expect(calls).toHaveLength(1);
+  });
+
+  it("setSelection with same ids in different order fires selectionchange", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const calls: string[][] = [];
+    comp.on("selectionchange", (ids) => calls.push(ids));
+    comp.setSelection(["hf-title", "hf-sub"]);
+    comp.setSelection(["hf-sub", "hf-title"]); // order differs — must fire
+    expect(calls).toHaveLength(2);
+  });
+
+  it("setSelection de-duplicates repeated ids", async () => {
+    const comp = await openComposition(BASE_HTML);
+    comp.setSelection(["hf-title", "hf-title", "hf-sub", "hf-title"]);
+    expect(comp.getSelection()).toEqual(["hf-title", "hf-sub"]);
+  });
+
+  it("setSelection with duplicates matching stored selection does not fire selectionchange", async () => {
+    const comp = await openComposition(BASE_HTML);
+    const calls: string[][] = [];
+    comp.on("selectionchange", (ids) => calls.push(ids));
+    comp.setSelection(["hf-title"]);
+    comp.setSelection(["hf-title", "hf-title"]); // de-duped = ["hf-title"] — no change
+    expect(calls).toHaveLength(1);
+  });
+});
