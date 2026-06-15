@@ -34,6 +34,49 @@ export function findById(document: Document, id: string): Element | null {
   return document.querySelector(`[data-hf-id="${escaped}"]`);
 }
 
+function escapeHfId(id: string): string {
+  return id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * Resolve a bare or scoped hf-id to its DOM element.
+ *
+ * Bare id ("hf-x"): equivalent to findById — top-level document search.
+ * Scoped id ("hf-HOST/hf-LEAF", any depth): each segment narrows the search
+ * into the subtree of the previous match. This unambiguously addresses an
+ * element inside a sub-composition even when bare ids collide.
+ */
+export function resolveScoped(document: Document, id: string): Element | null {
+  const parts = id.split("/");
+  let context: Element | Document = document;
+  for (const part of parts) {
+    const escaped = escapeHfId(part);
+    const found: Element | null =
+      context === document
+        ? (context as Document).querySelector(`[data-hf-id="${escaped}"]`)
+        : (context as Element).querySelector(`[data-hf-id="${escaped}"]`);
+    if (!found) return null;
+    context = found;
+  }
+  return context as Element;
+}
+
+/**
+ * Returns true when this element starts a new sub-composition scope — i.e. it
+ * is a host element (has data-composition-file) and is NOT the outerHTML
+ * innerRoot of the SAME sub-composition (same dcf value as parent).
+ *
+ * outerHTML case: both host and innerRoot carry data-composition-file="sub.html".
+ * The innerRoot has the SAME value as the host (its parent) → not a new boundary.
+ * A genuine nested host inside a sub-comp has a DIFFERENT dcf value.
+ */
+export function isNewHostBoundary(el: Element): boolean {
+  const dcf = el.getAttribute("data-composition-file");
+  if (!dcf) return false;
+  const parentDcf = el.parentElement?.getAttribute("data-composition-file") ?? null;
+  return dcf !== parentDcf;
+}
+
 export function findRoot(document: Document): Element | null {
   return (
     document.querySelector("[data-hf-root]") ??
@@ -130,6 +173,67 @@ export function setOwnText(el: Element, text: string): void {
     const ref = firstTextIdx >= 0 ? (current[firstTextIdx] ?? null) : null;
     el.insertBefore(doc.createTextNode(text), ref);
   }
+}
+
+// ─── CSS style helpers ────────────────────────────────────────────────────────
+
+function findStyleElement(document: Document): Element | null {
+  return document.querySelector("style") as unknown as Element | null;
+}
+
+export function getStyleSheet(document: Document): string {
+  return findStyleElement(document)?.textContent ?? "";
+}
+
+export function setStyleSheet(document: Document, css: string): void {
+  const existing = findStyleElement(document);
+  if (!css) {
+    existing?.remove();
+    return;
+  }
+  let el = existing;
+  if (!el) {
+    el = document.createElement("style") as unknown as Element;
+    const head =
+      (document.querySelector("head") as unknown as Element | null) ??
+      (document.body as unknown as Element);
+    (head as any).appendChild(el);
+  }
+  el.textContent = css;
+}
+
+// ─── GSAP script helpers ──────────────────────────────────────────────────────
+
+function findGsapScriptElement(document: Document): Element | null {
+  const scripts = document.querySelectorAll("script");
+  for (const script of Array.from(scripts)) {
+    const text = script.textContent ?? "";
+    if (text.includes("gsap") || text.includes("ScrollTrigger"))
+      return script as unknown as Element;
+  }
+  return null;
+}
+
+export function getGsapScript(document: Document): string | null {
+  const el = findGsapScriptElement(document);
+  return el ? (el.textContent ?? "") : null;
+}
+
+export function setGsapScript(document: Document, newScript: string): void {
+  const existing = findGsapScriptElement(document);
+  if (!newScript) {
+    existing?.remove();
+    return;
+  }
+  let el = existing;
+  if (!el) {
+    el = document.createElement("script") as unknown as Element;
+    const head =
+      (document.querySelector("head") as unknown as Element | null) ??
+      (document.body as unknown as Element);
+    (head as any).appendChild(el);
+  }
+  el.textContent = newScript;
 }
 
 // ─── Sibling index ────────────────────────────────────────────────────────────

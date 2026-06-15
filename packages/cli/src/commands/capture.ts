@@ -6,12 +6,19 @@ export const examples: Example[] = [
   ["Capture a website", "hyperframes capture https://stripe.com"],
   ["Capture to a specific directory", "hyperframes capture https://linear.app -o linear-video"],
   ["JSON output for AI agents", "hyperframes capture https://example.com --json"],
+  [
+    "Pull a video from the captured manifest by index",
+    "hyperframes capture video ./linear-video --index 0",
+  ],
 ];
 
 export default defineCommand({
   meta: {
     name: "capture",
     description: "Capture a website as editable HyperFrames components",
+  },
+  subCommands: {
+    video: () => import("./capture/video.js").then((m) => m.default),
   },
   args: {
     url: {
@@ -46,7 +53,9 @@ export default defineCommand({
   async run({ args }) {
     const url = args.url as string;
 
-    // Validate URL
+    // citty fires parent's run AFTER routing to a subcommand; skip when args.url is a subcommand name.
+    if (url === "video") return;
+
     try {
       new URL(url);
     } catch {

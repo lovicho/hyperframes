@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.6.97",
+  "version": "0.6.99",
   "description": "",
   "repository": {
     "type": "git",
@@ -82,6 +82,14 @@
     "./gsap-parser": {
       "import": "./src/parsers/gsapParser.ts",
       "types": "./src/parsers/gsapParser.ts"
+    },
+    "./gsap-parser-acorn": {
+      "import": "./src/parsers/gsapParserAcorn.ts",
+      "types": "./src/parsers/gsapParserAcorn.ts"
+    },
+    "./gsap-writer-acorn": {
+      "import": "./src/parsers/gsapWriterAcorn.ts",
+      "types": "./src/parsers/gsapWriterAcorn.ts"
     },
     "./gsap-constants": {
       "import": "./src/parsers/gsapConstants.ts",
@@ -166,6 +174,14 @@
         "import": "./dist/parsers/gsapParser.js",
         "types": "./dist/parsers/gsapParser.d.ts"
       },
+      "./gsap-parser-acorn": {
+        "import": "./dist/parsers/gsapParserAcorn.js",
+        "types": "./dist/parsers/gsapParserAcorn.d.ts"
+      },
+      "./gsap-writer-acorn": {
+        "import": "./dist/parsers/gsapWriterAcorn.js",
+        "types": "./dist/parsers/gsapWriterAcorn.d.ts"
+      },
       "./gsap-constants": {
         "import": "./dist/parsers/gsapConstants.js",
         "types": "./dist/parsers/gsapConstants.d.ts"
@@ -213,7 +229,10 @@
   "dependencies": {
     "@babel/parser": "^7.27.0",
     "@chenglou/pretext": "^0.0.5",
+    "acorn": "^8.17.0",
+    "acorn-walk": "^8.3.5",
     "bpm-detective": "^2.0.5",
+    "magic-string": "^0.30.21",
     "postcss": "^8.5.8",
     "postcss-selector-parser": "^7.1.2",
     "recast": "^0.23.11"

@@ -14,6 +14,7 @@ export type {
   SelectionProxy,
   ElementHandle,
   Composition,
+  CanResult,
 } from "./types.js";
 
 export { ORIGIN_APPLY_PATCHES, ORIGIN_LOCAL } from "./types.js";
@@ -32,3 +33,9 @@ export { createPersistQueue } from "./persist-queue.js";
 export type { PersistQueueModule, PersistQueueOptions } from "./persist-queue.js";
 
 export type { PersistAdapter, PreviewAdapter, PersistVersionEntry } from "./adapters/types.js";
+
+// Concrete adapter factories.
+export { createMemoryAdapter } from "./adapters/memory.js";
+export { createHeadlessAdapter } from "./adapters/headless.js";
+export { createFsAdapter } from "./adapters/fs.js";
+export type { FsAdapterOptions } from "./adapters/fs.js";
