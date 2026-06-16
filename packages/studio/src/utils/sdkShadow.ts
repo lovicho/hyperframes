@@ -23,6 +23,22 @@ import type { PatchOperation } from "./sourcePatcher";
  * Multiple inline-style ops are coalesced into a single setStyle (SDK batches
  * style changes naturally). One SDK op is emitted per non-style op.
  */
+// "attribute" PatchOperations carry the data- attribute NAME. Studio passes
+// some already prefixed (e.g. "data-hf-studio-path-offset") and some bare
+// (e.g. "name"); prefix only when needed, never double-prefix.
+function attrName(property: string): string {
+  return property.startsWith("data-") ? property : `data-${property}`;
+}
+
+// The SDK element model excludes data-hf-* attributes (document.ts skips them),
+// so shadowing studio-internal markers (data-hf-studio-path-offset, etc.) can
+// never match — drop those ops from the shadow instead of false-mismatching.
+function isShadowableOp(op: PatchOperation): boolean {
+  if (op.type === "attribute") return !attrName(op.property).startsWith("data-hf-");
+  if (op.type === "html-attribute") return !op.property.startsWith("data-hf-");
+  return true;
+}
+
 export function patchOpsToSdkEditOps(hfId: string, ops: PatchOperation[]): EditOp[] {
   const result: EditOp[] = [];
   const styles: Record<string, string | null> = {};
@@ -38,7 +54,7 @@ export function patchOpsToSdkEditOps(hfId: string, ops: PatchOperation[]): EditO
       result.push({
         type: "setAttribute",
         target: hfId,
-        name: `data-${op.property}`,
+        name: attrName(op.property),
         value: op.value,
       });
     } else if (op.type === "html-attribute") {
@@ -98,17 +114,24 @@ function flattenSnapshot(snap: ElementSnapshot): FlatSnapshot {
 
 type OpFieldResolver = (op: PatchOperation, flat: FlatSnapshot) => OpFields;
 
+// Snapshot inlineStyles are camelCase (CSSStyleDeclaration convention); PatchOperation
+// style properties are kebab-case ("background-color"). Convert for read-back, else
+// every hyphenated property false-mismatches against a null actual.
+function kebabToCamel(prop: string): string {
+  return prop.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
 const OP_FIELD_RESOLVERS: Record<string, OpFieldResolver> = {
   "inline-style": (op, flat) => ({
     property: op.property,
     expected: op.value,
-    actual: flat.styles[op.property] ?? null,
+    actual: flat.styles[kebabToCamel(op.property)] ?? flat.styles[op.property] ?? null,
   }),
   "text-content": (op, flat) => ({ property: "text", expected: op.value ?? "", actual: flat.text }),
   attribute: (op, flat) => ({
-    property: `data-${op.property}`,
+    property: attrName(op.property),
     expected: op.value ?? null,
-    actual: flat.attrs[`data-${op.property}`] ?? null,
+    actual: flat.attrs[attrName(op.property)] ?? null,
   }),
   "html-attribute": (op, flat) => ({
     property: op.property,
@@ -157,8 +180,11 @@ export function sdkShadowDispatch(
   if (!session.getElement(hfId)) {
     return { dispatched: false, mismatches: [{ kind: "element_not_found", hfId }] };
   }
+  // Drop studio-internal markers the SDK model can't represent (data-hf-*), so
+  // canvas-drag/path-offset edits don't false-mismatch on bookkeeping attrs.
+  const shadowable = ops.filter(isShadowableOp);
   try {
-    const sdkOps = patchOpsToSdkEditOps(hfId, ops);
+    const sdkOps = patchOpsToSdkEditOps(hfId, shadowable);
     session.batch(() => {
       for (const op of sdkOps) session.dispatch(op);
     });
@@ -169,7 +195,7 @@ export function sdkShadowDispatch(
     };
   }
   const flat = flattenSnapshot(session.getElement(hfId));
-  const mismatches = ops
+  const mismatches = shadowable
     .map((op) => checkOpParity(op, flat, hfId))
     .filter((m): m is SdkShadowMismatch => m !== null);
   return { dispatched: true, mismatches };
@@ -367,12 +393,15 @@ export type ShadowGsapOp =
   | { kind: "remove"; animationId: string };
 
 /**
- * Shadow a GSAP tween mutation. Snapshot value-parity is NOT available: the
- * tween lives in the GSAP <script>, and ElementSnapshot.animationIds is a stub
- * (always [] — see sdk document.ts). So the signal here is can() addressing /
- * validity + dispatch-didn't-throw, plus (for add) that the SDK returned a
- * non-empty tween id. Full fidelity needs serialize()-script round-trip diffing,
- * out of scope for shadow. // ponytail: upgrade when animationIds is populated.
+ * Shadow a GSAP tween mutation (add / set / remove). The server's animationId
+ * shares the SDK's id-space (both derive `targetSelector-method-position` from
+ * the same acorn parser — see sdk assignStableIds), so it is dispatchable as-is.
+ *
+ * Parity via the now-populated ElementSnapshot.animationIds:
+ *   add    → the returned tween id is present on the target element
+ *   remove → the id is gone from every element
+ *   set    → existence only (the SDK exposes no per-tween property reader; value
+ *            fidelity would need serialize()-script round-trip diffing).
  */
 export function runShadowGsapTween(session: Composition, gsapOp: ShadowGsapOp): void {
   if (!STUDIO_SDK_SHADOW_ENABLED) return;
@@ -382,23 +411,50 @@ export function runShadowGsapTween(session: Composition, gsapOp: ShadowGsapOp): 
       : gsapOp.kind === "set"
         ? { type: "setGsapTween", animationId: gsapOp.animationId, properties: gsapOp.properties }
         : { type: "removeGsapTween", animationId: gsapOp.animationId };
+  // fallow-ignore-next-line complexity
   runShadowEditOp(session, op, "gsap", () => {
     let newId: string | undefined;
     session.batch(() => {
       if (gsapOp.kind === "add") newId = session.addGsapTween(gsapOp.target, gsapOp.tween);
       else session.dispatch(op);
     });
-    if (gsapOp.kind === "add" && !newId) {
-      return [
-        {
-          kind: "value_mismatch",
-          hfId: gsapOp.target,
-          property: "tweenId",
-          expected: "non-empty",
-          actual: null,
-        },
-      ];
+    if (gsapOp.kind === "add") {
+      const onTarget = session.getElement(gsapOp.target)?.animationIds ?? [];
+      if (!newId || !onTarget.includes(newId)) {
+        return [
+          {
+            kind: "value_mismatch",
+            hfId: gsapOp.target,
+            property: "animationIds",
+            expected: newId ?? "non-empty",
+            actual: onTarget.join(",") || null,
+          },
+        ];
+      }
+    } else if (gsapOp.kind === "remove") {
+      const stillPresent = session
+        .getElements()
+        .some((el) => el.animationIds.includes(gsapOp.animationId));
+      if (stillPresent) {
+        return [
+          {
+            kind: "value_mismatch",
+            hfId: gsapOp.animationId,
+            property: "animationIds",
+            expected: "removed",
+            actual: "present",
+          },
+        ];
+      }
     }
     return [];
   });
 }
+
+// GSAP value-fidelity diff lives in its own module to keep this file under the
+// 600-line studio cap; re-exported here so the shadow surface stays in one place.
+export {
+  gsapFidelityMismatches,
+  resolveGsapFidelityArgs,
+  runShadowGsapFidelity,
+} from "./sdkShadowGsapFidelity";
