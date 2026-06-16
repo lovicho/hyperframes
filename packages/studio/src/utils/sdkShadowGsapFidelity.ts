@@ -16,6 +16,7 @@ import { parseGsapScriptAcorn } from "@hyperframes/core/gsap-parser-acorn";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import { STUDIO_SDK_SHADOW_ENABLED } from "../components/editor/manualEditingAvailability";
 import { trackStudioEvent } from "./studioTelemetry";
+import { relEqual } from "./sdkShadowNumeric";
 import type { SdkShadowMismatch, ShadowGsapOp } from "./sdkShadow";
 
 // Marker set must match document.ts extractGsapScript so both pick the same
@@ -24,7 +25,7 @@ function isGsapScriptBody(body: string): boolean {
   return body.includes("gsap") || body.includes("__timelines") || body.includes("ScrollTrigger");
 }
 
-function extractGsapScript(html: string): string | null {
+export function extractGsapScript(html: string): string | null {
   // Close tag is `</script[^>]*>` (not just `</script>`) — HTML5 ignores junk
   // before the `>`, e.g. `</script >` or `</script foo>` (CodeQL js/bad-tag-filter).
   const scripts = html.match(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi);
@@ -73,17 +74,17 @@ function animByKey(
 // number-vs-string forms. Compare canonically — sort keys, coerce numeric
 // strings — so only real value drift registers, not formatting differences.
 
+// Coerce string operands to numbers, then compare with the shared relative
+// epsilon (relEqual) so float-formatting noise (3.1 vs 3.0999999999999996)
+// isn't flagged as drift while a real 2 vs 1 still is.
 function numericEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   const na = typeof a === "string" ? Number(a) : a;
   const nb = typeof b === "string" ? Number(b) : b;
-  return (
-    typeof na === "number" &&
-    typeof nb === "number" &&
-    !Number.isNaN(na) &&
-    !Number.isNaN(nb) &&
-    na === nb
-  );
+  if (typeof na !== "number" || typeof nb !== "number" || Number.isNaN(na) || Number.isNaN(nb)) {
+    return false;
+  }
+  return relEqual(na, nb);
 }
 
 function canonicalProps(obj: Record<string, unknown> | undefined): string {
@@ -187,27 +188,54 @@ export function resolveGsapFidelityArgs(
   return { before, op: shadowGsapOp, serverScript };
 }
 
-// Resolve a CSS selector to a canonical element id (data-hf-id) using the pre-op
-// document, so tweens that target the same element via different selectors
-// ([data-hf-id="X"] vs .X) match in the fidelity diff. Falls back to the raw
-// selector when it can't resolve (DOMParser unavailable, no match, bad selector).
+// Resolve a CSS selector to a canonical element key using the pre-op document,
+// so tweens that target the same element via different selectors
+// ([data-hf-id="X"] vs .X vs #X) collapse to one key in the fidelity diff.
+//
+// The SDK writer emits [data-hf-id="X"] while the server may emit a class/id
+// selector for the SAME element. Keying both forms to the same node prevents a
+// false present/absent mismatch. Resolution order, for whatever element the
+// selector matches:
+//   1. data-hf-id present  → "hfid:<id>"  (the common, stable case)
+//   2. no data-hf-id       → "node:<n>"   (per-document node index; identical
+//      regardless of which selector form found the node, so .x and [data-hf-id]
+//      pointing at the same attribute-less node still collapse)
+//   3. selector resolves to no node / parse error / no DOM → the raw selector
+//      (last resort; only diverges when the two writers genuinely target
+//      different — or unresolvable — nodes, which is real drift to surface)
+// The "hfid:"/"node:" prefixes are namespaced so a canonical key can never
+// collide with a raw-selector fallback.
 //
 // ponytail: first-match heuristic — querySelector returns the FIRST match, so an
-// ambiguous selector (e.g. .x shared by two elements) may map to a different id
-// than the SDK side's [data-hf-id] target and still flag present/absent. Safe
-// for studio templates (one tween per data-hf-id); upgrade to querySelectorAll +
-// uniqueness check if ambiguous selectors appear.
-function makeSelectorResolver(html: string): (sel: string) => string {
+// ambiguous selector (e.g. .x shared by two elements) may map to a different
+// node than the SDK side's [data-hf-id] target and still flag present/absent.
+// Safe for studio templates (one tween per element); upgrade to querySelectorAll
+// + uniqueness check if ambiguous selectors appear.
+export function makeSelectorResolver(html: string): (sel: string) => string {
   let doc: Document | null = null;
   try {
     doc = new DOMParser().parseFromString(html, "text/html");
   } catch {
     doc = null;
   }
+  // Stable per-node index so an attribute-less element keys identically no
+  // matter which selector form (class vs id vs [data-hf-id]) resolved it.
+  const nodeKeys = new WeakMap<Element, string>();
+  let nextNode = 0;
+  const keyForNode = (el: Element): string => {
+    const hfId = el.getAttribute("data-hf-id");
+    if (hfId != null && hfId !== "") return `hfid:${hfId}`;
+    const existing = nodeKeys.get(el);
+    if (existing != null) return existing;
+    const key = `node:${nextNode++}`;
+    nodeKeys.set(el, key);
+    return key;
+  };
   return (sel) => {
     if (!doc) return sel;
     try {
-      return doc.querySelector(sel)?.getAttribute("data-hf-id") ?? sel;
+      const el = doc.querySelector(sel);
+      return el ? keyForNode(el) : sel;
     } catch {
       return sel;
     }

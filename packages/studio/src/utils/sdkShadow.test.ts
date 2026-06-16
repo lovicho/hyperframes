@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   patchOpsToSdkEditOps,
   runShadowDelete,
@@ -10,8 +10,10 @@ import {
   SdkShadowMismatch,
 } from "./sdkShadow";
 import type { ShadowGsapOp } from "./sdkShadow";
+import { makeSelectorResolver } from "./sdkShadowGsapFidelity";
 import type { PatchOperation } from "./sourcePatcher";
 import { openComposition } from "@hyperframes/sdk";
+import { Window } from "happy-dom";
 
 // Capture sdk_shadow_dispatch telemetry for the non-PatchOperation runners.
 const trackedEvents: Array<{ event: string; props: Record<string, unknown> }> = [];
@@ -108,6 +110,7 @@ describe("sdkShadowDispatch (integration)", () => {
     expect(session.getElement("hf-box")?.inlineStyles.color).toBe("#00f");
   });
 
+  // fallow-ignore-next-line code-duplication
   it("does NOT false-mismatch a hyphenated style property (kebab op vs camelCase snapshot)", async () => {
     const { sdkShadowDispatch } = await import("./sdkShadow");
     const session = await openComposition(BASE_HTML);
@@ -145,6 +148,59 @@ describe("sdkShadowDispatch (integration)", () => {
     sdkShadowDispatch(session, "hf-box", ops);
 
     expect(session.getElement("hf-box")?.text).toBe("Updated");
+  });
+
+  // Fix 2: text parity normalization. snapshot.text is trimmed by the SDK, so a
+  // trailing-whitespace-only difference between the op value and the snapshot must
+  // not flag.
+  it("does NOT false-mismatch trailing-whitespace-only text difference", async () => {
+    const { sdkShadowDispatch } = await import("./sdkShadow");
+    const session = await openComposition(BASE_HTML);
+
+    const ops: PatchOperation[] = [{ type: "text-content", property: "text", value: "World   " }];
+    const result = sdkShadowDispatch(session, "hf-box", ops);
+
+    expect(result.dispatched).toBe(true);
+    expect(result.mismatches).toHaveLength(0); // trimmed both sides
+  });
+
+  // Empty-string op value vs an absent (null) snapshot text must collapse to equal
+  // — both mean "no text content".
+  it("treats empty-string text op and null snapshot text as equal", async () => {
+    const { sdkShadowDispatch } = await import("./sdkShadow");
+    const EMPTY_HTML = /* html */ `<!DOCTYPE html>
+<html><body><img data-hf-id="hf-img" src="x.png" /></body></html>`;
+    const session = await openComposition(EMPTY_HTML);
+
+    const ops: PatchOperation[] = [{ type: "text-content", property: "text", value: "" }];
+    const result = sdkShadowDispatch(session, "hf-img", ops);
+
+    expect(result.dispatched).toBe(true);
+    expect(result.mismatches).toHaveLength(0); // "" vs null → both null
+  });
+
+  // Fix 3 verdict (REAL DIVERGENCE, not a readback artifact): the inline-style
+  // read-back already reads only the AUTHORED style attribute (getElementStyles →
+  // parseStyleAttr), never computed styles. The transform-origin divergence
+  // (expected null actual "center center") was a genuine SDK bug — setStyle
+  // removal of a HYPHENATED property silently no-opped because setElementStyles
+  // deleted the kebab key while the style map is keyed camelCase. Now FIXED in
+  // the SDK (model.ts setElementStyles normalizes the key via toCamel), so the
+  // shadow sees parity: removal applies and there is no mismatch.
+  it("reports clean removal of a hyphenated style (SDK setStyle kebab/camel fix)", async () => {
+    const { sdkShadowDispatch } = await import("./sdkShadow");
+    const TO_HTML = /* html */ `<!DOCTYPE html>
+<html><body><div data-hf-id="hf-box" style="transform-origin: center center">x</div></body></html>`;
+    const session = await openComposition(TO_HTML);
+
+    const ops: PatchOperation[] = [
+      { type: "inline-style", property: "transform-origin", value: null },
+    ];
+    const result = sdkShadowDispatch(session, "hf-box", ops);
+
+    // The SDK now removes the hyphenated property, so the shadow read-back agrees.
+    expect(result.dispatched).toBe(true);
+    expect(result.mismatches).toHaveLength(0);
   });
 
   it("applies attribute op and reads back via session.getElement", async () => {
@@ -237,6 +293,35 @@ describe("runShadowDelete", () => {
       reason: "cannot_dispatch",
     });
   });
+
+  // Fix 4 verdict (REAL SDK id-resolution divergence, NOT a readback bug): when a
+  // bare hf-id collides between a sub-composition element (scopedId
+  // "hf-host/hf-dup") and a top-level sibling (scopedId "hf-dup"), removeElement
+  // resolves the bare id via resolveScoped → querySelector (document-order-first,
+  // removes the INNER instance), but getElement prefers the canonical top-level
+  // match (scopedId === id) which SURVIVES. The shadow then correctly reports
+  // expected "removed" / actual "present". The readback here is correct (it checks
+  // the same id it dispatched); the fix belongs in the SDK's id resolution
+  // (resolveScoped vs getElement agreement), not in this file.
+  const DUP_ID_HTML = /* html */ `<!DOCTYPE html><html><body>
+    <div data-hf-id="hf-root" data-hf-root>
+      <div data-hf-id="hf-host" data-composition-file="sub.html">
+        <div data-hf-id="hf-dup">inner</div>
+      </div>
+      <div data-hf-id="hf-dup">outer</div>
+    </div>
+  </body></html>`;
+
+  it("reports clean delete for a duplicate bare id (SDK resolves removeElement/getElement to the same instance)", async () => {
+    const session = await openComposition(DUP_ID_HTML);
+    runShadowDelete(session, "hf-dup");
+    // SDK fix (agree removeElement/getElement on duplicate bare ids): both now
+    // resolve a bare id to the canonical (top-level) instance, so removeElement
+    // drops exactly the element the readback checks → no mismatch. (Previously
+    // removeElement dropped the inner instance while the top-level survived,
+    // which this shadow correctly flagged; that divergence is now fixed.)
+    expect(lastShadow()).toMatchObject({ op: "delete", dispatched: true, mismatchCount: 0 });
+  });
 });
 
 describe("runShadowTiming", () => {
@@ -248,6 +333,38 @@ describe("runShadowTiming", () => {
     expect(el?.duration).toBe(3);
     expect(el?.trackIndex).toBe(1);
     expect(lastShadow()).toMatchObject({ op: "timing", dispatched: true, mismatchCount: 0 });
+  });
+
+  // Fix 1: float-precision tolerance. The SDK computes durations arithmetically
+  // (returning e.g. 3.0999999999999996); the server stores the rounded literal
+  // (3.1). A relative epsilon must treat these as equal, while a real difference
+  // still flags. A fake session returns the imprecise value on read-back.
+  type FakeTiming = { start?: number; duration?: number; trackIndex?: number };
+  function fakeTimingSession(readback: FakeTiming) {
+    return {
+      can: () => ({ ok: true }),
+      batch: (fn: () => void) => fn(),
+      dispatch: () => {},
+      getElement: () => readback,
+    } as unknown as Parameters<typeof runShadowTiming>[0];
+  }
+
+  it("does NOT flag float-precision duration drift (3.1 vs 3.0999999999999996)", () => {
+    const session = fakeTimingSession({ duration: 3.0999999999999996 });
+    runShadowTiming(session, "hf-clip", { duration: 3.1 });
+    expect(lastShadow()).toMatchObject({ op: "timing", dispatched: true, mismatchCount: 0 });
+  });
+
+  it("does NOT flag float-precision start drift (21.36 vs 21.360000000000014)", () => {
+    const session = fakeTimingSession({ start: 21.360000000000014 });
+    runShadowTiming(session, "hf-clip", { start: 21.36 });
+    expect(lastShadow()).toMatchObject({ op: "timing", dispatched: true, mismatchCount: 0 });
+  });
+
+  it("STILL flags a real duration difference (3.1 vs 3.5)", () => {
+    const session = fakeTimingSession({ duration: 3.5 });
+    runShadowTiming(session, "hf-clip", { duration: 3.1 });
+    expect(lastShadow()).toMatchObject({ op: "timing", dispatched: true, mismatchCount: 1 });
   });
 });
 
@@ -304,6 +421,29 @@ describe("gsapFidelityMismatches", () => {
     expect(mismatches.some((m) => m.property === "duration")).toBe(true);
   });
 
+  it("does NOT flag sub-ULP float-formatting noise in duration", () => {
+    // 3.1 vs 3.0999999999999996 is the same value after writer round-trips;
+    // relative-epsilon compare must treat it as equal, not drift.
+    const sdk = `var tl = gsap.timeline({ paused: true });
+tl.to("[data-hf-id=\\"hf-box\\"]", { opacity: 1, duration: 3.1 }, 0);
+window.__timelines["t"] = tl;`;
+    const server = `var tl = gsap.timeline({ paused: true });
+tl.to("[data-hf-id=\\"hf-box\\"]", { opacity: 1, duration: 3.0999999999999996 }, 0);
+window.__timelines["t"] = tl;`;
+    expect(gsapFidelityMismatches(sdk, server)).toEqual([]);
+  });
+
+  it("STILL flags a real integer duration drift (2 vs 1) past the epsilon", () => {
+    const sdk = `var tl = gsap.timeline({ paused: true });
+tl.to("[data-hf-id=\\"hf-box\\"]", { opacity: 1, duration: 1 }, 0);
+window.__timelines["t"] = tl;`;
+    const server = `var tl = gsap.timeline({ paused: true });
+tl.to("[data-hf-id=\\"hf-box\\"]", { opacity: 1, duration: 2 }, 0);
+window.__timelines["t"] = tl;`;
+    const mismatches = gsapFidelityMismatches(sdk, server);
+    expect(mismatches.some((m) => m.property === "duration")).toBe(true);
+  });
+
   it("flags a tween present in one script but not the other", () => {
     const empty = `var tl = gsap.timeline({ paused: true });
 window.__timelines["t"] = tl;`;
@@ -344,6 +484,52 @@ window.__timelines["t"] = tl;`;
     expect(gsapFidelityMismatches(sdk, server).length).toBeGreaterThan(0);
     // With a resolver: matched by element → no mismatch.
     expect(gsapFidelityMismatches(sdk, server, resolve)).toEqual([]);
+  });
+
+  // Drive makeSelectorResolver against a real DOM (happy-dom shims the
+  // browser-only DOMParser the resolver depends on; the studio test env is node).
+  describe("makeSelectorResolver unifies selector forms (real DOM)", () => {
+    const origDomParser = (globalThis as { DOMParser?: unknown }).DOMParser;
+    beforeEach(() => {
+      (globalThis as { DOMParser?: unknown }).DOMParser = new Window().DOMParser;
+    });
+    afterEach(() => {
+      (globalThis as { DOMParser?: unknown }).DOMParser = origDomParser;
+    });
+
+    it("collapses #id / .class / [data-hf-id] for the SAME element to one key", () => {
+      // Element carries all three forms; the server may emit #id or .class while
+      // the SDK emits [data-hf-id]. All must resolve to the same canonical key.
+      const html = `<div data-hf-id="hf-9flp" class="caption-layer" id="intro-layer"></div>`;
+      const resolve = makeSelectorResolver(html);
+      const viaHfId = resolve('[data-hf-id="hf-9flp"]');
+      expect(resolve(".caption-layer")).toBe(viaHfId);
+      expect(resolve("#intro-layer")).toBe(viaHfId);
+    });
+
+    it("unifies SDK [data-hf-id] and server .class tweens in the fidelity diff", () => {
+      const html = `<div data-hf-id="hf-9flp" class="caption-layer"></div>`;
+      const resolve = makeSelectorResolver(html);
+      const sdkScript = `var tl = gsap.timeline({ paused: true });
+tl.from("[data-hf-id=\\"hf-9flp\\"]", { opacity: 0, duration: 1 }, 0);
+window.__timelines["t"] = tl;`;
+      const serverScript = `var tl = gsap.timeline({ paused: true });
+tl.from(".caption-layer", { opacity: 0, duration: 1 }, 0);
+window.__timelines["t"] = tl;`;
+      // Without unification these flag present/absent; the resolver collapses them.
+      expect(gsapFidelityMismatches(sdkScript, serverScript).length).toBeGreaterThan(0);
+      expect(gsapFidelityMismatches(sdkScript, serverScript, resolve)).toEqual([]);
+    });
+
+    it("collapses different selector forms for an element WITHOUT a data-hf-id", () => {
+      // No hf-id present: the resolver must still key both forms to the same node
+      // (not leave .class vs #id as distinct raw-selector keys).
+      const html = `<div class="caption-layer" id="intro-layer"></div>`;
+      const resolve = makeSelectorResolver(html);
+      expect(resolve(".caption-layer")).toBe(resolve("#intro-layer"));
+      // And it is NOT the raw selector fallback.
+      expect(resolve(".caption-layer")).not.toBe(".caption-layer");
+    });
   });
 });
 

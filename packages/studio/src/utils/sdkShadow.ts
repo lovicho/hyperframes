@@ -12,6 +12,7 @@ import type { Composition } from "@hyperframes/sdk";
 import type { EditOp, GsapTweenSpec } from "@hyperframes/sdk";
 import { STUDIO_SDK_SHADOW_ENABLED } from "../components/editor/manualEditingAvailability";
 import { trackStudioEvent } from "./studioTelemetry";
+import { relEqual } from "./sdkShadowNumeric";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import type { PatchOperation } from "./sourcePatcher";
 
@@ -38,6 +39,16 @@ function isShadowableOp(op: PatchOperation): boolean {
   if (op.type === "html-attribute") return !op.property.startsWith("data-hf-");
   return true;
 }
+
+// PatchOperation types patchOpsToSdkEditOps knows how to map. Used by
+// runShadowDispatch to flag any unmapped type as visible telemetry rather than
+// silently dropping it (see the unmapped_type guard there).
+const MAPPED_PATCH_OP_TYPES: ReadonlySet<string> = new Set([
+  "inline-style",
+  "text-content",
+  "attribute",
+  "html-attribute",
+]);
 
 export function patchOpsToSdkEditOps(hfId: string, ops: PatchOperation[]): EditOp[] {
   const result: EditOp[] = [];
@@ -121,13 +132,29 @@ function kebabToCamel(prop: string): string {
   return prop.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 }
 
+// Text parity: the SDK snapshot.text is trimmed, so trim the op value too.
+// An empty string and absent text (null) are treated as equivalent (collapsed
+// to null) so "" vs null does not flag — both mean "no text content".
+function normalizeText(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
 const OP_FIELD_RESOLVERS: Record<string, OpFieldResolver> = {
   "inline-style": (op, flat) => ({
     property: op.property,
     expected: op.value,
     actual: flat.styles[kebabToCamel(op.property)] ?? flat.styles[op.property] ?? null,
   }),
-  "text-content": (op, flat) => ({ property: "text", expected: op.value ?? "", actual: flat.text }),
+  // snapshot.text is already TRIMMED; trim the expected op value to match, so
+  // trailing-whitespace differences don't flag. Empty-vs-absent ("" vs null) is
+  // collapsed in checkOpParity. A genuinely different text value still flags.
+  "text-content": (op, flat) => ({
+    property: "text",
+    expected: normalizeText(op.value),
+    actual: normalizeText(flat.text),
+  }),
   attribute: (op, flat) => ({
     property: attrName(op.property),
     expected: op.value ?? null,
@@ -244,6 +271,23 @@ export function runShadowDispatch(
     });
     return;
   }
+  // Defensive: patchOpsToSdkEditOps silently drops PatchOperation types it
+  // doesn't map. PatchOperation.type is a closed union today, but emit a visible
+  // unmapped_type event if a future type ever slips through, so the gap surfaces
+  // in telemetry instead of vanishing.
+  // Map to the type string before find, so a future unmapped type is read as a
+  // plain string (no object cast; find on the closed union narrows to never).
+  const unmappedType = ops.map((op) => op.type).find((t) => !MAPPED_PATCH_OP_TYPES.has(t));
+  if (unmappedType !== undefined) {
+    trackStudioEvent("sdk_shadow_dispatch", {
+      op: "property",
+      dispatched: false,
+      reason: "unmapped_type",
+      type: unmappedType,
+      mismatchCount: 0,
+    });
+    return;
+  }
   const result = sdkShadowDispatch(session, hfId, ops);
   trackStudioEvent("sdk_shadow_dispatch", {
     op: "property",
@@ -345,6 +389,20 @@ export interface ShadowTiming {
   trackIndex?: number;
 }
 
+// start/duration tolerate float-precision drift (SDK computes them
+// arithmetically, server stores a rounded literal) via the shared relative
+// epsilon; trackIndex (integer track slot) is compared exactly.
+function timingFieldEqual(
+  key: keyof ShadowTiming,
+  actual: number | null | undefined,
+  expected: number,
+): boolean {
+  if (typeof actual === "number" && key !== "trackIndex") {
+    return relEqual(actual, expected);
+  }
+  return actual === expected;
+}
+
 /** Shadow a timing edit. Parity: snapshot start/duration/trackIndex match. */
 export function runShadowTiming(
   session: Composition,
@@ -373,15 +431,14 @@ export function runShadowTiming(
     ];
     for (const [key, actual] of fields) {
       const expected = timing[key];
-      if (expected !== undefined && actual !== expected) {
-        mismatches.push({
-          kind: "value_mismatch",
-          hfId,
-          property: key,
-          expected: String(expected),
-          actual: actual == null ? null : String(actual),
-        });
-      }
+      if (expected === undefined || timingFieldEqual(key, actual, expected)) continue;
+      mismatches.push({
+        kind: "value_mismatch",
+        hfId,
+        property: key,
+        expected: String(expected),
+        actual: actual == null ? null : String(actual),
+      });
     }
     return mismatches;
   });
