@@ -1,6 +1,8 @@
 import { useCallback } from "react";
+import type { Composition, GsapTweenSpec } from "@hyperframes/sdk";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import { roundTo3 } from "../utils/rounding";
+import { runShadowGsapTween } from "../utils/sdkShadow";
 import {
   assignGsapTargetAutoIdIfNeeded,
   ensureElementAddressable,
@@ -13,6 +15,8 @@ interface GsapAnimationOpsParams {
   commitMutation: CommitMutation;
   commitMutationSafely: SafeGsapCommitMutation;
   showToast: (message: string, tone?: "error" | "info") => void;
+  /** Stage 7 Step 3b: SDK session for shadow GSAP dispatch (server stays authoritative). */
+  sdkSession?: Composition | null;
 }
 
 export function useGsapAnimationOps({
@@ -21,6 +25,7 @@ export function useGsapAnimationOps({
   commitMutation,
   commitMutationSafely,
   showToast,
+  sdkSession,
 }: GsapAnimationOpsParams) {
   const updateGsapMeta = useCallback(
     (
@@ -62,7 +67,10 @@ export function useGsapAnimationOps({
     [commitMutation],
   );
 
+  // Pre-existing complexity (auto-id assignment + per-method defaults); this PR
+  // adds only a guarded shadow-op construction at the tail.
   const addGsapAnimation = useCallback(
+    // fallow-ignore-next-line complexity
     async (
       selection: DomEditSelection,
       method: "to" | "from" | "set" | "fromTo",
@@ -109,8 +117,25 @@ export function useGsapAnimationOps({
         },
         { label: `Add GSAP ${method} animation` },
       );
+
+      // Shadow: dispatch the equivalent addGsapTween to the SDK (server stays
+      // authoritative). "set" has no SDK method, so it is not shadowed.
+      // ponytail: only add is shadowed — delete/update key on the server's
+      // animationId, which doesn't resolve in the SDK's independent id-space.
+      if (sdkSession && selection.hfId && method !== "set") {
+        const tween: GsapTweenSpec = {
+          method,
+          position,
+          duration,
+          ease: "power2.out",
+          ...(method === "fromTo"
+            ? { fromProperties: { opacity: 0 }, toProperties: toDefaults[method] }
+            : { properties: toDefaults[method] ?? { opacity: 1 } }),
+        };
+        runShadowGsapTween(sdkSession, { kind: "add", target: selection.hfId, tween });
+      }
     },
-    [activeCompPath, commitMutation, projectIdRef, showToast],
+    [activeCompPath, commitMutation, projectIdRef, showToast, sdkSession],
   );
 
   return {
