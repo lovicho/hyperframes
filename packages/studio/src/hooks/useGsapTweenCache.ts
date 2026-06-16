@@ -211,6 +211,7 @@ export function useGsapAnimationsForElement(
             keyframes: runtime.keyframes,
             ...(runtime.easeEach ? { easeEach: runtime.easeEach } : {}),
           },
+          ...(runtime.arcPath ? { arcPath: runtime.arcPath } : {}),
         };
       });
     }
@@ -243,6 +244,7 @@ export function useGsapAnimationsForElement(
                     keyframes: runtimeEntry.keyframes,
                     ...(runtimeEntry.easeEach ? { easeEach: runtimeEntry.easeEach } : {}),
                   },
+                  ...(runtimeEntry.arcPath ? { arcPath: runtimeEntry.arcPath } : {}),
                 },
               ];
             }
@@ -358,19 +360,30 @@ export function usePopulateKeyframeCacheForFile(
 
     const sf = sourceFile;
     fetchParsedAnimations(projectId, sf).then((parsed) => {
-      if (!parsed) return;
+      if (!parsed) {
+        return;
+      }
       const { setKeyframeCache } = usePlayerStore.getState();
-      // Drop the file's stale entries (including the bare keys consumers read)
-      // before repopulating, so an element whose keyframes were removed and is
-      // absent from this scan doesn't keep showing diamonds.
       clearKeyframeCacheForFile(sf);
       const { elements } = usePlayerStore.getState();
+      console.log(
+        "[kf:static] elements in store:",
+        elements
+          .map((e) => e.domId)
+          .filter(Boolean)
+          .join(", "),
+      );
       const mergedByElement = new Map<string, GsapKeyframesData>();
       for (const anim of parsed.animations) {
         const id = extractIdFromSelector(anim.targetSelector);
         if (!id) continue;
+        if (anim.hasUnresolvedKeyframes) {
+          continue;
+        }
         const kfData = anim.keyframes ?? synthesizeFlatTweenKeyframes(anim);
-        if (!kfData) continue;
+        if (!kfData) {
+          continue;
+        }
         const tweenPos =
           anim.resolvedStart ?? (typeof anim.position === "number" ? anim.position : 0);
         const tweenDur = anim.duration ?? 1;
@@ -402,6 +415,12 @@ export function usePopulateKeyframeCacheForFile(
           mergedByElement.set(id, { ...kfData, keyframes: clipKeyframes });
         }
       }
+      console.log(
+        "[kf:static] merged elements:",
+        [...mergedByElement.keys()].join(", "),
+        "kf counts:",
+        [...mergedByElement.entries()].map(([k, v]) => `${k}:${v.keyframes.length}`).join(", "),
+      );
       for (const [id, kfData] of mergedByElement) {
         setKeyframeCache(`${sf}#${id}`, kfData);
         setKeyframeCache(id, kfData);
@@ -428,14 +447,37 @@ export function usePopulateKeyframeCacheForFile(
       const iframe =
         iframeRef?.current ?? document.querySelector<HTMLIFrameElement>("iframe[src*='/preview/']");
       if (!iframe) return false;
-      const scanned = scanAllRuntimeKeyframes(iframe);
+      // Clip dims per element so the scan converts tween-relative keyframes to
+      // clip-relative (matching the static path) instead of timeline-relative.
+      const clipById = new Map<string, { start: number; duration: number }>();
+      for (const el of usePlayerStore.getState().elements) {
+        if (el.domId) clipById.set(el.domId, { start: el.start, duration: el.duration });
+      }
+      const scanned = scanAllRuntimeKeyframes(iframe, clipById);
+      console.log(
+        "[kf:runtime] scanned",
+        scanned.size,
+        "elements:",
+        [...scanned.keys()].join(", "),
+      );
       if (scanned.size === 0) return false;
       const { setKeyframeCache, keyframeCache } = usePlayerStore.getState();
       for (const [id, data] of scanned) {
         const cacheKey = `${sf}#${id}`;
         const fallbackKey = `index.html#${id}`;
-        if (keyframeCache.has(cacheKey) || keyframeCache.has(fallbackKey) || keyframeCache.has(id))
+        const alreadyCached =
+          keyframeCache.has(cacheKey) || keyframeCache.has(fallbackKey) || keyframeCache.has(id);
+        if (alreadyCached) {
           continue;
+        }
+        console.log(
+          "[kf:runtime] adding runtime entry:",
+          id,
+          "kfs:",
+          data.keyframes.length,
+          "arc:",
+          !!data.arcPath,
+        );
         const entry = {
           format: "percentage" as const,
           keyframes: data.keyframes,

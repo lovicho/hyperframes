@@ -9,6 +9,45 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.106"
+  description="Released - 2026-06-16"
+  tags={["Release", "Studio", "Core"]}
+>
+Studio now resolves and displays keyframes for computed GSAP timelines (helper functions, bounded loops) at their true positions, with Arc Motion activation for MotionPath tweens. Drag improvements fix tween selection and outside-range keyframe creation.
+
+## Features
+
+- **Core:** Static evaluation pre-pass inlines helper-built and bounded-loop timelines so the read parser resolves true positions and motionPath arcs ([b9bd9ed](https://github.com/heygen-com/hyperframes/commit/b9bd9ed91), [#1506](https://github.com/heygen-com/hyperframes/pull/1506))
+- **Studio:** Runtime-authoritative keyframe display with correct clip-relative conversion and arcPath extraction for dynamic timelines
+- **Studio:** "Unroll to edit" action converts helper/loop tweens into literal tweens for direct editing
+- **Studio:** Provenance-based editability classifier surfaces per-tween editing strategy in the Animation panel
+
+## Fixes
+
+- **Studio:** GSAP drag intercept picks the position tween closest to the playhead instead of the one with the most keyframes
+- **Studio:** Dragging outside all tweens' ranges creates a new keyframed tween instead of destructively replacing the nearest one
+- **Studio:** Convert-to-keyframes reads runtime position at tween start time for correct interpolation from preceding tweens
+- **Core:** Lint rule uses the acorn parser (with inlining) so `overlapping_gsap_tweens` reflects true positions
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.105...v0.6.106).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.105"
+  description="Released - 2026-06-16"
+  tags={["Release", "CLI", "Engine"]}
+>
+Restores `remove-background` by moving `sharp` and `onnxruntime-node` back to regular dependencies (they were skipped as optional deps, so the command's required native modules weren't installed). Also fixes the Linux GPU render path (deprecated EGL + NVENC probe failure on data-center GPUs).
+
+## Fixes
+
+- **CLI:** Restore sharp + onnxruntime-node as dependencies (unbreak remove-background) ([322147aef](https://github.com/heygen-com/hyperframes/commit/322147aef9ef7d13c58bb95f0b628dba821aed28), [#1505](https://github.com/heygen-com/hyperframes/pull/1505))
+- **Engine:** Linux GPU path uses deprecated EGL + NVENC probe fails on data-center GPUs ([e5346afdd](https://github.com/heygen-com/hyperframes/commit/e5346afdd84b99806dcdc828fc3318c3ef63d290), [#1504](https://github.com/heygen-com/hyperframes/pull/1504))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.104...v0.6.105).
+</Update>
+
+<Update
   label="HyperFrames v0.6.103"
   description="Released - 2026-06-16"
   tags={["Release", "Telemetry"]}
