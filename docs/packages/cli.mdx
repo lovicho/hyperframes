@@ -407,12 +407,12 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
 
     ```bash
     npx hyperframes capture https://stripe.com
-    npx hyperframes capture https://linear.app -o captures/linear
+    npx hyperframes capture https://linear.app -o linear-capture
     npx hyperframes capture https://example.com --json
     ```
 
     ```
-    ◇  Captured Stripe | Financial Infrastructure → captures/stripe-com
+    ◇  Captured Stripe | Financial Infrastructure → capture
 
       Screenshots: 12
       Assets: 45
@@ -422,7 +422,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
 
     | Flag | Description |
     |------|-------------|
-    | `-o, --output` | Output directory (default: `captures/<hostname>`) |
+    | `-o, --output` | Output directory (default: `./capture`; auto-suffixes to `./capture-2/`, `./capture-3/`, … if `./capture/` is taken) |
     | `--timeout` | Page load timeout in ms (default: 120000) |
     | `--skip-assets` | Skip downloading images and fonts |
     | `--max-screenshots` | Maximum screenshot count (default: 24) |

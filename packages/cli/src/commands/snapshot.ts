@@ -84,8 +84,8 @@ async function extractVideoFrameToBuffer(
 }
 
 export const examples: Example[] = [
-  ["Capture 5 key frames from a composition", "snapshot captures/stripe"],
-  ["Capture 10 evenly-spaced frames", "snapshot captures/stripe --frames 10"],
+  ["Capture 5 key frames from a composition", "snapshot capture"],
+  ["Capture 10 evenly-spaced frames", "snapshot capture --frames 10"],
 ];
 
 /**

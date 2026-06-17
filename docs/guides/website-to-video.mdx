@@ -141,7 +141,7 @@ npx hyperframes capture https://stripe.com
 ```
 
 ```
-◇  Captured Stripe | Financial Infrastructure → captures/stripe-com
+◇  Captured Stripe | Financial Infrastructure → capture
 
   Screenshots: 12
   Assets: 45
@@ -151,7 +151,7 @@ npx hyperframes capture https://stripe.com
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o, --output` | `captures/<hostname>` | Output directory |
+| `-o, --output` | `./capture` | Output directory (auto-suffixes to `./capture-2/`, `./capture-3/`, … if `./capture/` is taken) |
 | `--timeout` | `120000` | Page load timeout in ms |
 | `--skip-assets` | `false` | Skip downloading images and fonts |
 | `--max-screenshots` | `24` | Maximum screenshot count |
@@ -208,7 +208,7 @@ See the [pipeline guide](/guides/pipeline#iterating) for more re-entry patterns.
     Sites using frameworks like Framer lazy-load images via IntersectionObserver. The capture scrolls through the page to trigger loading, but very long pages may miss images near the bottom. Adding a Gemini key improves descriptions of captured assets, but doesn't increase the count.
   </Accordion>
   <Accordion title="Colors look wrong">
-    The capture uses pixel sampling combined with DOM computed styles. Dark sites should show dark colors in the palette. Check the scroll screenshots in `captures/<name>/screenshots/` to see what the capture actually saw.
+    The capture uses pixel sampling combined with DOM computed styles. Dark sites should show dark colors in the palette. Check the scroll screenshots in `<output>/screenshots/` (default `./capture/screenshots/`) to see what the capture actually saw.
   </Accordion>
   <Accordion title="Agent doesn't find the skill">
     Verify skills are installed:
