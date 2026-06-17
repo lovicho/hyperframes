@@ -132,6 +132,26 @@ export {
 export { CSS_URL_RE, isNonRelativeUrl, isPathInside } from "./compiler/assetPaths";
 export { decodeUrlPathVariants } from "./utils/urlPath";
 export { parseAnimatedGifMetadata, type AnimatedGifMetadata } from "./media/gif";
+export {
+  HF_COLOR_GRADING_ATTR,
+  HF_COLOR_GRADING_ADJUST_KEYS,
+  HF_COLOR_GRADING_COLOR_SPACE,
+  HF_COLOR_GRADING_PRESETS,
+  isHfColorGradingActive,
+  normalizeHfColorGrading,
+  normalizeHfColorGradingWithVariables,
+  resolveHfColorGradingVariables,
+  serializeHfColorGrading,
+  type HfColorGrading,
+  type HfColorGradingAdjust,
+  type HfColorGradingAdjustKey,
+  type HfColorGradingLutRef,
+  type HfColorGradingPreset,
+  type HfColorGradingPresetId,
+  type HfColorGradingTarget,
+  type HfColorGradingVariableMap,
+  type NormalizedHfColorGrading,
+} from "./colorGrading";
 
 // Inline scripts
 export {

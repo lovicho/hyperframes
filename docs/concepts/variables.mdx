@@ -78,6 +78,45 @@ The same pattern covers the three media element types:
 
 Pass assets as URL references your composition resolves at render time; don't inline base64. URL-shaped assets travel cleanly through both the local renderer and the Lambda surface — see [Templates on Lambda](/deploy/templates-on-lambda#working-with-large-variables) for the 256 KiB execution-input cap on distributed renders.
 
+### Parameterizing media color grading
+
+Media color grading can also read exact variable references inside
+`data-color-grading`. Use `$name` or `${name}` as the entire value for a field;
+the runtime resolves it from the current composition's variables before applying
+the shader grading:
+
+```html compositions/hero.html
+<html data-composition-variables='[
+  {"id":"gradingPreset","type":"enum","label":"Color grading preset","default":"warm-clean",
+   "options":[{"value":"warm-clean","label":"Warm Clean"},{"value":"cool-clean","label":"Cool Clean"}]},
+  {"id":"gradingIntensity","type":"number","label":"Color grading intensity","default":0.75,"min":0,"max":1,"step":0.05},
+  {"id":"gradingExposure","type":"number","label":"Exposure","default":0,"min":-2,"max":2,"step":0.05}
+]'>
+  <body>
+    <div data-composition-id="hero" data-width="1920" data-height="1080">
+      <video
+        id="hero-video"
+        src="assets/hero.mp4"
+        data-start="0"
+        data-track-index="0"
+        muted
+        playsinline
+        data-color-grading='{
+          "preset":"$gradingPreset",
+          "intensity":"$gradingIntensity",
+          "adjust":{"exposure":"${gradingExposure}"},
+          "colorSpace":"rec709"
+        }'
+      ></video>
+    </div>
+  </body>
+</html>
+```
+
+When the same composition is embedded multiple times, each host's
+`data-variable-values` can produce different grading without copying or rewriting
+the media element's `data-color-grading` JSON.
+
 ### Swapping media: do you need to vary duration too?
 
 A common follow-up: if a variable swaps a `<video>` to a different clip, does `data-duration` need to change too? Usually no. `data-duration` is optional on `<video>` and `<audio>` — leave it off and the renderer ffprobes the source and uses its natural length:

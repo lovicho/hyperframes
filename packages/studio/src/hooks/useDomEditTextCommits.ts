@@ -43,6 +43,33 @@ export interface UseDomEditTextCommitsParams {
   resolveImportedFontAsset: (fontFamilyValue: string) => ImportedFontAsset | null;
 }
 
+function applyPreviewAttribute(
+  doc: Document | null | undefined,
+  selection: DomEditSelection,
+  activeCompPath: string | null,
+  attr: string,
+  value: string | null,
+  options: { prefixData?: boolean; removeFalse?: boolean } = {},
+): void {
+  if (!doc) return;
+  const el = findElementForSelection(doc, selection, activeCompPath);
+  if (!el) return;
+  const fullAttr = options.prefixData && !attr.startsWith("data-") ? `data-${attr}` : attr;
+  if (value === null || value === "" || (options.removeFalse && value === "false")) {
+    el.removeAttribute(fullAttr);
+  } else {
+    el.setAttribute(fullAttr, value);
+  }
+}
+
+interface DataAttributeCommitOptions {
+  label: string;
+  coalescePrefix: string;
+  skipRefresh: boolean;
+  warningMessage: string;
+  refreshAfter?: boolean;
+}
+
 // ── Hook ──
 
 export function useDomEditTextCommits({
@@ -114,29 +141,33 @@ export function useDomEditTextCommits({
     ],
   );
 
-  const handleDomAttributeCommit = useCallback(
-    async (attr: string, value: string) => {
+  const commitDataAttribute = useCallback(
+    async (attr: string, value: string | null, options: DataAttributeCommitOptions) => {
       if (!domEditSelection) return;
       const iframe = previewIframeRef.current;
-      const doc = iframe?.contentDocument;
-      if (doc) {
-        const el = findElementForSelection(doc, domEditSelection, activeCompPath);
-        if (el) el.setAttribute(`data-${attr}`, value);
-      }
+      applyPreviewAttribute(
+        iframe?.contentDocument,
+        domEditSelection,
+        activeCompPath,
+        attr,
+        value,
+        {
+          prefixData: true,
+        },
+      );
       const op: PatchOperation = { type: "attribute", property: attr, value };
       try {
         await persistDomEditOperations(domEditSelection, [op], {
-          label: `Edit ${attr.replace(/-/g, " ")}`,
-          coalesceKey: `attr:${attr}:${getDomEditTargetKey(domEditSelection)}`,
-          skipRefresh: false,
+          label: options.label,
+          coalesceKey: `${options.coalescePrefix}:${attr}:${getDomEditTargetKey(domEditSelection)}`,
+          skipRefresh: options.skipRefresh,
         });
       } catch (err) {
-        console.warn(
-          "[Studio] Attribute persist failed:",
-          err instanceof Error ? err.message : err,
-        );
+        console.warn(options.warningMessage, err instanceof Error ? err.message : err);
       }
-      refreshDomEditSelectionFromPreview(domEditSelection);
+      if (options.refreshAfter) {
+        refreshDomEditSelectionFromPreview(domEditSelection);
+      }
     },
     [
       activeCompPath,
@@ -147,21 +178,45 @@ export function useDomEditTextCommits({
     ],
   );
 
+  const handleDomAttributeCommit = useCallback(
+    async (attr: string, value: string) => {
+      await commitDataAttribute(attr, value, {
+        label: `Edit ${attr.replace(/-/g, " ")}`,
+        coalescePrefix: "attr",
+        skipRefresh: false,
+        warningMessage: "[Studio] Attribute persist failed:",
+        refreshAfter: true,
+      });
+    },
+    [commitDataAttribute],
+  );
+
+  const handleDomAttributeLiveCommit = useCallback(
+    async (attr: string, value: string | null) => {
+      await commitDataAttribute(attr, value, {
+        label: `Edit ${attr.replace(/^(data-)?/, "").replace(/-/g, " ")}`,
+        coalescePrefix: "attr-live",
+        skipRefresh: true,
+        warningMessage: "[Studio] Live attribute persist failed:",
+      });
+    },
+    [commitDataAttribute],
+  );
+
   const handleDomHtmlAttributeCommit = useCallback(
     async (attr: string, value: string | null) => {
       if (!domEditSelection) return;
       const iframe = previewIframeRef.current;
-      const doc = iframe?.contentDocument;
-      if (doc) {
-        const el = findElementForSelection(doc, domEditSelection, activeCompPath);
-        if (el) {
-          if (value === null || value === "" || value === "false") {
-            el.removeAttribute(attr);
-          } else {
-            el.setAttribute(attr, value);
-          }
-        }
-      }
+      applyPreviewAttribute(
+        iframe?.contentDocument,
+        domEditSelection,
+        activeCompPath,
+        attr,
+        value,
+        {
+          removeFalse: true,
+        },
+      );
       const op: PatchOperation = { type: "html-attribute", property: attr, value };
       try {
         await persistDomEditOperations(domEditSelection, [op], {
@@ -395,6 +450,7 @@ export function useDomEditTextCommits({
   return {
     handleDomStyleCommit,
     handleDomAttributeCommit,
+    handleDomAttributeLiveCommit,
     handleDomHtmlAttributeCommit,
     handleDomTextCommit,
     commitDomTextFields,

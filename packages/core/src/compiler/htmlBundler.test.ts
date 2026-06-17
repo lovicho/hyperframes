@@ -17,6 +17,29 @@ function makeTempProject(files: Record<string, string>): string {
   return dir;
 }
 
+function makeColorGradingProject(lutSrc: string, files: Record<string, string> = {}): string {
+  return makeTempProject({
+    "index.html": `<!doctype html>
+<html><body>
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <video
+      id="clip"
+      src="clip.mp4"
+      data-color-grading='{"lut":{"src":"${lutSrc}","intensity":0.5}}'></video>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+    ...files,
+  });
+}
+
+function readBundledColorGradingLutSrc(bundled: string): string | undefined {
+  const { document } = parseHTML(bundled);
+  const rawLook = document.getElementById("clip")?.getAttribute("data-color-grading") ?? "";
+  const parsed = JSON.parse(rawLook) as { lut?: { src?: string } };
+  return parsed.lut?.src;
+}
+
 // Mirror the repo convention (preview.test.ts): skip symlink cases on
 // non-symlink-privileged Windows runners rather than crash the suite.
 function tryCreateSymlink(target: string, path: string, type: "dir" | "file"): boolean {
@@ -919,6 +942,26 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain("--brand: #ff5728");
     expect(bundled).not.toContain("@import");
     expect(bundled).toContain("margin: 0");
+  });
+
+  it("inlines cube LUT files referenced from data-color-grading", async () => {
+    const dir = makeColorGradingProject("assets/luts/identity.cube", {
+      "assets/luts/identity.cube": `LUT_3D_SIZE 2
+0 0 0
+1 0 0
+0 1 0
+1 1 0
+0 0 1
+1 0 1
+0 1 1
+1 1 1`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+    const lutSrc = readBundledColorGradingLutSrc(bundled);
+
+    expect(lutSrc).toMatch(/^data:text\/plain;base64,/);
+    expect(lutSrc).not.toContain("assets/luts/identity.cube");
   });
 
   it("resolves nested CSS @import chains", async () => {

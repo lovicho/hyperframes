@@ -1,11 +1,20 @@
 import { useState, useCallback, useRef } from "react";
-import type { RightPanelTab } from "../utils/studioHelpers";
+import type {
+  RightInspectorPane,
+  RightInspectorPanes,
+  RightPanelTab,
+} from "../utils/studioHelpers";
 import { readStudioUiPreferences, writeStudioUiPreferences } from "../utils/studioUiPreferences";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 
 export interface InitialPanelLayoutState {
   rightCollapsed?: boolean | null;
   rightPanelTab?: RightPanelTab | null;
+}
+
+function getInitialRightInspectorPanes(tab?: RightPanelTab | null): RightInspectorPanes {
+  if (tab === "layers") return { layers: true, design: false };
+  return { layers: false, design: true };
 }
 
 export function usePanelLayout(initialState?: InitialPanelLayoutState) {
@@ -17,6 +26,9 @@ export function usePanelLayout(initialState?: InitialPanelLayoutState) {
   const [rightCollapsed, setRightCollapsed] = useState(initialState?.rightCollapsed ?? true);
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>(
     initialState?.rightPanelTab ?? "renders",
+  );
+  const [rightInspectorPanes, setRightInspectorPanes] = useState<RightInspectorPanes>(() =>
+    getInitialRightInspectorPanes(initialState?.rightPanelTab),
   );
   const panelDragRef = useRef<{
     side: "left" | "right";
@@ -67,11 +79,22 @@ export function usePanelLayout(initialState?: InitialPanelLayoutState) {
 
   const trackedSetRightPanelTab = useCallback(
     (tab: RightPanelTab) => {
+      if (tab === "design" || tab === "layers") {
+        setRightInspectorPanes((panes) => ({ ...panes, [tab]: true }));
+      }
       setRightPanelTab(tab);
       trackStudioEvent("tab_switch", { panel: "right_panel", tab });
     },
     [setRightPanelTab],
   );
+
+  const toggleRightInspectorPane = useCallback((pane: RightInspectorPane) => {
+    setRightInspectorPanes((panes) => {
+      const next = { ...panes, [pane]: !panes[pane] };
+      if (!next.design && !next.layers) return panes;
+      return next;
+    });
+  }, []);
 
   return {
     leftWidth,
@@ -83,6 +106,8 @@ export function usePanelLayout(initialState?: InitialPanelLayoutState) {
     setRightCollapsed,
     rightPanelTab,
     setRightPanelTab: trackedSetRightPanelTab,
+    rightInspectorPanes,
+    toggleRightInspectorPane,
     toggleLeftSidebar,
     handlePanelResizeStart,
     handlePanelResizeMove,

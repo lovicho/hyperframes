@@ -30,7 +30,15 @@ async function getSharedBrowser(): Promise<import("puppeteer-core").Browser | nu
     _browser = await puppeteer.default.launch({
       headless: true,
       executablePath,
-      args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      args: [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--enable-webgl",
+        "--ignore-gpu-blocklist",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
+      ],
     });
     _browserLaunchPromise = null;
     return _browser;

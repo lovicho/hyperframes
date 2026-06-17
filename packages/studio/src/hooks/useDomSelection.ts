@@ -176,9 +176,7 @@ export function useDomSelection({
       if (nextSelection) {
         if (options?.revealPanel !== false) {
           setRightCollapsed(false);
-          if (rightPanelTab !== "layers") {
-            setRightPanelTab("design");
-          }
+          setRightPanelTab("design");
         }
         const nextSelectedTimelineId = findMatchingTimelineElementId(
           nextSelection,
@@ -190,13 +188,7 @@ export function useDomSelection({
 
       setSelectedTimelineElementId(null);
     },
-    [
-      setSelectedTimelineElementId,
-      timelineElements,
-      setRightCollapsed,
-      setRightPanelTab,
-      rightPanelTab,
-    ],
+    [setSelectedTimelineElementId, timelineElements, setRightCollapsed, setRightPanelTab],
   );
 
   const clearDomSelection = useCallback(() => {

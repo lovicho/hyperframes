@@ -8,8 +8,10 @@ import {
   ArrowsOutCardinal,
   MusicNote,
   Palette as PhPalette,
+  Minus as PhMinus,
   Plus as PhPlus,
   Square as PhSquare,
+  SquareSplitVertical as PhSquareSplitVertical,
   TextT,
   X as PhX,
   Lightning,
@@ -43,8 +45,10 @@ export const MessageSquare = makeIcon(ChatCenteredText);
 export const Move = makeIcon(ArrowsOutCardinal);
 export const Music = makeIcon(MusicNote);
 export const Palette = makeIcon(PhPalette);
+export const Minus = makeIcon(PhMinus);
 export const Plus = makeIcon(PhPlus);
 export const Square = makeIcon(PhSquare);
+export const Compare = makeIcon(PhSquareSplitVertical);
 export const Type = makeIcon(TextT);
 export const X = makeIcon(PhX);
 export const Zap = makeIcon(Lightning);

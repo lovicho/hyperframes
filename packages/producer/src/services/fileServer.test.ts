@@ -51,6 +51,39 @@ describe("closeFileServerSafely", () => {
   });
 });
 
+async function withFileServer(
+  projectDir: string,
+  run: (server: Awaited<ReturnType<typeof createFileServer>>) => Promise<void>,
+): Promise<void> {
+  const server = await createFileServer({
+    projectDir,
+    preHeadScripts: [],
+    headScripts: [],
+    bodyScripts: [],
+  });
+  try {
+    await run(server);
+  } finally {
+    server.close();
+  }
+}
+
+function writeEmptyIndex(projectDir: string): void {
+  writeFileSync(join(projectDir, "index.html"), "<!doctype html><html></html>");
+}
+
+async function expectTextResponse(
+  url: string,
+  options: { contentType?: string; bodyIncludes: string },
+): Promise<void> {
+  const response = await fetch(url);
+  expect(response.status).toBe(200);
+  if (options.contentType) {
+    expect(response.headers.get("content-type")).toContain(options.contentType);
+  }
+  expect(await response.text()).toContain(options.bodyIncludes);
+}
+
 describe("injectScriptsIntoHtml", () => {
   it("injects the virtual time shim into head content before authored scripts", () => {
     const html = `<!DOCTYPE html>
@@ -202,29 +235,19 @@ describe("createFileServer", () => {
     try {
       mkdirSync(projectDir, { recursive: true });
       mkdirSync(sharedDir, { recursive: true });
-      writeFileSync(join(projectDir, "index.html"), "<!doctype html><html></html>");
+      writeEmptyIndex(projectDir);
       writeFileSync(
         join(sharedDir, "brand.css"),
         ".aisplus-glass { backdrop-filter: blur(28px); }",
       );
       symlinkSync("../shared", join(projectDir, "shared"));
 
-      const server = await createFileServer({
-        projectDir,
-        preHeadScripts: [],
-        headScripts: [],
-        bodyScripts: [],
+      await withFileServer(projectDir, async (server) => {
+        await expectTextResponse(`${server.url}/shared/brand.css`, {
+          contentType: "text/css",
+          bodyIncludes: ".aisplus-glass",
+        });
       });
-
-      try {
-        const response = await fetch(`${server.url}/shared/brand.css`);
-
-        expect(response.status).toBe(200);
-        expect(response.headers.get("content-type")).toContain("text/css");
-        expect(await response.text()).toContain(".aisplus-glass");
-      } finally {
-        server.close();
-      }
     } finally {
       rmSync(workspaceDir, { recursive: true, force: true });
     }
@@ -236,23 +259,14 @@ describe("createFileServer", () => {
     try {
       const subDir = join(projectDir, "video#1");
       mkdirSync(subDir, { recursive: true });
-      writeFileSync(join(projectDir, "index.html"), "<!doctype html><html></html>");
+      writeEmptyIndex(projectDir);
       writeFileSync(join(subDir, "frame.jpg"), "fake-jpg");
 
-      const server = await createFileServer({
-        projectDir,
-        preHeadScripts: [],
-        headScripts: [],
-        bodyScripts: [],
+      await withFileServer(projectDir, async (server) => {
+        await expectTextResponse(`${server.url}/video%231/frame.jpg`, {
+          bodyIncludes: "fake-jpg",
+        });
       });
-
-      try {
-        const res = await fetch(`${server.url}/video%231/frame.jpg`);
-        expect(res.status).toBe(200);
-        expect(await res.text()).toBe("fake-jpg");
-      } finally {
-        server.close();
-      }
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }

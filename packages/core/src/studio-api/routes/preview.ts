@@ -326,7 +326,7 @@ export function registerPreviewRoutes(api: Hono, adapter: StudioApiAdapter): voi
       return c.text("not found", 404);
     }
     const contentType = getMimeType(subPath);
-    const isText = /\.(html|css|js|json|svg|txt|md)$/i.test(subPath);
+    const isText = /\.(html|css|js|json|svg|txt|md|cube)$/i.test(subPath);
 
     const etag = `"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
     const cacheHeaders: Record<string, string> = isText

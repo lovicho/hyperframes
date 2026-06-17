@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.6.107",
+  "version": "0.6.109",
   "description": "",
   "repository": {
     "type": "git",
@@ -33,6 +33,14 @@
     "./compiler": {
       "import": "./src/compiler/index.ts",
       "types": "./src/compiler/index.ts"
+    },
+    "./color-grading": {
+      "import": "./src/colorGrading.ts",
+      "types": "./src/colorGrading.ts"
+    },
+    "./color-luts": {
+      "import": "./src/colorLuts.ts",
+      "types": "./src/colorLuts.ts"
     },
     "./runtime": "./dist/hyperframe.runtime.iife.js",
     "./runtime/clipTree": {
@@ -128,6 +136,14 @@
       "./compiler": {
         "import": "./dist/compiler/index.js",
         "types": "./dist/compiler/index.d.ts"
+      },
+      "./color-grading": {
+        "import": "./dist/colorGrading.js",
+        "types": "./dist/colorGrading.d.ts"
+      },
+      "./color-luts": {
+        "import": "./dist/colorLuts.js",
+        "types": "./dist/colorLuts.d.ts"
       },
       "./runtime": "./dist/hyperframe.runtime.iife.js",
       "./runtime/lottie-readiness": {

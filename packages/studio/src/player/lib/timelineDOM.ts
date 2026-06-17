@@ -22,6 +22,7 @@ import {
   buildTimelineElementKey,
   buildTimelineElementIdentity,
   getTimelineElementIdentity,
+  isTimelineIgnoredElement,
 } from "./timelineElementHelpers";
 
 // Re-export helpers that were previously public from this module so that
@@ -230,6 +231,7 @@ export function parseTimelineFromDOM(doc: Document, rootDuration: number): Timel
 
   nodes.forEach((node) => {
     if (node === rootComp) return;
+    if (isTimelineIgnoredElement(node)) return;
     const el = node as HTMLElement;
     const startStr = el.getAttribute("data-start");
     if (startStr == null) return;

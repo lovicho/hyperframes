@@ -23,6 +23,19 @@ function readDurationAttribute(el: Element | null | undefined): number {
   return isFinitePositive(duration) ? duration : 0;
 }
 
+export function isTimelineIgnoredElement(el: Element): boolean {
+  return Boolean(
+    el.closest(
+      [
+        "[data-hyperframes-ignore]",
+        "[data-hyperframes-picker-ignore]",
+        "[data-hf-ignore]",
+        "[data-hf-color-grading-canvas]",
+      ].join(","),
+    ),
+  );
+}
+
 export function readTimelineDurationFromDocument(doc: Document | null | undefined): number {
   if (!doc) return 0;
   const rootDuration = readDurationAttribute(doc.querySelector("[data-composition-id]"));
@@ -30,6 +43,7 @@ export function readTimelineDurationFromDocument(doc: Document | null | undefine
 
   let maxEnd = 0;
   for (const node of Array.from(doc.querySelectorAll("[data-start]"))) {
+    if (isTimelineIgnoredElement(node)) continue;
     const start = Number.parseFloat(node.getAttribute("data-start") ?? "");
     const duration = readDurationAttribute(node);
     if (!Number.isFinite(start) || start < 0 || duration <= 0) continue;
@@ -241,7 +255,9 @@ export function getTimelineElementIdentity(element: TimelineElement): string {
 
 function getTimelineDomNodes(doc: Document): Element[] {
   const rootComp = doc.querySelector("[data-composition-id]");
-  return Array.from(doc.querySelectorAll("[data-start]")).filter((node) => node !== rootComp);
+  return Array.from(doc.querySelectorAll("[data-start]")).filter(
+    (node) => node !== rootComp && !isTimelineIgnoredElement(node),
+  );
 }
 
 function numbersNearlyEqual(a: number, b: number): boolean {
@@ -295,6 +311,7 @@ export function findTimelineDomNodeForClip(
 
 export function isImplicitTimelineLayerCandidate(root: Element, el: Element): el is HTMLElement {
   if (!isHtmlElement(el)) return false;
+  if (isTimelineIgnoredElement(el)) return false;
   if (el.parentElement !== root) return false;
   const tagName = el.tagName.toLowerCase();
   if (IMPLICIT_TIMELINE_LAYER_SKIP_TAGS.has(tagName)) return false;

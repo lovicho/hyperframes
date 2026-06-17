@@ -1,3 +1,5 @@
+import type { HfColorGradingTarget } from "../colorGrading";
+
 export type RuntimeJson =
   | string
   | number
@@ -24,6 +26,9 @@ export type RuntimeBridgeControlMessage = {
   muted?: boolean;
   volume?: number;
   playbackRate?: number;
+  target?: HfColorGradingTarget | string | null;
+  grading?: RuntimeJson;
+  compare?: RuntimeJson;
   seekMode?: "drag" | "commit";
 };
 

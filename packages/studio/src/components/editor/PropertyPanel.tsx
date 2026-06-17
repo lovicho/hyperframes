@@ -14,11 +14,19 @@ import { MetricField, Section } from "./propertyPanelPrimitives";
 import { createTransformCommitHandlers } from "./propertyPanelTransformCommit";
 import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
 import { isMediaElement, MediaSection } from "./propertyPanelMediaSection";
+import {
+  ColorGradingSection,
+  isColorGradingCapableElement,
+} from "./propertyPanelColorGradingSection";
 import { TextSection, StyleSections } from "./propertyPanelSections";
 import { GsapAnimationSection } from "./GsapAnimationSection";
 import { PropertyPanel3dTransform } from "./propertyPanel3dTransform";
 import { KeyframeNavigation } from "./KeyframeNavigation";
-import { STUDIO_GSAP_PANEL_ENABLED, STUDIO_KEYFRAMES_ENABLED } from "./manualEditingAvailability";
+import {
+  STUDIO_COLOR_GRADING_ENABLED,
+  STUDIO_GSAP_PANEL_ENABLED,
+  STUDIO_KEYFRAMES_ENABLED,
+} from "./manualEditingAvailability";
 import { usePlayerStore, liveTime } from "../../player";
 import { TimingSection } from "./propertyPanelTimingSection";
 import { type PropertyPanelProps } from "./propertyPanelHelpers";
@@ -47,6 +55,7 @@ export const PropertyPanel = memo(function PropertyPanel({
   onClearSelection,
   onSetStyle,
   onSetAttribute,
+  onSetAttributeLive,
   onSetHtmlAttribute,
   onSetManualOffset,
   onSetManualSize,
@@ -352,6 +361,22 @@ export const PropertyPanel = memo(function PropertyPanel({
             onSetStyle={onSetStyle}
             onSetAttribute={onSetAttribute}
             onSetHtmlAttribute={onSetHtmlAttribute}
+          />
+        )}
+
+        {STUDIO_COLOR_GRADING_ENABLED && isColorGradingCapableElement(element) && (
+          <ColorGradingSection
+            key={[
+              element.id ?? "",
+              element.hfId ?? "",
+              element.selector ?? "",
+              String(element.selectorIndex ?? ""),
+            ].join("|")}
+            element={element}
+            assets={assets}
+            previewIframeRef={previewIframeRef}
+            onImportAssets={onImportAssets}
+            onSetAttributeLive={onSetAttributeLive}
           />
         )}
 

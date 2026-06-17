@@ -409,6 +409,7 @@ export function StudioApp() {
     shouldShowSelectedDomBounds,
   } = useInspectorState(
     panelLayout.rightPanelTab,
+    panelLayout.rightInspectorPanes,
     panelLayout.rightCollapsed,
     isPlaying,
     gestureState === "recording",

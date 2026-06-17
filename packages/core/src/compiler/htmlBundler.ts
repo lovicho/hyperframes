@@ -19,6 +19,7 @@ import { getHyperframeRuntimeScript } from "../generated/runtime-inline";
 import { readDeclaredDefaults } from "../runtime/getVariables";
 import { inlineSubCompositions } from "./inlineSubCompositions";
 import { isSafePath, resolveWithinProject } from "../safePath.js";
+import { HF_COLOR_GRADING_ATTR } from "../colorGrading";
 
 const DEFAULT_RUNTIME_SCRIPT_URL = "";
 
@@ -201,6 +202,7 @@ const INLINE_MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".json": "application/json",
   ".txt": "text/plain",
+  ".cube": "text/plain",
   ".xml": "application/xml",
 };
 
@@ -217,6 +219,33 @@ function maybeInlineRelativeAssetUrl(urlValue: string, projectDir: string): stri
   if (content == null) return null;
   const dataUrl = `data:${mimeType};base64,${content.toString("base64")}`;
   return appendSuffixToUrl(dataUrl, suffix);
+}
+
+// fallow-ignore-next-line complexity
+function rewriteColorGradingLutWithInlinedAssets(value: string, projectDir: string): string {
+  if (!value.trim().startsWith("{")) return value;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return value;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
+
+  const lut = Reflect.get(parsed, "lut");
+  if (typeof lut === "string") {
+    const inlined = maybeInlineRelativeAssetUrl(lut, projectDir);
+    if (!inlined) return value;
+    Reflect.set(parsed, "lut", inlined);
+    return JSON.stringify(parsed);
+  }
+  if (typeof lut !== "object" || lut === null || Array.isArray(lut)) return value;
+  const lutSrc = Reflect.get(lut, "src");
+  if (typeof lutSrc !== "string") return value;
+  const inlined = maybeInlineRelativeAssetUrl(lutSrc, projectDir);
+  if (!inlined) return value;
+  Reflect.set(lut, "src", inlined);
+  return JSON.stringify(parsed);
 }
 
 function rewriteSrcsetWithInlinedAssets(srcsetValue: string, projectDir: string): string {
@@ -946,6 +975,15 @@ export async function bundleToSingleHtml(
       "style",
       rewriteCssUrlsWithInlinedAssets(el.getAttribute("style") || "", projectDir),
     );
+  }
+  for (const el of [...document.querySelectorAll(`[${HF_COLOR_GRADING_ATTR}]`)]) {
+    const value = el.getAttribute(HF_COLOR_GRADING_ATTR);
+    if (value) {
+      el.setAttribute(
+        HF_COLOR_GRADING_ATTR,
+        rewriteColorGradingLutWithInlinedAssets(value, projectDir),
+      );
+    }
   }
 
   return document.toString();

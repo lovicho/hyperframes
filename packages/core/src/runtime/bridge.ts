@@ -1,4 +1,5 @@
 import { swallow } from "./diagnostics";
+import type { HfColorGradingTarget } from "../colorGrading";
 import type { RuntimeBridgeControlMessage, RuntimeOutboundMessage } from "./types";
 
 type BridgeDeps = {
@@ -10,6 +11,11 @@ type BridgeDeps = {
   onSetVolume: (volume: number) => void;
   onSetMediaOutputMuted: (muted: boolean) => void;
   onSetPlaybackRate: (rate: number) => void;
+  onSetColorGrading: (target: HfColorGradingTarget | string | null, grading: unknown) => void;
+  onSetColorGradingCompare: (
+    target: HfColorGradingTarget | string | null,
+    compare: unknown,
+  ) => void;
   onEnablePickMode: () => void;
   onDisablePickMode: () => void;
 };
@@ -58,6 +64,14 @@ export function installRuntimeControlBridge(deps: BridgeDeps): (event: MessageEv
     }
     if (action === "set-playback-rate") {
       deps.onSetPlaybackRate(Number(data.playbackRate ?? 1));
+      return;
+    }
+    if (action === "set-color-grading") {
+      deps.onSetColorGrading(data.target ?? null, data.grading ?? null);
+      return;
+    }
+    if (action === "set-color-grading-compare") {
+      deps.onSetColorGradingCompare(data.target ?? null, data.compare ?? null);
       return;
     }
     if (action === "enable-pick-mode") {

@@ -57,6 +57,27 @@ export function isTextBearingTag(tagName: string): boolean {
   return ["div", "span", "p", "strong", "h1", "h2", "h3", "h4", "h5", "h6"].includes(tagName);
 }
 
+const COLOR_GRADING_SOURCE_HIDDEN_ATTR = "data-hf-color-grading-source-hidden";
+
+export function isElementVisibleThroughAncestors(el: HTMLElement): boolean {
+  const win = el.ownerDocument.defaultView;
+  if (!win) return true;
+  let current: HTMLElement | null = el;
+  while (current) {
+    const computed = win.getComputedStyle(current);
+    if (computed.display === "none" || computed.visibility === "hidden") return false;
+    const opacity = Number.parseFloat(computed.opacity);
+    if (
+      Number.isFinite(opacity) &&
+      opacity <= 0.01 &&
+      !current.hasAttribute(COLOR_GRADING_SOURCE_HIDDEN_ATTR)
+    )
+      return false;
+    current = current.parentElement;
+  }
+  return true;
+}
+
 // ─── Style accessors ──────────────────────────────────────────────────────────
 
 export function getCuratedComputedStyles(el: HTMLElement): Record<string, string> {

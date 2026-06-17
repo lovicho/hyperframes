@@ -1,4 +1,5 @@
 import { type DomEditSelection, findElementForSelection } from "./domEditing";
+import { isElementVisibleThroughAncestors } from "./domEditingDom";
 
 export interface OverlayRect {
   left: number;
@@ -21,17 +22,7 @@ export type ResolvedElementRef = {
 };
 
 export function isElementVisibleForOverlay(el: HTMLElement): boolean {
-  const win = el.ownerDocument.defaultView;
-  if (!win) return true;
-  let current: HTMLElement | null = el;
-  while (current) {
-    const computed = win.getComputedStyle(current);
-    if (computed.display === "none" || computed.visibility === "hidden") return false;
-    const opacity = Number.parseFloat(computed.opacity);
-    if (Number.isFinite(opacity) && opacity <= 0.01) return false;
-    current = current.parentElement;
-  }
-  return true;
+  return isElementVisibleThroughAncestors(el);
 }
 
 function readPositiveDimension(value: string | null): number | null {

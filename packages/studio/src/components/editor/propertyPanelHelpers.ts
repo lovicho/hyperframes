@@ -15,6 +15,7 @@ export interface PropertyPanelProps {
   onClearSelection: () => void;
   onSetStyle: (prop: string, value: string) => void | Promise<void>;
   onSetAttribute: (attr: string, value: string) => void | Promise<void>;
+  onSetAttributeLive: (attr: string, value: string | null) => void | Promise<void>;
   onSetHtmlAttribute: (attr: string, value: string | null) => void | Promise<void>;
   onSetManualOffset: (element: DomEditSelection, next: { x: number; y: number }) => void;
   onSetManualSize: (element: DomEditSelection, next: { width: number; height: number }) => void;
@@ -24,7 +25,7 @@ export interface PropertyPanelProps {
   onAddTextField: (afterFieldKey?: string) => string | Promise<string | null> | null;
   onRemoveTextField: (fieldKey: string) => void;
   onAskAgent: () => void;
-  onImportAssets?: (files: FileList) => Promise<string[]>;
+  onImportAssets?: (files: FileList, dir?: string) => Promise<string[]>;
   fontAssets?: ImportedFontAsset[];
   onImportFonts?: (files: FileList | File[]) => Promise<ImportedFontAsset[]>;
   previewIframeRef?: React.RefObject<HTMLIFrameElement | null>;

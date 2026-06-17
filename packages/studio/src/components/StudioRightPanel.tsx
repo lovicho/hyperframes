@@ -1,3 +1,4 @@
+import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Tooltip } from "./ui";
 import { PropertyPanel } from "./editor/PropertyPanel";
 import { LayersPanel } from "./editor/LayersPanel";
@@ -13,6 +14,9 @@ import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
 import { useFileManagerContext } from "../contexts/FileManagerContext";
 import { useDomEditContext } from "../contexts/DomEditContext";
 import { usePlayerStore } from "../player";
+
+const MIN_INSPECTOR_SPLIT_PERCENT = 20;
+const MAX_INSPECTOR_SPLIT_PERCENT = 75;
 
 export interface StudioRightPanelProps {
   designPanelActive: boolean;
@@ -41,6 +45,8 @@ export function StudioRightPanel({
     rightWidth,
     rightPanelTab,
     setRightPanelTab,
+    rightInspectorPanes,
+    toggleRightInspectorPane,
     handlePanelResizeStart,
     handlePanelResizeMove,
     handlePanelResizeEnd,
@@ -63,6 +69,7 @@ export function StudioRightPanel({
     clearDomSelection,
     handleDomStyleCommit,
     handleDomAttributeCommit,
+    handleDomAttributeLiveCommit,
     handleDomHtmlAttributeCommit,
     handleDomPathOffsetCommit,
     handleDomBoxSizeCommit,
@@ -96,7 +103,130 @@ export function StudioRightPanel({
   const { assets, fontAssets, projectDir, handleImportFiles, handleImportFonts } =
     useFileManagerContext();
 
+  const [layersPanePercent, setLayersPanePercent] = useState(40);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const splitDragRef = useRef<{
+    startY: number;
+    startPercent: number;
+    height: number;
+  } | null>(null);
+
   const renderJobs = renderQueue.jobs as RenderJob[];
+  const inspectorTabActive = rightPanelTab === "design" || rightPanelTab === "layers";
+  const designPaneOpen = inspectorTabActive && rightInspectorPanes.design && designPanelActive;
+  const layersPaneOpen =
+    inspectorTabActive && rightInspectorPanes.layers && STUDIO_INSPECTOR_PANELS_ENABLED;
+
+  const handleInspectorPaneButtonClick = (pane: "design" | "layers") => {
+    if (!inspectorTabActive) {
+      setRightPanelTab(pane);
+      return;
+    }
+    toggleRightInspectorPane(pane);
+  };
+
+  const handleInspectorSplitResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      const height = splitContainerRef.current?.getBoundingClientRect().height ?? 0;
+      splitDragRef.current = {
+        startY: event.clientY,
+        startPercent: layersPanePercent,
+        height,
+      };
+    },
+    [layersPanePercent],
+  );
+
+  const handleInspectorSplitResizeMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = splitDragRef.current;
+    if (!drag || drag.height <= 0) return;
+    const deltaPercent = ((event.clientY - drag.startY) / drag.height) * 100;
+    const next = Math.min(
+      MAX_INSPECTOR_SPLIT_PERCENT,
+      Math.max(MIN_INSPECTOR_SPLIT_PERCENT, drag.startPercent + deltaPercent),
+    );
+    setLayersPanePercent(next);
+  }, []);
+
+  const handleInspectorSplitResizeEnd = useCallback(() => {
+    splitDragRef.current = null;
+  }, []);
+
+  const propertyPanel = (
+    <PropertyPanel
+      projectId={projectId}
+      projectDir={projectDir}
+      assets={assets}
+      element={domEditGroupSelections.length > 1 ? null : domEditSelection}
+      multiSelectCount={domEditGroupSelections.length}
+      copiedAgentPrompt={copiedAgentPrompt}
+      onClearSelection={clearDomSelection}
+      onSetStyle={handleDomStyleCommit}
+      onSetAttribute={handleDomAttributeCommit}
+      onSetAttributeLive={handleDomAttributeLiveCommit}
+      onSetHtmlAttribute={handleDomHtmlAttributeCommit}
+      onSetManualOffset={handleDomPathOffsetCommit}
+      onSetManualSize={handleDomBoxSizeCommit}
+      onSetManualRotation={handleDomRotationCommit}
+      onSetText={handleDomTextCommit}
+      onSetTextFieldStyle={handleDomTextFieldStyleCommit}
+      onAddTextField={handleDomAddTextField}
+      onRemoveTextField={handleDomRemoveTextField}
+      onAskAgent={handleAskAgent}
+      onImportAssets={handleImportFiles}
+      fontAssets={fontAssets}
+      onImportFonts={handleImportFonts}
+      previewIframeRef={previewIframeRef}
+      gsapAnimations={selectedGsapAnimations}
+      gsapMultipleTimelines={gsapMultipleTimelines}
+      gsapUnsupportedTimelinePattern={gsapUnsupportedTimelinePattern}
+      onUpdateGsapProperty={handleGsapUpdateProperty}
+      onUpdateGsapMeta={handleGsapUpdateMeta}
+      onDeleteGsapAnimation={handleGsapDeleteAnimation}
+      onAddGsapProperty={handleGsapAddProperty}
+      onRemoveGsapProperty={handleGsapRemoveProperty}
+      onUpdateGsapFromProperty={handleGsapUpdateFromProperty}
+      onAddGsapFromProperty={handleGsapAddFromProperty}
+      onRemoveGsapFromProperty={handleGsapRemoveFromProperty}
+      onAddGsapAnimation={handleGsapAddAnimation}
+      onCommitAnimatedProperty={commitAnimatedProperty}
+      onAddKeyframe={handleGsapAddKeyframe}
+      onRemoveKeyframe={handleGsapRemoveKeyframe}
+      onConvertToKeyframes={handleGsapConvertToKeyframes}
+      onSeekToTime={(t) => usePlayerStore.getState().requestSeek(t)}
+      onSetArcPath={handleSetArcPath}
+      onUpdateArcSegment={handleUpdateArcSegment}
+      onUnroll={handleUnroll}
+      recordingState={recordingState}
+      recordingDuration={recordingDuration}
+      onToggleRecording={onToggleRecording}
+    />
+  );
+
+  const renderQueuePanel = (
+    <RenderQueue
+      jobs={renderJobs}
+      projectId={projectId}
+      onDelete={renderQueue.deleteRender}
+      onClearCompleted={renderQueue.clearCompleted}
+      onStartRender={async (format, quality, resolution, fps) => {
+        await waitForPendingDomEditSaves();
+        const composition =
+          activeCompPath && activeCompPath !== "index.html" ? activeCompPath : undefined;
+        await renderQueue.startRender({
+          fps,
+          quality,
+          format,
+          resolution,
+          composition,
+        });
+      }}
+      compositionDimensions={compositionDimensions}
+      isRendering={renderQueue.isRendering}
+    />
+  );
 
   return (
     <>
@@ -123,9 +253,9 @@ export function StudioRightPanel({
                   <Tooltip label="Element styles and properties" side="bottom">
                     <button
                       type="button"
-                      onClick={() => setRightPanelTab("design")}
+                      onClick={() => handleInspectorPaneButtonClick("design")}
                       className={`h-8 rounded-xl px-3 text-[11px] font-medium transition-colors ${
-                        rightPanelTab === "design"
+                        designPaneOpen
                           ? "bg-neutral-800 text-white"
                           : "text-neutral-500 hover:bg-neutral-800/70 hover:text-neutral-200"
                       }`}
@@ -136,9 +266,9 @@ export function StudioRightPanel({
                   <Tooltip label="Composition layer stack" side="bottom">
                     <button
                       type="button"
-                      onClick={() => setRightPanelTab("layers")}
+                      onClick={() => handleInspectorPaneButtonClick("layers")}
                       className={`h-8 rounded-xl px-3 text-[11px] font-medium transition-colors ${
-                        rightPanelTab === "layers"
+                        layersPaneOpen
                           ? "bg-neutral-800 text-white"
                           : "text-neutral-500 hover:bg-neutral-800/70 hover:text-neutral-200"
                       }`}
@@ -171,79 +301,35 @@ export function StudioRightPanel({
                   compositionPath={activeBlockParams.compositionPath}
                   onClose={onCloseBlockParams ?? (() => {})}
                 />
-              ) : rightPanelTab === "layers" ? (
+              ) : layersPaneOpen && designPaneOpen ? (
+                <div ref={splitContainerRef} className="flex h-full min-h-0 flex-col">
+                  <div
+                    className="min-h-[120px] overflow-hidden"
+                    style={{ flexBasis: `${layersPanePercent}%`, flexShrink: 0 }}
+                  >
+                    <LayersPanel />
+                  </div>
+                  <div
+                    role="separator"
+                    aria-label="Resize Layers and Design panes"
+                    aria-orientation="horizontal"
+                    className="group flex h-2 flex-shrink-0 cursor-row-resize items-center justify-center border-y border-neutral-800 bg-neutral-900"
+                    style={{ touchAction: "none" }}
+                    onPointerDown={handleInspectorSplitResizeStart}
+                    onPointerMove={handleInspectorSplitResizeMove}
+                    onPointerUp={handleInspectorSplitResizeEnd}
+                    onPointerCancel={handleInspectorSplitResizeEnd}
+                  >
+                    <div className="h-px w-10 rounded-full bg-white/12 transition-colors group-hover:bg-white/24 group-active:bg-studio-accent/70" />
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-hidden">{propertyPanel}</div>
+                </div>
+              ) : layersPaneOpen ? (
                 <LayersPanel />
-              ) : designPanelActive ? (
-                <PropertyPanel
-                  projectId={projectId}
-                  projectDir={projectDir}
-                  assets={assets}
-                  element={domEditGroupSelections.length > 1 ? null : domEditSelection}
-                  multiSelectCount={domEditGroupSelections.length}
-                  copiedAgentPrompt={copiedAgentPrompt}
-                  onClearSelection={clearDomSelection}
-                  onSetStyle={handleDomStyleCommit}
-                  onSetAttribute={handleDomAttributeCommit}
-                  onSetHtmlAttribute={handleDomHtmlAttributeCommit}
-                  onSetManualOffset={handleDomPathOffsetCommit}
-                  onSetManualSize={handleDomBoxSizeCommit}
-                  onSetManualRotation={handleDomRotationCommit}
-                  onSetText={handleDomTextCommit}
-                  onSetTextFieldStyle={handleDomTextFieldStyleCommit}
-                  onAddTextField={handleDomAddTextField}
-                  onRemoveTextField={handleDomRemoveTextField}
-                  onAskAgent={handleAskAgent}
-                  onImportAssets={handleImportFiles}
-                  fontAssets={fontAssets}
-                  onImportFonts={handleImportFonts}
-                  previewIframeRef={previewIframeRef}
-                  gsapAnimations={selectedGsapAnimations}
-                  gsapMultipleTimelines={gsapMultipleTimelines}
-                  gsapUnsupportedTimelinePattern={gsapUnsupportedTimelinePattern}
-                  onUpdateGsapProperty={handleGsapUpdateProperty}
-                  onUpdateGsapMeta={handleGsapUpdateMeta}
-                  onDeleteGsapAnimation={handleGsapDeleteAnimation}
-                  onAddGsapProperty={handleGsapAddProperty}
-                  onRemoveGsapProperty={handleGsapRemoveProperty}
-                  onUpdateGsapFromProperty={handleGsapUpdateFromProperty}
-                  onAddGsapFromProperty={handleGsapAddFromProperty}
-                  onRemoveGsapFromProperty={handleGsapRemoveFromProperty}
-                  onAddGsapAnimation={handleGsapAddAnimation}
-                  onCommitAnimatedProperty={commitAnimatedProperty}
-                  onAddKeyframe={handleGsapAddKeyframe}
-                  onRemoveKeyframe={handleGsapRemoveKeyframe}
-                  onConvertToKeyframes={handleGsapConvertToKeyframes}
-                  onSeekToTime={(t) => usePlayerStore.getState().requestSeek(t)}
-                  onSetArcPath={handleSetArcPath}
-                  onUpdateArcSegment={handleUpdateArcSegment}
-                  onUnroll={handleUnroll}
-                  recordingState={recordingState}
-                  recordingDuration={recordingDuration}
-                  onToggleRecording={onToggleRecording}
-                />
+              ) : designPaneOpen ? (
+                propertyPanel
               ) : (
-                <RenderQueue
-                  jobs={renderJobs}
-                  projectId={projectId}
-                  onDelete={renderQueue.deleteRender}
-                  onClearCompleted={renderQueue.clearCompleted}
-                  onStartRender={async (format, quality, resolution, fps) => {
-                    await waitForPendingDomEditSaves();
-                    const composition =
-                      activeCompPath && activeCompPath !== "index.html"
-                        ? activeCompPath
-                        : undefined;
-                    await renderQueue.startRender({
-                      fps,
-                      quality,
-                      format,
-                      resolution,
-                      composition,
-                    });
-                  }}
-                  compositionDimensions={compositionDimensions}
-                  isRendering={renderQueue.isRendering}
-                />
+                renderQueuePanel
               )}
             </div>
           </>

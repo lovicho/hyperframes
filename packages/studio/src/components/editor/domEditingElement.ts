@@ -15,6 +15,7 @@ import {
   getSelectorIndex,
   getSourceFileForElement,
   isHtmlElement,
+  isElementVisibleThroughAncestors,
   normalizeTimelineCompositionSource,
   querySelectorAllSafely,
 } from "./domEditingDom";
@@ -22,17 +23,7 @@ import {
 // ─── Visibility ──────────────────────────────────────────────────────────────
 
 export function isElementComputedVisible(el: HTMLElement): boolean {
-  const win = el.ownerDocument.defaultView;
-  if (!win) return true;
-  let current: HTMLElement | null = el;
-  while (current) {
-    const computed = win.getComputedStyle(current);
-    if (computed.display === "none" || computed.visibility === "hidden") return false;
-    const opacity = Number.parseFloat(computed.opacity);
-    if (Number.isFinite(opacity) && opacity <= 0.01) return false;
-    current = current.parentElement;
-  }
-  return true;
+  return isElementVisibleThroughAncestors(el);
 }
 
 const VISUAL_LEAF_TAGS = new Set(["img", "video", "canvas", "svg", "audio"]);

@@ -1,4 +1,5 @@
 import type { RuntimeTimelineMessage, RuntimeTimelineLike } from "./types";
+import type { RuntimeColorGradingApi } from "./colorGrading";
 import type { HyperframePickerApi } from "../inline-scripts/pickerApi";
 import type { PlayerAPI } from "../core.types";
 import type { ClipTree } from "./clipTree";
@@ -31,6 +32,10 @@ declare global {
     __player?: PlayerAPI;
     __clipManifest?: RuntimeTimelineMessage;
     __clipTree?: ClipTree;
+    __hf?: {
+      colorGrading?: RuntimeColorGradingApi;
+      onSwallowed?: (label: string, err: unknown) => void;
+    };
     __playerReady?: boolean;
     __renderReady?: boolean;
     __hfRuntimeTeardown?: (() => void) | null;

@@ -27,6 +27,7 @@ export const MIME_TYPES: Record<string, string> = {
   ".otf": "font/otf",
   ".txt": "text/plain",
   ".md": "text/markdown",
+  ".cube": "text/plain; charset=utf-8",
 };
 
 export function getMimeType(path: string): string {

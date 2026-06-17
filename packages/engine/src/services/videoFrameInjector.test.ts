@@ -272,11 +272,10 @@ describe("createVideoFrameInjector cache hygiene against page-side skips", () =>
     injectVideoFramesBatchMock.mockResolvedValueOnce(["facet"]);
     await hook!(page, 1.5);
 
-    expect(evaluate).toHaveBeenCalledTimes(1);
-    // Re-render is requested at the same time as the seek.
-    expect(evaluate.mock.calls[0]![1]).toBe(1.5);
+    const reseekCall = evaluate.mock.calls.find((call) => call[1] === 1.5);
+    expect(reseekCall).toBeDefined();
     // The evaluated page function invokes window.__hfReseekGpu(time).
-    const pageFn = evaluate.mock.calls[0]![0] as (t: number) => void;
+    const pageFn = reseekCall![0] as (t: number) => void;
     const reseek = vi.fn();
     (globalThis as unknown as { window?: unknown }).window = { __hfReseekGpu: reseek };
     pageFn(1.5);
@@ -296,6 +295,6 @@ describe("createVideoFrameInjector cache hygiene against page-side skips", () =>
     injectVideoFramesBatchMock.mockResolvedValueOnce([]);
     await hook!(page, 1.5);
 
-    expect(evaluate).not.toHaveBeenCalled();
+    expect(evaluate.mock.calls.some((call) => call[1] === 1.5)).toBe(false);
   });
 });

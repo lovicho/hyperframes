@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState, type DragEvent } from "react";
 import { STUDIO_INSPECTOR_PANELS_ENABLED } from "../components/editor/manualEditingAvailability";
 import type { StudioContextValue } from "../contexts/StudioContext";
+import type { RightInspectorPanes } from "../utils/studioHelpers";
 
 interface StudioContextInput {
   projectId: string;
@@ -70,14 +71,18 @@ export interface InspectorState {
 
 export function useInspectorState(
   rightPanelTab: string,
+  rightInspectorPanes: RightInspectorPanes,
   rightCollapsed: boolean,
   isPlaying: boolean,
   isGestureRecording?: boolean,
 ): InspectorState {
   // fallow-ignore-next-line complexity
   return useMemo(() => {
-    const layersPanelActive = STUDIO_INSPECTOR_PANELS_ENABLED && rightPanelTab === "layers";
-    const designPanelActive = STUDIO_INSPECTOR_PANELS_ENABLED && rightPanelTab === "design";
+    const inspectorTabActive = rightPanelTab === "design" || rightPanelTab === "layers";
+    const layersPanelActive =
+      STUDIO_INSPECTOR_PANELS_ENABLED && inspectorTabActive && rightInspectorPanes.layers;
+    const designPanelActive =
+      STUDIO_INSPECTOR_PANELS_ENABLED && inspectorTabActive && rightInspectorPanes.design;
     const inspectorPanelActive = layersPanelActive || designPanelActive;
     return {
       layersPanelActive,
@@ -88,7 +93,7 @@ export function useInspectorState(
       shouldShowSelectedDomBounds:
         inspectorPanelActive && !rightCollapsed && !isPlaying && !isGestureRecording,
     };
-  }, [rightPanelTab, rightCollapsed, isPlaying, isGestureRecording]);
+  }, [rightPanelTab, rightInspectorPanes, rightCollapsed, isPlaying, isGestureRecording]);
 }
 
 // fallow-ignore-next-line complexity

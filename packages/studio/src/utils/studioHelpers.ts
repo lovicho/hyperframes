@@ -14,6 +14,12 @@ export interface AppToast {
 }
 
 export type RightPanelTab = "layers" | "design" | "renders" | "block-params";
+export type RightInspectorPane = "layers" | "design";
+
+export interface RightInspectorPanes {
+  layers: boolean;
+  design: boolean;
+}
 
 export interface AgentModalAnchorPoint {
   x: number;

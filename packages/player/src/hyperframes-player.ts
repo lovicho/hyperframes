@@ -28,6 +28,22 @@ import { type DirectTimelineAdapter } from "./timeline-adapters.js";
 const MIN_PLAYBACK_RATE = 0.1;
 const MAX_PLAYBACK_RATE = 5;
 
+export type ColorGradingTarget =
+  | string
+  | {
+      id?: string | null;
+      hfId?: string | null;
+      selector?: string | null;
+      selectorIndex?: number | null;
+    };
+
+export type ColorGradingCompareState = {
+  enabled: boolean;
+  position?: number;
+  softness?: number;
+  lineWidth?: number;
+};
+
 function clampPlaybackRate(rate: number): number {
   if (!Number.isFinite(rate) || rate <= 0) return 1;
   return Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, rate));
@@ -301,6 +317,25 @@ class HyperframesPlayer extends HTMLElement {
     this._paused = true;
     this.controlsApi?.updatePlaying(false);
     this.controlsApi?.updateTime(this._currentTime, this._duration);
+  }
+
+  setColorGrading(target: ColorGradingTarget, grading: unknown) {
+    this._sendControl("set-color-grading", { target, grading });
+  }
+
+  clearColorGrading(target: ColorGradingTarget) {
+    this._sendControl("set-color-grading", { target, grading: null });
+  }
+
+  setColorGradingCompare(target: ColorGradingTarget, compare: ColorGradingCompareState) {
+    this._sendControl("set-color-grading-compare", { target, compare });
+  }
+
+  clearColorGradingCompare(target: ColorGradingTarget) {
+    this._sendControl("set-color-grading-compare", {
+      target,
+      compare: { enabled: false },
+    });
   }
 
   get currentTime() {
