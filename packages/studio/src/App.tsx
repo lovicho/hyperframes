@@ -155,6 +155,7 @@ export function StudioApp() {
     domEditSaveTimestampRef,
     setRefreshKey,
   });
+  const sdkSession = useSdkSession(projectId, activeCompPath, domEditSaveTimestampRef);
   useEffect(() => {
     if (activeCompPathHydrated) return;
     if (!fileManager.fileTreeLoaded) return;
@@ -177,7 +178,6 @@ export function StudioApp() {
     reloadPreview: () => setRefreshKey((k) => k + 1),
     pendingTimelineEditPathRef,
   });
-  const sdkSession = useSdkSession(projectId, activeCompPath ?? "index.html");
   const timelineEditing = useTimelineEditing({
     projectId,
     activeCompPath,
