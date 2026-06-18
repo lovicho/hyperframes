@@ -1,19 +1,21 @@
 import type { ReactNode } from "react";
 import { useStoryboard } from "../../hooks/useStoryboard";
-import { StoryboardDirection } from "./StoryboardDirection";
+import { StoryboardLoaded } from "./StoryboardLoaded";
 
 export interface StoryboardViewProps {
   projectId: string;
+  /** Select a composition in the timeline (used by the frame focus "Open in Preview"). */
+  onSelectComposition: (path: string) => void;
 }
 
 /**
  * Top-level storyboard stage. Replaces the timeline/preview when the view mode
- * is `storyboard`. PR2 lands the shell (global direction + states); the frame
- * contact-sheet grid arrives in PR3.
+ * is `storyboard`. Handles the load states here; once a storyboard exists,
+ * {@link StoryboardLoaded} owns the Board ↔ Source experience.
  */
 // fallow-ignore-next-line complexity
-export function StoryboardView({ projectId }: StoryboardViewProps) {
-  const { data, loading, error } = useStoryboard(projectId);
+export function StoryboardView({ projectId, onSelectComposition }: StoryboardViewProps) {
+  const { data, loading, error, reload } = useStoryboard(projectId);
 
   if (loading) return <StoryboardFrame>{<Message>Loading storyboard…</Message>}</StoryboardFrame>;
   if (error) {
@@ -33,14 +35,12 @@ export function StoryboardView({ projectId }: StoryboardViewProps) {
   }
 
   return (
-    <StoryboardFrame>
-      <StoryboardDirection globals={data.globals} frameCount={data.frames.length} />
-      {/* PR3: frame contact-sheet grid renders here. */}
-      <div className="mt-8 rounded-lg border border-dashed border-neutral-800 px-6 py-12 text-center text-sm text-neutral-500">
-        {data.frames.length} frame{data.frames.length === 1 ? "" : "s"} parsed — the contact sheet
-        renders here next.
-      </div>
-    </StoryboardFrame>
+    <StoryboardLoaded
+      projectId={projectId}
+      data={data}
+      reload={reload}
+      onSelectComposition={onSelectComposition}
+    />
   );
 }
 

@@ -110,6 +110,7 @@ describe("initSandboxRuntimeModular", () => {
     delete window.__playerReady;
     delete window.__renderReady;
     delete window.__hfTimelinesBuilding;
+    delete (window as { THREE?: unknown }).THREE;
     vi.restoreAllMocks();
     window.requestAnimationFrame = originalRequestAnimationFrame;
     window.cancelAnimationFrame = originalCancelAnimationFrame;
@@ -962,6 +963,56 @@ describe("initSandboxRuntimeModular", () => {
     timelineDuration = 10;
     window.__hfTimelinesBuilding = false;
     window.dispatchEvent(new CustomEvent("hf-timelines-built"));
+
+    expect(window.__renderReady).toBe(true);
+    expect(window.__player?.getDuration()).toBe(10);
+  });
+
+  it("waits for THREE.DefaultLoadingManager to drain before publishing render readiness", async () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-start", "0");
+    root.setAttribute("data-width", "1920");
+    root.setAttribute("data-height", "1080");
+    document.body.appendChild(root);
+
+    window.__timelines = {
+      main: createMockTimeline(10),
+    };
+
+    // Simulate THREE with an in-flight asset load — same shape the three adapter
+    // reads, no actual three.js dependency in tests. `itemsTotal > itemsLoaded`
+    // means "loads pending"; resolving the wait fires `onLoad` after wrapping.
+    const mgr: {
+      itemsLoaded: number;
+      itemsTotal: number;
+      onStart?: ((url: string, loaded: number, total: number) => void) | null;
+      onLoad?: (() => void) | null;
+    } = {
+      itemsLoaded: 0,
+      itemsTotal: 1,
+      onStart: null,
+      onLoad: null,
+    };
+    (window as unknown as { THREE: { DefaultLoadingManager: typeof mgr } }).THREE = {
+      DefaultLoadingManager: mgr,
+    };
+
+    initSandboxRuntimeModular();
+
+    // Player ready, render NOT ready because an asset is pending.
+    expect(window.__playerReady).toBe(true);
+    expect(window.__renderReady).toBe(false);
+    expect(window.__player?.getDuration()).toBe(10);
+
+    // Simulate the asset finishing: drain the queue and fire the (now-wrapped)
+    // onLoad. The adapter's wrapper resolves the readiness promise, which
+    // triggers a re-publish.
+    mgr.itemsLoaded = 1;
+    mgr.onLoad?.();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(window.__renderReady).toBe(true);
     expect(window.__player?.getDuration()).toBe(10);

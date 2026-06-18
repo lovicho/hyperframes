@@ -42,15 +42,11 @@ export function useDomGeometryCommits({
 }: UseDomGeometryCommitsParams) {
   const handleDomPathOffsetCommit = useCallback(
     (selection: DomEditSelection, next: { x: number; y: number }) => {
-      const gsapBlocked = isElementGsapTargeted(previewIframeRef.current, selection.element);
-      console.log(
-        "[drag:7] handleDomPathOffsetCommit (CSS path)",
-        JSON.stringify({
-          sel: selection.id,
-          gsapBlocked,
-        }),
-      );
-      if (gsapBlocked) {
+      // ponytail: GSAP-targeted elements are blocked (no SDK position-in-script op); CSS-path
+      // elements fall through to commitPositionPatchToHtml → persistDomEditOperations →
+      // onTrySdkPersist and are already SDK-cut-over as setStyle/setAttribute (§3.3 done).
+      // Upgrade path for GSAP: add a moveElementGsap SDK op in a separate SDK PR.
+      if (isElementGsapTargeted(previewIframeRef.current, selection.element)) {
         const error = new Error(GSAP_CSS_FALLBACK_BLOCKED_MESSAGE);
         showToast(error.message, "error");
         return Promise.reject(error);

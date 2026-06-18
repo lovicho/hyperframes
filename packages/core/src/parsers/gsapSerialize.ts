@@ -120,15 +120,20 @@ export function buildArcPath(
   autoRotate: boolean | number,
   isCubic: boolean,
 ): MotionPathShape | undefined {
-  if (coords.length < 2) return undefined;
+  const first = coords[0];
+  if (coords.length < 2 || !first) return undefined;
   const segments: ArcPathSegment[] = [];
   let waypoints: Array<{ x: number; y: number }>;
   if (isCubic && coords.length >= 4) {
     // coords are [anchor, cp1, cp2, anchor, cp1, cp2, anchor, ...].
-    waypoints = [coords[0]!];
+    waypoints = [first];
     for (let i = 1; i + 2 < coords.length; i += 3) {
-      waypoints.push(coords[i + 2]!);
-      segments.push({ curviness, cp1: coords[i]!, cp2: coords[i + 1]! });
+      const cp1 = coords[i];
+      const cp2 = coords[i + 1];
+      const anchor = coords[i + 2];
+      if (!cp1 || !cp2 || !anchor) continue;
+      waypoints.push(anchor);
+      segments.push({ curviness, cp1, cp2 });
     }
   } else {
     waypoints = coords;
@@ -412,4 +417,158 @@ export function gsapAnimationsToKeyframes(
       })
       .filter((kf): kf is NonNullable<typeof kf> => kf !== null)
   );
+}
+
+// ── Keyframe-conversion transforms (pure; shared by recast + acorn writers) ────
+
+/**
+ * CSS identity values for properties whose "rest" state isn't 0 — used to
+ * synthesize the missing endpoint when converting a flat tween to keyframes.
+ */
+const CSS_IDENTITY: Record<string, number> = {
+  opacity: 1,
+  autoAlpha: 1,
+  scale: 1,
+  scaleX: 1,
+  scaleY: 1,
+};
+
+function cssIdentityValue(prop: string): number {
+  return CSS_IDENTITY[prop] ?? 0;
+}
+
+/** Build the identity-endpoint map for a flat tween's properties. */
+function buildIdentityMap(props: Record<string, number | string>): Record<string, number | string> {
+  const identity: Record<string, number | string> = {};
+  for (const [key, val] of Object.entries(props)) {
+    if (val != null) identity[key] = typeof val === "number" ? cssIdentityValue(key) : val;
+  }
+  return identity;
+}
+
+/**
+ * Resolve the 0% (from) and 100% (to) property maps for a tween being
+ * converted to percentage keyframes.
+ *
+ * @param resolvedFromValues — Despite the "from" in the name (historical), these
+ *   are runtime-captured DOM values that override the conversion endpoint:
+ *   - For to():    overrides fromProps (the 0% state / where the element is now).
+ *   - For from():  overrides toProps  (the 100% state / where the element rests).
+ *   - For fromTo(): merges into toProps (the 100% endpoint the user is editing).
+ */
+export function resolveConversionProps(
+  anim: GsapAnimation,
+  resolvedFromValues?: Record<string, number | string>,
+): { fromProps: Record<string, number | string>; toProps: Record<string, number | string> } {
+  if (anim.method === "to") {
+    const identity = buildIdentityMap(anim.properties);
+    const fromProps = resolvedFromValues ? { ...identity, ...resolvedFromValues } : identity;
+    return { fromProps, toProps: { ...anim.properties } };
+  }
+  if (anim.method === "from") {
+    const identity = buildIdentityMap(anim.properties);
+    const toProps = resolvedFromValues ? { ...identity, ...resolvedFromValues } : identity;
+    return { fromProps: { ...anim.properties }, toProps };
+  }
+  // fromTo(fromVars, toVars): anim.fromProperties = fromVars (0% state),
+  // anim.properties = toVars (100% state). resolvedFromValues contains the
+  // current DOM position from a drag — it represents the NEW destination, so
+  // it merges into toProps (the 100% endpoint the user is editing), NOT into
+  // fromProps. This is intentional and not inverted.
+  const toProps = resolvedFromValues
+    ? { ...anim.properties, ...resolvedFromValues }
+    : { ...anim.properties };
+  return { fromProps: { ...(anim.fromProperties ?? {}) }, toProps };
+}
+
+// ── Arc path serialization helpers (shared by recast + acorn writers) ─────────
+
+function numericXY(props: Record<string, number | string>): { x: number; y: number } | null {
+  const vx = props.x;
+  const vy = props.y;
+  return typeof vx === "number" && typeof vy === "number" ? { x: vx, y: vy } : null;
+}
+
+export function extractArcWaypoints(anim: GsapAnimation): Array<{ x: number; y: number }> {
+  const keyframeWps = (anim.keyframes?.keyframes ?? [])
+    .map((kf) => numericXY(kf.properties))
+    .filter((pt): pt is { x: number; y: number } => pt !== null);
+  if (keyframeWps.length >= 2) return keyframeWps;
+  const propX = anim.properties.x;
+  const propY = anim.properties.y;
+  if (typeof propX !== "number" && typeof propY !== "number") return keyframeWps;
+  const destX = typeof propX === "number" ? propX : 0;
+  const destY = typeof propY === "number" ? propY : 0;
+  return [
+    { x: 0, y: 0 },
+    { x: destX, y: destY },
+  ];
+}
+
+function autoRotateSuffix(autoRotate: boolean | number): string {
+  if (autoRotate === true) return ", autoRotate: true";
+  if (typeof autoRotate === "number") return `, autoRotate: ${autoRotate}`;
+  return "";
+}
+
+function cubicControlPoints(
+  seg: ArcPathSegment,
+  wp: { x: number; y: number },
+  nextWp: { x: number; y: number },
+): string[] {
+  if (seg.cp1 && seg.cp2) {
+    return [`{x: ${seg.cp1.x}, y: ${seg.cp1.y}}`, `{x: ${seg.cp2.x}, y: ${seg.cp2.y}}`];
+  }
+  const dx = nextWp.x - wp.x;
+  const dy = nextWp.y - wp.y;
+  const c = seg.curviness ?? 1;
+  return [
+    `{x: ${wp.x + dx * 0.33}, y: ${wp.y + dy * 0.33 - c * Math.abs(dx) * 0.25}}`,
+    `{x: ${wp.x + dx * 0.66}, y: ${wp.y + dy * 0.66 - c * Math.abs(dx) * 0.25}}`,
+  ];
+}
+
+function buildCubicPathEntries(
+  waypoints: Array<{ x: number; y: number }>,
+  segments: ArcPathSegment[],
+): string[] {
+  const first = waypoints[0];
+  if (!first) return [];
+  const entries = [`{x: ${first.x}, y: ${first.y}}`];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const wp = waypoints[i];
+    const nextWp = waypoints[i + 1];
+    if (!seg || !wp || !nextWp) continue;
+    entries.push(...cubicControlPoints(seg, wp, nextWp));
+    entries.push(`{x: ${nextWp.x}, y: ${nextWp.y}}`);
+  }
+  return entries;
+}
+
+export function buildMotionPathObjectCode(config: {
+  waypoints: Array<{ x: number; y: number }>;
+  segments: ArcPathSegment[];
+  autoRotate: boolean | number;
+}): string {
+  const { waypoints, segments, autoRotate } = config;
+  const arSuffix = autoRotateSuffix(autoRotate);
+  // GSAP's simple `path` array supports only ONE scalar `curviness` for the whole
+  // path, so per-segment curviness can only be expressed in the cubic form (each
+  // segment's curviness baked into its control points). Emit cubic when segments
+  // carry explicit control points OR when their curviness values differ — the
+  // simple branch would otherwise serialize only segments[0].curviness and drop
+  // every other segment's curve.
+  const hasExplicitCp = segments.some((s) => s.cp1 && s.cp2);
+  const curvinessVaries = segments.some(
+    (s) => (s.curviness ?? 1) !== (segments[0]?.curviness ?? 1),
+  );
+  if ((hasExplicitCp || curvinessVaries) && waypoints.length >= 2) {
+    const pathStr = buildCubicPathEntries(waypoints, segments).join(", ");
+    return `{ path: [${pathStr}], type: "cubic"${arSuffix} }`;
+  }
+  const pathEntries = waypoints.map((wp) => `{x: ${wp.x}, y: ${wp.y}}`);
+  const curviness = segments[0]?.curviness ?? 1;
+  const curvPart = curviness !== 1 ? `, curviness: ${curviness}` : "";
+  return `{ path: [${pathEntries.join(", ")}]${curvPart}${arSuffix} }`;
 }

@@ -1,15 +1,15 @@
-import type { Composition } from "@hyperframes/sdk";
 import type { TimelineElement } from "../player";
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { EditHistoryKind } from "../utils/editHistory";
 import type { RightPanelTab } from "../utils/studioHelpers";
 import type { PatchTarget } from "../utils/sourcePatcher";
 import type { SidebarTab } from "../components/sidebar/LeftSidebar";
+import type { Composition } from "@hyperframes/sdk";
+import { sdkCutoverPersist, sdkDeletePersist } from "../utils/sdkCutover";
 import { useAskAgentModal } from "./useAskAgentModal";
 import { useDomSelection } from "./useDomSelection";
 import { usePreviewInteraction } from "./usePreviewInteraction";
 import { useDomEditCommits } from "./useDomEditCommits";
-import { runShadowDispatch, runShadowDelete } from "../utils/sdkShadow";
 import { useGsapScriptCommits } from "./useGsapScriptCommits";
 import { useGsapCacheVersion } from "./useGsapTweenCache";
 import { useDomEditWiring } from "./useDomEditWiring";
@@ -60,8 +60,8 @@ export interface UseDomEditSessionParams {
   openSourceForSelection?: (sourceFile: string, target: PatchTarget) => void;
   selectSidebarTab?: (tab: SidebarTab) => void;
   getSidebarTab?: () => SidebarTab;
-  /** Stage 7 Step 3b: SDK session for shadow dispatch parity tracking. */
   sdkSession?: Composition | null;
+  forceReloadSdkSession?: () => void;
 }
 
 // ── Hook ──
@@ -101,6 +101,7 @@ export function useDomEditSession({
   selectSidebarTab,
   getSidebarTab,
   sdkSession,
+  forceReloadSdkSession,
 }: UseDomEditSessionParams) {
   void _setRefreshKey;
   void _readProjectFile;
@@ -195,6 +196,8 @@ export function useDomEditSession({
     onFileContentChanged: updateEditingFileContent,
     showToast,
     sdkSession,
+    writeProjectFile,
+    forceReloadSdkSession,
   });
 
   // ── DOM commit handlers ──
@@ -234,10 +237,35 @@ export function useDomEditSession({
     clearDomSelection,
     refreshDomEditSelectionFromPreview,
     buildDomSelectionFromTarget,
-    onDomEditPersisted: sdkSession
-      ? (sel, ops) => runShadowDispatch(sdkSession, sel, ops)
+    forceReloadSdkSession,
+    onTrySdkPersist: sdkSession
+      ? (selection, operations, originalContent, targetPath, options) =>
+          sdkCutoverPersist(
+            selection,
+            operations,
+            originalContent,
+            targetPath,
+            sdkSession,
+            {
+              editHistory,
+              writeProjectFile,
+              reloadPreview,
+              domEditSaveTimestampRef,
+              compositionPath: activeCompPath,
+            },
+            options,
+          )
       : undefined,
-    onElementDeleted: sdkSession ? (sel) => runShadowDelete(sdkSession, sel.hfId) : undefined,
+    onTrySdkDelete: sdkSession
+      ? (hfId, originalContent, targetPath) =>
+          sdkDeletePersist(hfId, originalContent, targetPath, sdkSession, {
+            editHistory,
+            writeProjectFile,
+            reloadPreview,
+            domEditSaveTimestampRef,
+            compositionPath: activeCompPath,
+          })
+      : undefined,
   });
 
   // ── Wiring: selection sync, GSAP cache, preview sync, selection handlers ──

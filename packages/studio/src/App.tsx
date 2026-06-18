@@ -145,9 +145,7 @@ export function StudioApp() {
   const domEditSaveTimestampRef = useRef(0);
   const pendingTimelineEditPathRef = useRef(new Set<string>());
   const isGestureRecordingRef = useRef(false);
-  const reloadPreview = useCallback(() => {
-    setRefreshKey((k) => k + 1);
-  }, []);
+  const reloadPreview = useCallback(() => setRefreshKey((k) => k + 1), []);
   const fileManager = useFileManager({
     projectId,
     showToast,
@@ -155,6 +153,7 @@ export function StudioApp() {
     domEditSaveTimestampRef,
     setRefreshKey,
   });
+  const sdkHandle = useSdkSession(projectId, activeCompPath, domEditSaveTimestampRef);
   useEffect(() => {
     if (activeCompPathHydrated) return;
     if (!fileManager.fileTreeLoaded) return;
@@ -177,7 +176,6 @@ export function StudioApp() {
     reloadPreview: () => setRefreshKey((k) => k + 1),
     pendingTimelineEditPathRef,
   });
-  const sdkSession = useSdkSession(projectId, activeCompPath ?? "index.html");
   const timelineEditing = useTimelineEditing({
     projectId,
     activeCompPath,
@@ -191,7 +189,8 @@ export function StudioApp() {
     pendingTimelineEditPathRef,
     uploadProjectFiles: fileManager.uploadProjectFiles,
     isRecordingRef: isGestureRecordingRef,
-    sdkSession,
+    sdkSession: sdkHandle.session,
+    forceReloadSdkSession: sdkHandle.forceReload,
   });
   const {
     activeBlockParams,
@@ -259,18 +258,16 @@ export function StudioApp() {
     onResetKeyframes: () => resetKeyframesRef.current(),
     onDeleteSelectedKeyframes: () => deleteSelectedKeyframesRef.current(),
     onAfterUndoRedo: () => invalidateGsapCacheRef.current(),
+    activeCompPath,
+    forceReloadSdkSession: sdkHandle.forceReload,
     onToggleRecording: STUDIO_KEYFRAMES_ENABLED
       ? () => handleToggleRecordingRef.current()
       : undefined,
   });
-  const selectSidebarTabStable = useCallback(
-    (tab: SidebarTab) => leftSidebarRef.current?.selectTab(tab),
-    [],
-  );
-  const getSidebarTabStable = useCallback(
-    () => leftSidebarRef.current?.getTab() ?? "compositions",
-    [],
-  );
+  const sidebarTabRef = useRef({
+    select: (t: SidebarTab) => leftSidebarRef.current?.selectTab(t),
+    get: () => leftSidebarRef.current?.getTab() ?? "compositions",
+  });
   const domEditSession = useDomEditSession({
     projectId,
     activeCompPath,
@@ -303,9 +300,10 @@ export function StudioApp() {
     reloadPreview,
     setRefreshKey,
     openSourceForSelection: fileManager.openSourceForSelection,
-    selectSidebarTab: selectSidebarTabStable,
-    getSidebarTab: getSidebarTabStable,
-    sdkSession,
+    selectSidebarTab: sidebarTabRef.current.select,
+    getSidebarTab: sidebarTabRef.current.get,
+    sdkSession: sdkHandle.session,
+    forceReloadSdkSession: sdkHandle.forceReload,
   });
   domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
   clearDomSelectionRef.current = domEditSession.clearDomSelection;
@@ -322,7 +320,7 @@ export function StudioApp() {
     }
   };
   useSdkSelectionSync(
-    sdkSession,
+    sdkHandle.session,
     domEditSession.domEditSelection,
     domEditSession.domEditGroupSelections,
   );
@@ -360,7 +358,6 @@ export function StudioApp() {
     resetErrors: resetConsoleErrors,
   } = useConsoleErrorCapture(previewIframe);
   const dragOverlay = useDragOverlay(fileManager.handleImportFiles);
-
   // Gesture recording
   const handleToggleRecordingRef = useRef<() => void>(() => {});
   const domEditSessionRef = useRef(domEditSession);
@@ -498,7 +495,10 @@ export function StudioApp() {
                     />
                   )}
                   {viewModeValue.viewMode === "storyboard" && (
-                    <StoryboardView projectId={projectId} />
+                    <StoryboardView
+                      projectId={projectId}
+                      onSelectComposition={handleSelectComposition}
+                    />
                   )}
                   {/* Timeline stage stays mounted (just hidden) in storyboard mode,
                       so preview/player/gesture/render state survives the toggle. */}

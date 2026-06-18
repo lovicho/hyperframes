@@ -20,6 +20,7 @@ import {
   type ParsedGsap,
   serializeValue as valueToCode,
   safeJsKey as safeKey,
+  resolveConversionProps,
 } from "./gsapSerialize";
 
 export type {
@@ -2009,62 +2010,6 @@ export function updateKeyframeInScript(
   return recast.print(loc.parsed.ast).code;
 }
 
-/** Resolve from/to property maps for a tween being converted to keyframes. */
-const CSS_IDENTITY: Record<string, number> = {
-  opacity: 1,
-  autoAlpha: 1,
-  scale: 1,
-  scaleX: 1,
-  scaleY: 1,
-};
-
-function cssIdentityValue(prop: string): number {
-  return CSS_IDENTITY[prop] ?? 0;
-}
-
-/**
- * Resolve the 0% (from) and 100% (to) property maps for a tween being
- * converted to percentage keyframes.
- *
- * @param resolvedFromValues — Despite the "from" in the name (historical), these
- *   are runtime-captured DOM values that override the conversion endpoint:
- *   - For to():    overrides fromProps (the 0% state / where the element is now).
- *   - For from():  overrides toProps  (the 100% state / where the element rests).
- *   - For fromTo(): merges into toProps (the 100% endpoint the user is editing).
- */
-function resolveConversionProps(
-  anim: GsapAnimation,
-  resolvedFromValues?: Record<string, number | string>,
-): { fromProps: Record<string, number | string>; toProps: Record<string, number | string> } {
-  if (anim.method === "to") {
-    const identityFrom: Record<string, number | string> = {};
-    for (const [key, val] of Object.entries(anim.properties)) {
-      if (val != null) identityFrom[key] = typeof val === "number" ? cssIdentityValue(key) : val;
-    }
-    const fromProps = resolvedFromValues
-      ? { ...identityFrom, ...resolvedFromValues }
-      : identityFrom;
-    return { fromProps, toProps: { ...anim.properties } };
-  }
-  if (anim.method === "from") {
-    const identityTo: Record<string, number | string> = {};
-    for (const [key, val] of Object.entries(anim.properties)) {
-      if (val != null) identityTo[key] = typeof val === "number" ? cssIdentityValue(key) : val;
-    }
-    const toProps = resolvedFromValues ? { ...identityTo, ...resolvedFromValues } : identityTo;
-    return { fromProps: { ...anim.properties }, toProps };
-  }
-  // fromTo(fromVars, toVars): anim.fromProperties = fromVars (0% state),
-  // anim.properties = toVars (100% state). resolvedFromValues contains the
-  // current DOM position from a drag — it represents the NEW destination, so
-  // it merges into toProps (the 100% endpoint the user is editing), NOT into
-  // fromProps. This is intentional and not inverted.
-  const toProps = resolvedFromValues
-    ? { ...anim.properties, ...resolvedFromValues }
-    : { ...anim.properties };
-  return { fromProps: { ...(anim.fromProperties ?? {}) }, toProps };
-}
-
 /** Strip editable properties and ease/keyframes keys from a varsArg. */
 function stripEditableAndEase(varsArg: AstNode): void {
   // ease is a BUILTIN_VAR_KEY (not editable), so filterEditableKeys won't remove it —
@@ -2225,9 +2170,16 @@ function buildMotionPathObjectCode(config: {
 }): string {
   const { waypoints, segments, autoRotate } = config;
   const hasExplicitControlPoints = segments.some((s) => s.cp1 && s.cp2);
+  // The simple `path` array supports only one scalar curviness for the whole
+  // path, so per-segment curviness must use the cubic form (curviness baked into
+  // each segment's control points). Without this, the simple branch serializes
+  // only segments[0].curviness and silently drops every other segment's curve.
+  const curvinessVaries = segments.some(
+    (s) => (s.curviness ?? 1) !== (segments[0]?.curviness ?? 1),
+  );
 
   let pathEntries: string[];
-  if (hasExplicitControlPoints && waypoints.length >= 2) {
+  if ((hasExplicitControlPoints || curvinessVaries) && waypoints.length >= 2) {
     // type: "cubic" — interleave control points: [anchor, cp1, cp2, anchor, ...]
     pathEntries = [`{x: ${waypoints[0]!.x}, y: ${waypoints[0]!.y}}`];
     for (let i = 0; i < segments.length; i++) {

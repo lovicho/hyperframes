@@ -2,21 +2,28 @@ import { useCallback } from "react";
 import type { Composition } from "@hyperframes/sdk";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import { roundTo3 } from "../utils/rounding";
-import { runShadowGsapTween, type ShadowGsapOp } from "../utils/sdkShadow";
+import {
+  sdkGsapTweenPersist,
+  sdkGsapDeleteAllForSelectorPersist,
+  type CutoverDeps,
+} from "../utils/sdkCutover";
 import {
   assignGsapTargetAutoIdIfNeeded,
   ensureElementAddressable,
 } from "./gsapScriptCommitHelpers";
 import type { CommitMutation, SafeGsapCommitMutation } from "./gsapScriptCommitTypes";
 
-interface GsapAnimationOpsParams {
+interface SdkAnimationDeps {
+  sdkSession?: Composition | null;
+  sdkDeps?: CutoverDeps | null;
+}
+
+interface GsapAnimationOpsParams extends SdkAnimationDeps {
   projectIdRef: React.MutableRefObject<string | null>;
   activeCompPath: string | null;
   commitMutation: CommitMutation;
   commitMutationSafely: SafeGsapCommitMutation;
   showToast: (message: string, tone?: "error" | "info") => void;
-  /** Stage 7 Step 3b: SDK session for shadow GSAP dispatch (server stays authoritative). */
-  sdkSession?: Composition | null;
 }
 
 export function useGsapAnimationOps({
@@ -26,60 +33,79 @@ export function useGsapAnimationOps({
   commitMutationSafely,
   showToast,
   sdkSession,
+  sdkDeps,
 }: GsapAnimationOpsParams) {
   const updateGsapMeta = useCallback(
-    (
+    async (
       selection: DomEditSelection,
       animationId: string,
       updates: { duration?: number; ease?: string; position?: number },
     ) => {
-      // Shadow op (server animationId shares the SDK id-space): existence via
-      // runShadowGsapTween (live session) + value fidelity via the chokepoint.
-      const shadowGsapOp: ShadowGsapOp = {
-        kind: "set",
-        animationId,
-        properties: { duration: updates.duration, ease: updates.ease, position: updates.position },
-      };
-      // coalesceKey groups rapid meta edits into one history entry. Request
-      // serialization is now handled per-file at the commitMutation chokepoint
-      // (useGsapScriptCommits), so no per-op serializeKey is needed here.
-      const metaKey = `gsap:${animationId}:meta`;
+      if (sdkSession && sdkDeps) {
+        const targetPath = selection.sourceFile || activeCompPath || "index.html";
+        const handled = await sdkGsapTweenPersist(
+          targetPath,
+          { kind: "set", animationId, properties: updates },
+          sdkSession,
+          sdkDeps,
+          { label: "Edit GSAP animation", coalesceKey: `gsap:${animationId}:meta` },
+        );
+        if (handled) return;
+      }
       commitMutationSafely(
         selection,
         { type: "update-meta", animationId, updates },
-        { label: "Edit GSAP animation", coalesceKey: metaKey, shadowGsapOp },
+        { label: "Edit GSAP animation", coalesceKey: `gsap:${animationId}:meta` },
       );
-      if (sdkSession) runShadowGsapTween(sdkSession, shadowGsapOp);
     },
-    [commitMutationSafely, sdkSession],
+    [commitMutationSafely, activeCompPath, sdkSession, sdkDeps],
   );
 
   const deleteGsapAnimation = useCallback(
-    (selection: DomEditSelection, animationId: string) => {
-      const shadowGsapOp: ShadowGsapOp = { kind: "remove", animationId };
+    async (selection: DomEditSelection, animationId: string) => {
+      if (sdkSession && sdkDeps) {
+        const targetPath = selection.sourceFile || activeCompPath || "index.html";
+        const handled = await sdkGsapTweenPersist(
+          targetPath,
+          { kind: "remove", animationId },
+          sdkSession,
+          sdkDeps,
+          { label: "Delete GSAP animation" },
+        );
+        if (handled) return;
+      }
       commitMutationSafely(
         selection,
         { type: "delete", animationId, stripStudioEdits: true },
-        { label: "Delete GSAP animation", shadowGsapOp },
+        { label: "Delete GSAP animation" },
       );
-      if (sdkSession) runShadowGsapTween(sdkSession, shadowGsapOp);
     },
-    [commitMutationSafely, sdkSession],
+    [commitMutationSafely, activeCompPath, sdkSession, sdkDeps],
   );
 
   const deleteAllForSelector = useCallback(
-    (selection: DomEditSelection, targetSelector: string) => {
+    async (selection: DomEditSelection, targetSelector: string) => {
+      if (sdkSession && sdkDeps) {
+        const targetPath = selection.sourceFile || activeCompPath || "index.html";
+        const handled = await sdkGsapDeleteAllForSelectorPersist(
+          targetPath,
+          targetSelector,
+          sdkSession,
+          sdkDeps,
+          { label: "Delete all animations for element" },
+        );
+        if (handled) return;
+      }
       void commitMutation(
         selection,
         { type: "delete-all-for-selector", targetSelector },
         { label: "Delete all animations for element" },
       );
     },
-    [commitMutation],
+    [commitMutation, activeCompPath, sdkSession, sdkDeps],
   );
 
-  // Pre-existing complexity (auto-id assignment + per-method defaults); this PR
-  // adds only a guarded shadow-op construction at the tail.
+  // fallow-ignore-next-line complexity
   const addGsapAnimation = useCallback(
     // fallow-ignore-next-line complexity
     async (
@@ -114,25 +140,28 @@ export function useGsapAnimationOps({
         fromTo: { x: 0, y: 0, opacity: 1 },
       };
 
-      // Shadow op (server stays authoritative). "set" has no SDK method, so it
-      // is not shadowed; otherwise: existence via runShadowGsapTween (live) +
-      // value fidelity via the chokepoint (shadowGsapOp in options).
-      const shadowGsapOp: ShadowGsapOp | undefined =
-        selection.hfId && method !== "set"
-          ? {
-              kind: "add",
-              target: selection.hfId,
-              tween: {
-                method,
-                position,
-                duration,
-                ease: "power2.out",
-                ...(method === "fromTo"
-                  ? { fromProperties: { opacity: 0 }, toProperties: toDefaults[method] }
-                  : { properties: toDefaults[method] ?? { opacity: 1 } }),
-              },
-            }
-          : undefined;
+      // Skip SDK path when an id was just assigned server-side (autoId): the
+      // SDK session hasn't reloaded that write yet, so persisting its
+      // serialization would clobber the new id — let the server add the tween
+      // atomically with the id it wrote.
+      if (!autoId && selection.hfId && sdkSession && sdkDeps) {
+        const targetPath = selection.sourceFile || activeCompPath || "index.html";
+        const spec = {
+          method,
+          position,
+          ...(method !== "set" ? { duration, ease: "power2.out" as const } : {}),
+          properties: toDefaults[method] ?? { opacity: 1 },
+          ...(method === "fromTo" ? { fromProperties: { opacity: 0 } } : {}),
+        };
+        const handled = await sdkGsapTweenPersist(
+          targetPath,
+          { kind: "add", target: selection.hfId, spec },
+          sdkSession,
+          sdkDeps,
+          { label: `Add GSAP ${method} animation` },
+        );
+        if (handled) return;
+      }
 
       await commitMutation(
         selection,
@@ -146,12 +175,10 @@ export function useGsapAnimationOps({
           properties: toDefaults[method] ?? { opacity: 1 },
           fromProperties: method === "fromTo" ? { opacity: 0 } : undefined,
         },
-        { label: `Add GSAP ${method} animation`, shadowGsapOp },
+        { label: `Add GSAP ${method} animation` },
       );
-
-      if (sdkSession && shadowGsapOp) runShadowGsapTween(sdkSession, shadowGsapOp);
     },
-    [activeCompPath, commitMutation, projectIdRef, showToast, sdkSession],
+    [activeCompPath, commitMutation, projectIdRef, showToast, sdkSession, sdkDeps],
   );
 
   return {
