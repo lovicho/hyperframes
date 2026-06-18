@@ -43,6 +43,7 @@
 import {
   type BeforeCaptureHook,
   type CaptureOptions,
+  type CapturePerfSummary,
   type CaptureSession,
   type EngineConfig,
   type StreamingEncoder,
@@ -52,6 +53,7 @@ import {
   createFrameReorderBuffer,
   distributeFrames,
   executeParallelCapture,
+  getCapturePerfSummary,
   initializeSession,
   prepareCaptureSessionForReuse,
   spawnStreamingEncoder,
@@ -60,6 +62,7 @@ import type { FileServerHandle } from "../../fileServer.js";
 import type { ProducerLogger } from "../../../logger.js";
 import type { ProgressCallback, RenderJob } from "../../renderOrchestrator.js";
 import { wrapCaptureStageError } from "../captureStageError.js";
+import { pushWorkerDedupPerfs } from "../perfSummary.js";
 import { ensureFrameWritten } from "./captureHdrFrameShared.js";
 import { updateJobStatus } from "../shared.js";
 
@@ -106,6 +109,12 @@ export interface CaptureStreamingStageInput {
   abortSignal: AbortSignal | undefined;
   assertNotAborted: () => void;
   onProgress?: ProgressCallback;
+  /**
+   * Mutated in place — static-dedup perf appended for the sequential session or
+   * each parallel worker, aggregated into the `RenderPerfSummary` dedup block.
+   * Same append-in-place contract as the disk-capture stage.
+   */
+  dedupPerfs: CapturePerfSummary[];
 }
 
 export type CaptureStreamingStageResult =
@@ -143,6 +152,7 @@ export async function runCaptureStreamingStage(
     abortSignal,
     assertNotAborted,
     onProgress,
+    dedupPerfs,
   } = input;
   let { workerCount, probeSession } = input;
   let lastBrowserConsole: string[] = [];
@@ -200,7 +210,7 @@ export async function runCaptureStreamingStage(
         reorderBuffer.advanceTo(frameIndex + 1);
       };
 
-      await executeParallelCapture(
+      const workerResults = await executeParallelCapture(
         fileServer.url,
         workDir,
         tasks,
@@ -228,6 +238,7 @@ export async function runCaptureStreamingStage(
         onFrameBuffer,
         captureCfg,
       );
+      pushWorkerDedupPerfs(workerResults, dedupPerfs);
 
       if (probeSession) {
         lastBrowserConsole = probeSession.browserConsoleBuffer;
@@ -283,6 +294,9 @@ export async function runCaptureStreamingStage(
             onProgress,
           );
         }
+        // Capture the session's static-dedup perf before close (counters valid
+        // only while the session is live).
+        dedupPerfs.push(getCapturePerfSummary(session));
         // This must mirror disk capture: catch wraps the original failure with
         // browser diagnostics, finally only handles cleanup.
         // fallow-ignore-next-line code-duplication

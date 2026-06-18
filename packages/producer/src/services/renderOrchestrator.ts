@@ -66,6 +66,7 @@ import {
   getSystemTotalMb,
   LOW_MEMORY_TOTAL_MB_THRESHOLD,
   assertConfiguredFfmpegBinariesExist,
+  type CapturePerfSummary,
 } from "@hyperframes/engine";
 import { join, dirname, resolve } from "path";
 import { randomUUID } from "crypto";
@@ -88,7 +89,7 @@ import { buildRenderErrorDetails, cleanupRenderResources, safeCleanup } from "./
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { formatCaptureFrameName } from "../utils/paths.js";
 import { resolveEffectiveHdrMode } from "./render/hdrMode.js";
-import { buildRenderPerfSummary } from "./render/perfSummary.js";
+import { buildRenderPerfSummary, pushWorkerDedupPerfs } from "./render/perfSummary.js";
 import { getCaptureStageBrowserConsole } from "./render/captureStageError.js";
 import {
   type CaptureCalibrationSample,
@@ -326,6 +327,21 @@ export interface RenderPerfSummary {
   peakHeapUsedMb?: number;
   hdrDiagnostics?: HdrDiagnostics;
   hdrPerf?: HdrPerfSummary;
+  /**
+   * Static-frame dedup outcome for this render (opt-out HF_STATIC_DEDUP=false),
+   * aggregated across the sequential session or all parallel workers. `enabled`
+   * is the adoption signal; `armed` means it passed every gate + verification;
+   * `skipReason` says why it didn't arm; `reusedFrames`/`predictedFrames` measure
+   * effectiveness (reuse % = reusedFrames / totalFrames). Undefined when no
+   * capture session ran (e.g. layered-HDR-only paths).
+   */
+  staticDedup?: {
+    enabled: boolean;
+    armed: boolean;
+    predictedFrames: number;
+    reusedFrames: number;
+    skipReason?: string;
+  };
 }
 
 export interface HdrDiagnostics {
@@ -576,6 +592,8 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
    * contract: `[0, totalFrames)`). See `WorkerTask.outputFrameOffset`.
    */
   frameRangeStart?: number;
+  /** Mutated in place — replaced each attempt so only the final attempt's worker perf survives (see retry reset below). */
+  dedupPerfs: CapturePerfSummary[];
 }): Promise<CaptureAttemptSummary[]> {
   const attempts: CaptureAttemptSummary[] = [];
   let currentWorkers = options.initialWorkerCount;
@@ -603,6 +621,11 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
         )
       : [distributeFrames(options.totalFrames, currentWorkers, attemptWorkDir, rangeStart)];
 
+    // Reset before each attempt so a retry REPLACES (not accumulates) worker perf —
+    // otherwise a frame captured in attempt 0 AND re-captured on retry would be counted
+    // twice, inflating reused/predicted past totalFrames. The common no-retry path keeps
+    // exactly one attempt's perf; a retry reports only the final attempt's set.
+    options.dedupPerfs.length = 0;
     try {
       for (const tasks of batches) {
         const capturedBeforeBatch = countCapturedFrames(
@@ -611,7 +634,7 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
           options.frameExt,
         );
         try {
-          await executeParallelCapture(
+          const workerResults = await executeParallelCapture(
             options.serverUrl,
             attemptWorkDir,
             tasks,
@@ -633,6 +656,7 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
             undefined,
             options.cfg,
           );
+          pushWorkerDedupPerfs(workerResults, options.dedupPerfs);
         } finally {
           await mergeWorkerFrames(attemptWorkDir, tasks, options.framesDir);
         }
@@ -1285,6 +1309,9 @@ export async function executeRenderJob(
     });
 
     const captureAttempts: CaptureAttemptSummary[] = [];
+    // Static-dedup perf, appended per sequential session / per parallel worker
+    // by the capture stage, aggregated into the perf summary below.
+    const dedupPerfs: CapturePerfSummary[] = [];
 
     // png-sequence is "no container" — outputPath is treated as a directory and
     // the encode/mux/faststart stages are skipped entirely. The empty extension
@@ -1483,6 +1510,7 @@ export async function executeRenderJob(
               abortSignal,
               assertNotAborted,
               onProgress,
+              dedupPerfs,
             }),
         );
         if (streamingRes.success) {
@@ -1520,6 +1548,7 @@ export async function executeRenderJob(
               probeSession,
               needsAlpha,
               captureAttempts,
+              dedupPerfs,
               buildCaptureOptions,
               createRenderVideoFrameInjector,
               abortSignal,
@@ -1634,6 +1663,7 @@ export async function executeRenderJob(
       tmpPeakBytes,
       captureCalibration,
       captureAttempts,
+      dedupPerfs,
       hdrDiagnostics,
       hdrPerf,
       observability: observabilitySummary,

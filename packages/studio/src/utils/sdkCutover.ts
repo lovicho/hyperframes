@@ -1,11 +1,13 @@
 import type { MutableRefObject } from "react";
-import type { Composition, EditOp, GsapTweenSpec } from "@hyperframes/sdk";
+import type { Composition, GsapTweenSpec } from "@hyperframes/sdk";
 import type { DomEditSelection } from "../components/editor/domEditing";
 import type { EditHistoryKind } from "./editHistory";
 import type { PatchOperation } from "./sourcePatcher";
 import { STUDIO_SDK_CUTOVER_ENABLED } from "../components/editor/manualEditingAvailability";
 import { trackStudioEvent } from "./studioTelemetry";
 import { markSelfWrite } from "../hooks/sdkSelfWriteRegistry";
+import { patchOpsToSdkEditOps } from "./sdkOpMapping";
+import { recordResolverParity, recordAnimationResolverParity } from "./sdkResolverShadow";
 
 const CUTOVER_OP_TYPES = new Set<PatchOperation["type"]>([
   "inline-style",
@@ -34,10 +36,6 @@ const RESERVED_CUTOVER_ATTRS = new Set<string>([
   "data-hold-fill",
 ]);
 
-// The attribute name the SDK setAttribute op carries for this patch op (or null
-// if the op isn't an attribute). Shared by patchOpsToSdkEditOps and the reserved
-// gate so the name they reason about can't drift: a bare `attribute` op is
-// force-prefixed `data-`; an `html-attribute` op keeps its raw name.
 function sdkAttrName(op: PatchOperation): string | null {
   if (op.type === "attribute") {
     return op.property.startsWith("data-") ? op.property : `data-${op.property}`;
@@ -52,38 +50,6 @@ function mapsToReservedAttr(op: PatchOperation): boolean {
   // reserved check), so "DATA-START" is declined up front too; covers both
   // `attribute` (prefixed) and `html-attribute` (raw) ops.
   return name !== null && RESERVED_CUTOVER_ATTRS.has(name.toLowerCase());
-}
-
-/**
- * Map Studio PatchOperations for a given hf-id to SDK EditOps.
- *
- * Multiple inline-style ops are coalesced into a single setStyle (SDK batches
- * style changes naturally). One SDK op is emitted per non-style op.
- */
-function patchOpsToSdkEditOps(hfId: string, ops: PatchOperation[]): EditOp[] {
-  const result: EditOp[] = [];
-  const styles: Record<string, string | null> = {};
-  let hasStyles = false;
-
-  for (const op of ops) {
-    if (op.type === "inline-style") {
-      styles[op.property] = op.value;
-      hasStyles = true;
-    } else if (op.type === "text-content") {
-      result.push({ type: "setText", target: hfId, value: op.value ?? "" });
-    } else if (op.type === "attribute" || op.type === "html-attribute") {
-      const name = sdkAttrName(op);
-      if (name !== null) {
-        result.push({ type: "setAttribute", target: hfId, name, value: op.value });
-      }
-    }
-  }
-
-  if (hasStyles) {
-    result.unshift({ type: "setStyle", target: hfId, styles });
-  }
-
-  return result;
 }
 
 export function shouldUseSdkCutover(
@@ -250,6 +216,9 @@ export async function sdkTimingPersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
+  // Resolver tripwire — runs BEFORE the cutover gate (decoupled): records when
+  // the SDK can't resolve a target the server timing path is addressing.
+  recordResolverParity(sdkSession, hfId, "setTiming");
   // Dark-launch gate: without this, timing cutover runs whenever an SDK session
   // exists (it always does, for shadow/selection) — flipping the flag OFF would
   // NOT disable it. Gate here so flag-off routes back to the legacy server path.
@@ -286,6 +255,18 @@ export function sdkGsapTweenPersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
+  // Resolver tripwire — runs BEFORE this function's own cutover gate (decoupled).
+  // add targets an element (element-resolution parity); set/remove target an
+  // animationId (animation-resolution parity). Done here, not via
+  // dispatchGsapOpAndPersist's resolverTarget, because the gate below returns
+  // before that call when cutover is off.
+  if (op.kind === "add") recordResolverParity(sdkSession, op.target, "addGsapTween");
+  else
+    recordAnimationResolverParity(
+      sdkSession,
+      op.animationId,
+      op.kind === "set" ? "setGsapTween" : "removeGsapTween",
+    );
   // Leading dark-launch gate so flag-off does no SDK touch (getElement) at all —
   // matches the other three chokepoints' discipline.
   if (!STUDIO_SDK_CUTOVER_ENABLED) return Promise.resolve(false);
@@ -313,7 +294,13 @@ async function dispatchGsapOpAndPersist(
   deps: CutoverDeps,
   options: CutoverOptions | undefined,
   dispatch: (s: Composition) => void,
+  resolverTarget?: { animationId: string; opLabel: string },
 ): Promise<boolean> {
+  // Resolver tripwire — runs BEFORE the cutover gate (decoupled): records when
+  // the SDK can't resolve the animationId the server GSAP path is addressing.
+  if (resolverTarget) {
+    recordAnimationResolverParity(sdkSession, resolverTarget.animationId, resolverTarget.opLabel);
+  }
   // Dark-launch gate (shared chokepoint for every GSAP-op cutover persist):
   // flag OFF → return false → caller falls back to the legacy server path.
   if (!STUDIO_SDK_CUTOVER_ENABLED) return false;
@@ -354,8 +341,13 @@ export function sdkGsapKeyframePersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
-  return dispatchGsapOpAndPersist(targetPath, sdkSession, deps, options, (s) =>
-    s.batch(() => s.dispatch({ type: "addGsapKeyframe", animationId, position, value })),
+  return dispatchGsapOpAndPersist(
+    targetPath,
+    sdkSession,
+    deps,
+    options,
+    (s) => s.batch(() => s.dispatch({ type: "addGsapKeyframe", animationId, position, value })),
+    { animationId, opLabel: "addGsapKeyframe" },
   );
 }
 
@@ -367,8 +359,13 @@ export function sdkGsapRemoveKeyframePersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
-  return dispatchGsapOpAndPersist(targetPath, sdkSession, deps, options, (s) =>
-    s.dispatch({ type: "removeGsapKeyframe", animationId, percentage }),
+  return dispatchGsapOpAndPersist(
+    targetPath,
+    sdkSession,
+    deps,
+    options,
+    (s) => s.dispatch({ type: "removeGsapKeyframe", animationId, percentage }),
+    { animationId, opLabel: "removeGsapKeyframe" },
   );
 }
 
@@ -381,8 +378,13 @@ export function sdkGsapRemovePropertyPersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
-  return dispatchGsapOpAndPersist(targetPath, sdkSession, deps, options, (s) =>
-    s.dispatch({ type: "removeGsapProperty", animationId, property, from }),
+  return dispatchGsapOpAndPersist(
+    targetPath,
+    sdkSession,
+    deps,
+    options,
+    (s) => s.dispatch({ type: "removeGsapProperty", animationId, property, from }),
+    { animationId, opLabel: "removeGsapProperty" },
   );
 }
 
@@ -405,8 +407,13 @@ export function sdkGsapRemoveAllKeyframesPersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
-  return dispatchGsapOpAndPersist(targetPath, sdkSession, deps, options, (s) =>
-    s.dispatch({ type: "removeAllKeyframes", animationId }),
+  return dispatchGsapOpAndPersist(
+    targetPath,
+    sdkSession,
+    deps,
+    options,
+    (s) => s.dispatch({ type: "removeAllKeyframes", animationId }),
+    { animationId, opLabel: "removeAllKeyframes" },
   );
 }
 
@@ -418,8 +425,13 @@ export function sdkGsapConvertToKeyframesPersist(
   deps: CutoverDeps,
   options?: CutoverOptions,
 ): Promise<boolean> {
-  return dispatchGsapOpAndPersist(targetPath, sdkSession, deps, options, (s) =>
-    s.dispatch({ type: "convertToKeyframes", animationId, resolvedFromValues }),
+  return dispatchGsapOpAndPersist(
+    targetPath,
+    sdkSession,
+    deps,
+    options,
+    (s) => s.dispatch({ type: "convertToKeyframes", animationId, resolvedFromValues }),
+    { animationId, opLabel: "convertToKeyframes" },
   );
 }
 
@@ -430,6 +442,8 @@ export async function sdkDeletePersist(
   sdkSession: Composition | null | undefined,
   deps: CutoverDeps,
 ): Promise<boolean> {
+  // Resolver tripwire — runs BEFORE the cutover gate (decoupled).
+  recordResolverParity(sdkSession, hfId, "removeElement");
   // Dark-launch gate: flag OFF → legacy server delete path.
   if (!STUDIO_SDK_CUTOVER_ENABLED) return false;
   if (!sdkSession || !sdkSession.getElement(hfId)) return false;
