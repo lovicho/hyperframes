@@ -114,6 +114,7 @@ const commandLoaders = {
   add: () => import("./commands/add.js").then((m) => m.default),
   catalog: () => import("./commands/catalog.js").then((m) => m.default),
   play: () => import("./commands/play.js").then((m) => m.default),
+  present: () => import("./commands/present.js").then((m) => m.default),
   preview: () => import("./commands/preview.js").then((m) => m.default),
   publish: () => import("./commands/publish.js").then((m) => m.default),
   render: () => import("./commands/render.js").then((m) => m.default),

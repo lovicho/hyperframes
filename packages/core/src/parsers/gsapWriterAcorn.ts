@@ -25,7 +25,7 @@ import {
 } from "./gsapParserAcorn.js";
 import { classifyPropertyGroup } from "./gsapConstants.js";
 import type { PropertyGroupName } from "./gsapConstants.js";
-import type { SplitAnimationsOptions, SplitAnimationsResult } from "./gsapParser.js";
+import type { SplitAnimationsOptions, SplitAnimationsResult } from "./gsapSerialize.js";
 import * as acornWalk from "acorn-walk";
 
 // acorn ESTree nodes are structurally untyped here; mirror gsapParserAcorn.ts /
@@ -1128,12 +1128,14 @@ function buildKeyframeObjectCode(
     percentage: number;
     properties: Record<string, number | string>;
     ease?: string;
+    auto?: boolean;
   }>,
   easeEach?: string,
 ): string {
   const entries = keyframes.map((kf) => {
     const props = Object.entries(kf.properties).map(([k, v]) => `${safeKey(k)}: ${valueToCode(v)}`);
     if (kf.ease) props.push(`ease: ${JSON.stringify(kf.ease)}`);
+    if (kf.auto) props.push(`_auto: 1`);
     return `${JSON.stringify(`${kf.percentage}%`)}: { ${props.join(", ")} }`;
   });
   if (easeEach) entries.push(`easeEach: ${JSON.stringify(easeEach)}`);
@@ -1210,6 +1212,7 @@ export function addAnimationWithKeyframesToScript(
     percentage: number;
     properties: Record<string, number | string>;
     ease?: string;
+    auto?: boolean;
   }>,
   ease?: string,
 ): { script: string; id: string } {

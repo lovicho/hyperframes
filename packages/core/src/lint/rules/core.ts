@@ -164,7 +164,9 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
       const attrs = script.attrs || "";
       if (
         /\bsrc\s*=/.test(attrs) ||
-        /\btype\s*=\s*["'](?:application\/json|importmap|module)["']/.test(attrs)
+        /\btype\s*=\s*["'](?:application\/json|application\/hyperframes-slideshow\+json|importmap|module)["']/.test(
+          attrs,
+        )
       )
         continue;
       const syntaxError = getInlineScriptSyntaxError(script.content);

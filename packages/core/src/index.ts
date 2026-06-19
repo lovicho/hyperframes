@@ -37,6 +37,18 @@ export type {
   WaveformData,
 } from "./core.types";
 
+export type {
+  SlideshowManifest,
+  SlideRef,
+  SlideHotspot,
+  SlideSequence,
+  ResolvedSlide,
+  ResolvedSlideSequence,
+  ResolvedSlideshow,
+} from "./slideshow/slideshow.types";
+
+export { parseSlideshowManifest, resolveSlideshow } from "./slideshow/parseSlideshow";
+
 export {
   CANVAS_DIMENSIONS,
   VALID_CANVAS_RESOLUTIONS,
@@ -66,10 +78,8 @@ export {
   ZOOM_CONTAINER_STYLES,
 } from "./templates/constants";
 
-// Parsers — recast-free GSAP helpers only. The AST parser (parseGsapScript and
-// the script-mutation helpers) depends on recast/@babel/parser, which break in
-// browser/SSR bundles; it is reachable only via the Node-only
-// `@hyperframes/core/gsap-parser` subpath.
+// Parsers — GSAP helpers. The AST parser (parseGsapScriptAcorn and write ops)
+// is browser-safe; mutation helpers are in gsapWriterAcorn.
 export type { GsapAnimation, GsapMethod, ParsedGsap } from "./parsers/gsapSerialize";
 
 export {
@@ -108,6 +118,17 @@ export type {
   CompilationResult,
 } from "./compiler/timingCompiler";
 
+// Timing resolver — shared pure resolver for word-anchored elastic timing (WS-C).
+export type {
+  WordTiming,
+  ElementAnchor,
+  AuthoredTiming,
+  ResolvedTiming,
+  ResolveTimingsInput,
+  ResolveTimingsResult,
+} from "./compiler/timingResolver";
+export { resolveTimings } from "./compiler/timingResolver";
+
 export {
   compileTimingAttrs,
   injectDurations,
@@ -130,6 +151,7 @@ export {
   rewriteCssAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
 export { CSS_URL_RE, isNonRelativeUrl, isPathInside } from "./compiler/assetPaths";
+export { queryByAttr } from "./utils/cssSelector";
 export { decodeUrlPathVariants } from "./utils/urlPath";
 export { parseAnimatedGifMetadata, type AnimatedGifMetadata } from "./media/gif";
 export {

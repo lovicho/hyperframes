@@ -149,6 +149,36 @@ export function compareSemver(a: string, b: string): number {
   return 0;
 }
 
+function tagReachableFromHead(tag: string): boolean {
+  // `merge-base --is-ancestor` exits 0 when v<tag> is an ancestor of HEAD, 1
+  // otherwise. Orphan tags (abandoned release attempts on dead branches) are
+  // NOT ancestors, so they return false and are ignored by the guard below.
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", `v${tag}`, "HEAD"], {
+      cwd: ROOT,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tags that would hijack a tag-sorting installer for this line: BOTH
+ * semver-higher than the release AND reachable from the release commit. A
+ * higher tag that isn't an ancestor of HEAD (e.g. a stray `chore: release`
+ * commit on a dead branch that was never published) can't appear in this
+ * history and is excluded — it should not block a legitimate release.
+ */
+export function findBlockingTags(
+  stableVersions: string[],
+  version: string,
+  isReachable: (tag: string) => boolean,
+): string[] {
+  return stableVersions.filter((t) => compareSemver(t, version) > 0 && isReachable(t));
+}
+
 function assertTagMonotonicity(version: string) {
   if (isPrerelease(version)) return;
 
@@ -168,20 +198,20 @@ function assertTagMonotonicity(version: string) {
     .filter((t) => t && !t.includes("-"))
     .map((t) => t.replace(/^v/, ""));
 
-  for (const existing of stableVersions) {
-    if (compareSemver(existing, version) > 0) {
-      console.error(`\nTag v${existing} already exists and is semver-higher than v${version}.`);
-      console.error(`Tag-sorting installers (npx skills, etc.) would resolve the wrong version.`);
-      console.error(`\nOptions:`);
-      console.error(
-        `  Delete the stale tag: git tag -d v${existing} && git push origin :refs/tags/v${existing}`,
-      );
-      console.error(
-        `  Skip this check:     bun run set-version ${version} --skip-monotonicity-check`,
-      );
-      process.exit(1);
-    }
-  }
+  const blocking = findBlockingTags(stableVersions, version, tagReachableFromHead);
+  if (blocking.length === 0) return;
+
+  const existing = blocking[0];
+  console.error(
+    `\nTag v${existing} already exists, is reachable from HEAD, and is semver-higher than v${version}.`,
+  );
+  console.error(`Tag-sorting installers (npx skills, etc.) would resolve the wrong version.`);
+  console.error(`\nOptions:`);
+  console.error(
+    `  Delete the stale tag: git tag -d v${existing} && git push origin :refs/tags/v${existing}`,
+  );
+  console.error(`  Skip this check:     bun run set-version ${version} --skip-monotonicity-check`);
+  process.exit(1);
 }
 
 export function releaseRequiresChangelog(options: ReleaseOptions) {

@@ -5,6 +5,8 @@ import { roundTo3 } from "../utils/rounding";
 import {
   sdkGsapTweenPersist,
   sdkGsapDeleteAllForSelectorPersist,
+  sdkAddWithKeyframesPersist,
+  sdkReplaceWithKeyframesPersist,
   type CutoverDeps,
 } from "../utils/sdkCutover";
 import {
@@ -181,10 +183,104 @@ export function useGsapAnimationOps({
     [activeCompPath, commitMutation, projectIdRef, showToast, sdkSession, sdkDeps],
   );
 
+  type KeyframeEntry = {
+    percentage: number;
+    properties: Record<string, number | string>;
+    ease?: string;
+    auto?: boolean;
+  };
+
+  const addWithKeyframes = useCallback(
+    async (
+      selection: DomEditSelection,
+      targetSelector: string,
+      position: number,
+      duration: number,
+      keyframes: KeyframeEntry[],
+      ease?: string,
+      label = "Add animation with keyframes",
+    ) => {
+      if (sdkSession && sdkDeps) {
+        const targetPath = selection.sourceFile || activeCompPath || "index.html";
+        const handled = await sdkAddWithKeyframesPersist(
+          targetPath,
+          targetSelector,
+          position,
+          duration,
+          keyframes,
+          ease,
+          sdkSession,
+          sdkDeps,
+          { label },
+        );
+        if (handled) return;
+      }
+      void commitMutation(
+        selection,
+        {
+          type: "add-with-keyframes",
+          targetSelector,
+          position,
+          duration,
+          keyframes,
+          ...(ease ? { ease } : {}),
+        },
+        { label, softReload: true },
+      );
+    },
+    [commitMutation, activeCompPath, sdkSession, sdkDeps],
+  );
+
+  const replaceWithKeyframes = useCallback(
+    async (
+      selection: DomEditSelection,
+      animationId: string,
+      targetSelector: string,
+      position: number,
+      duration: number,
+      keyframes: KeyframeEntry[],
+      ease?: string,
+      label = "Replace animation with keyframes",
+    ) => {
+      if (sdkSession && sdkDeps) {
+        const targetPath = selection.sourceFile || activeCompPath || "index.html";
+        const handled = await sdkReplaceWithKeyframesPersist(
+          targetPath,
+          animationId,
+          targetSelector,
+          position,
+          duration,
+          keyframes,
+          ease,
+          sdkSession,
+          sdkDeps,
+          { label },
+        );
+        if (handled) return;
+      }
+      void commitMutation(
+        selection,
+        {
+          type: "replace-with-keyframes",
+          animationId,
+          targetSelector,
+          position,
+          duration,
+          keyframes,
+          ...(ease ? { ease } : {}),
+        },
+        { label, softReload: true },
+      );
+    },
+    [commitMutation, activeCompPath, sdkSession, sdkDeps],
+  );
+
   return {
     updateGsapMeta,
     deleteGsapAnimation,
     deleteAllForSelector,
     addGsapAnimation,
+    addWithKeyframes,
+    replaceWithKeyframes,
   };
 }

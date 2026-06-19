@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.6.112",
+  "version": "0.6.114",
   "description": "",
   "repository": {
     "type": "git",
@@ -25,6 +25,14 @@
     "./beats": {
       "import": "./src/beats/index.ts",
       "types": "./src/beats/index.ts"
+    },
+    "./html-attr-safety": {
+      "import": "./src/utils/htmlAttrSafety.ts",
+      "types": "./src/utils/htmlAttrSafety.ts"
+    },
+    "./slideshow": {
+      "import": "./src/slideshow/index.ts",
+      "types": "./src/slideshow/index.ts"
     },
     "./lint": {
       "import": "./src/lint/index.ts",
@@ -96,8 +104,8 @@
       "types": "./src/parsers/hfIds.ts"
     },
     "./gsap-parser": {
-      "import": "./src/parsers/gsapParser.ts",
-      "types": "./src/parsers/gsapParser.ts"
+      "import": "./src/parsers/gsapParserExports.ts",
+      "types": "./src/parsers/gsapParserExports.ts"
     },
     "./gsap-parser-acorn": {
       "import": "./src/parsers/gsapParserAcorn.ts",
@@ -136,6 +144,10 @@
       "./lint": {
         "import": "./dist/lint/index.js",
         "types": "./dist/lint/index.d.ts"
+      },
+      "./slideshow": {
+        "import": "./dist/slideshow/index.js",
+        "types": "./dist/slideshow/index.d.ts"
       },
       "./compiler": {
         "import": "./dist/compiler/index.js",
@@ -195,8 +207,8 @@
         "types": "./dist/parsers/hfIds.d.ts"
       },
       "./gsap-parser": {
-        "import": "./dist/parsers/gsapParser.js",
-        "types": "./dist/parsers/gsapParser.d.ts"
+        "import": "./dist/parsers/gsapParserExports.js",
+        "types": "./dist/parsers/gsapParserExports.d.ts"
       },
       "./gsap-parser-acorn": {
         "import": "./dist/parsers/gsapParserAcorn.js",

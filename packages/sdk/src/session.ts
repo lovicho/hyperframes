@@ -13,9 +13,14 @@ import type {
   Composition,
   EditOp,
   ElementSnapshot,
+  ElementTimingSnapshot,
   FindQuery,
+  FontValue,
   GsapTweenSpec,
+  ElasticHold,
+  KeyframeSpec,
   HfId,
+  ImageValue,
   JsonPatchOp,
   OverrideSet,
   PatchEvent,
@@ -29,6 +34,8 @@ import type { PersistAdapter, PreviewAdapter } from "./adapters/types.js";
 import { parseMutable } from "./engine/model.js";
 import type { ParsedDocument } from "./engine/model.js";
 import { applyOp, validateOp, type MutationResult } from "./engine/mutate.js";
+import { getGsapScript, resolveScoped } from "./engine/model.js";
+import { extractGsapLabels } from "@hyperframes/core/gsap-parser-acorn";
 import { serializeDocument } from "./engine/serialize.js";
 import { applyPatchesToDocument, applyOverrideSet } from "./engine/apply-patches.js";
 import { buildPatchEvent, pathToKey } from "./engine/patches.js";
@@ -133,8 +140,95 @@ class CompositionImpl implements Composition {
     this.dispatch({ type: "removeElement", target: id });
   }
 
-  setVariableValue(id: string, value: string | number | boolean): void {
+  addElement(parent: HfId | null, index: number, html: string): HfId {
+    const result = this._dispatch({ type: "addElement", parent, index, html }, ORIGIN_LOCAL);
+    return result.meta?.newId ?? "";
+  }
+
+  setVariableValue(id: string, value: string | number | boolean | FontValue | ImageValue): void {
     this.dispatch({ type: "setVariableValue", id, value });
+  }
+
+  // ── WS-C: timing accessors + typed setHold ───────────────────────────────────
+
+  /**
+   * Cache of parsed GSAP labels keyed by EXACT script text. extractGsapLabels does
+   * a full acorn parse; caching avoids re-parsing on repeated getElementTimings reads
+   * when the script is unchanged. The content (not reference) key means any script
+   * edit changes the text and invalidates the cache, so renumbered tweens never yield
+   * stale label positions.
+   */
+  private _gsapLabelCache: { script: string; labels: ReturnType<typeof extractGsapLabels> } | null =
+    null;
+
+  // fallow-ignore-next-line complexity
+  getElementTimings(): Record<HfId, ElementTimingSnapshot> {
+    const script = getGsapScript(this.parsed.document);
+
+    // Extract all addLabel("name", position) calls from the GSAP script (see cache note above).
+    let allLabels: ReturnType<typeof extractGsapLabels>;
+    if (script && this._gsapLabelCache?.script === script) {
+      allLabels = this._gsapLabelCache.labels;
+    } else {
+      allLabels = script ? extractGsapLabels(script) : [];
+      this._gsapLabelCache = script ? { script, labels: allLabels } : null;
+    }
+
+    const result: Record<HfId, ElementTimingSnapshot> = {};
+    const elements = this.getElements();
+    for (const el of elements) {
+      const domEl = resolveScoped(this.parsed.document, el.scopedId);
+      if (!domEl) continue;
+
+      const startStr = domEl.getAttribute("data-start");
+      const endStr = domEl.getAttribute("data-end");
+      const durationStr = domEl.getAttribute("data-duration");
+
+      // Same preference as handleSetTiming: prefer data-duration, fall back to end - start.
+      const start = startStr !== null ? parseFloat(startStr) : 0;
+      const durationAttr = durationStr !== null ? parseFloat(durationStr) : null;
+      const endAttr = endStr !== null ? parseFloat(endStr) : null;
+
+      let duration: number;
+      if (durationAttr !== null && Number.isFinite(durationAttr)) {
+        duration = durationAttr;
+      } else if (endAttr !== null && Number.isFinite(endAttr)) {
+        duration = endAttr - start;
+      } else {
+        // No timing info — skip non-timed elements.
+        continue;
+      }
+
+      const enterAt = Number.isFinite(start) ? start : 0;
+      const exitAt = enterAt + (Number.isFinite(duration) ? duration : 0);
+
+      // Labels whose position falls within [enterAt, exitAt] (end-inclusive: a
+      // label exactly at exitAt is treated as within the element's window).
+      const labels = allLabels
+        .filter(({ position }) => position >= enterAt && position <= exitAt)
+        .map(({ name }) => name);
+
+      result[el.scopedId] = { enterAt, exitAt, labels };
+    }
+
+    return result;
+  }
+
+  setElementTiming(
+    map: Record<HfId, { start?: number; duration?: number; trackIndex?: number }>,
+  ): void {
+    const entries = Object.entries(map);
+    if (entries.length === 0) return;
+
+    this.batch(() => {
+      for (const [id, timing] of entries) {
+        this.dispatch({ type: "setTiming", target: id, ...timing });
+      }
+    });
+  }
+
+  setHold(id: HfId, hold: ElasticHold): void {
+    this.dispatch({ type: "setHold", target: id, hold });
   }
 
   addGsapTween(target: HfId, tween: GsapTweenSpec): string {
@@ -148,6 +242,45 @@ class CompositionImpl implements Composition {
 
   removeGsapTween(animationId: string): void {
     this.dispatch({ type: "removeGsapTween", animationId });
+  }
+
+  addWithKeyframes(
+    targetSelector: string,
+    position: number,
+    duration: number,
+    keyframes: KeyframeSpec[],
+    ease?: string,
+  ): string {
+    const result = this._dispatch(
+      { type: "addWithKeyframes", targetSelector, position, duration, keyframes, ease },
+      ORIGIN_LOCAL,
+    );
+    return result.meta?.animationId ?? "";
+  }
+
+  replaceWithKeyframes(
+    animationId: string,
+    targetSelector: string,
+    position: number,
+    duration: number,
+    keyframes: KeyframeSpec[],
+    ease?: string,
+  ): string {
+    const result = this._dispatch(
+      {
+        type: "replaceWithKeyframes",
+        animationId,
+        targetSelector,
+        position,
+        duration,
+        keyframes,
+        ease,
+      },
+      ORIGIN_LOCAL,
+    );
+    // Position-derived IDs renumber after the remove — this is the NEW id, which
+    // may differ from the input animationId.
+    return result.meta?.animationId ?? "";
   }
 
   undo(): void {
@@ -269,7 +402,9 @@ class CompositionImpl implements Composition {
       const key = pathToKey(p.path);
       if (key !== null) {
         this.overrides[key] =
-          p.op === "remove" ? null : (p.value as string | number | boolean | null);
+          p.op === "remove"
+            ? null
+            : (p.value as string | number | boolean | Record<string, unknown> | null);
       }
     }
 
@@ -453,7 +588,9 @@ class CompositionImpl implements Composition {
       const key = pathToKey(p.path);
       if (key !== null) {
         this.overrides[key] =
-          p.op === "remove" ? null : (p.value as string | number | boolean | null);
+          p.op === "remove"
+            ? null
+            : (p.value as string | number | boolean | Record<string, unknown> | null);
       }
     }
 

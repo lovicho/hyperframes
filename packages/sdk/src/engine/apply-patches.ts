@@ -18,7 +18,8 @@ import {
   setGsapScript,
   setStyleSheet,
 } from "./model.js";
-import { keyToPath } from "./patches.js";
+import { keyToPath, stylePath } from "./patches.js";
+import { writeVariableDefault, clearVariableDefault } from "./variableModel.js";
 
 // ─── Path parser ────────────────────────────────────────────────────────────
 
@@ -76,6 +77,24 @@ function parsePath(path: string): ParsedPath | null {
   return null;
 }
 
+// ─── Variable JSON model helper ───────────────────────────────────────────────
+
+/**
+ * Apply a variable patch to `data-composition-variables`. A remove op (null)
+ * deletes the declaration's `default` key, restoring its "no authored default"
+ * state — the exact inverse of a first-set that added a default to a
+ * default-less variable, so undo of such a set round-trips. A value op upserts
+ * the matching declaration's `default`. No-ops when the attr/decl is absent.
+ * Shares the model logic with mutate.ts via ./variableModel.ts.
+ */
+function applyVariableDefault(document: Document, id: string, newDefault: unknown): void {
+  if (newDefault === null) {
+    clearVariableDefault(document, id);
+  } else {
+    writeVariableDefault(document, id, newDefault);
+  }
+}
+
 // ─── Patch application ───────────────────────────────────────────────────────
 
 /**
@@ -86,14 +105,26 @@ function parsePath(path: string): ParsedPath | null {
  */
 export function applyOverrideSet(parsed: ParsedDocument, overrides: OverrideSet): void {
   const patches: JsonPatchOp[] = [];
+  const rootId = findRoot(parsed.document)?.getAttribute("data-hf-id") ?? null;
   for (const [key, value] of Object.entries(overrides)) {
     const path = keyToPath(key);
     if (!path) continue;
     if (value === null) {
       patches.push({ op: "remove", path });
-      continue;
+    } else {
+      patches.push({ op: "replace", path, value });
     }
-    patches.push({ op: "replace", path, value });
+    // A scalar `var.{id}` override must also restore the `--{id}` CSS custom
+    // prop on the root. Current sessions persist a paired style override, but
+    // sets written before the model/CSS split only carry `var.{id}`; derive the
+    // CSS here so `var(--{id})` bindings rehydrate. Object (font/image) values
+    // are never CSS, so they are skipped.
+    if (rootId && key.startsWith("var.") && value !== null && typeof value !== "object") {
+      const cssPath = stylePath(rootId, `--${key.slice("var.".length)}`);
+      patches.push({ op: "replace", path: cssPath, value: String(value) });
+    } else if (rootId && key.startsWith("var.") && value === null) {
+      patches.push({ op: "remove", path: stylePath(rootId, `--${key.slice("var.".length)}`) });
+    }
   }
   applyPatchesToDocument(parsed, patches);
 }
@@ -151,6 +182,10 @@ function applyOne(parsed: ParsedDocument, patch: JsonPatchOp, p: ParsedPath): vo
       if (p.field === "start") {
         if (patch.op === "remove") el.removeAttribute("data-start");
         else el.setAttribute("data-start", String(patch.value));
+      } else if (p.field === "duration") {
+        // Patch value is the data-duration value — set directly.
+        if (patch.op === "remove") el.removeAttribute("data-duration");
+        else el.setAttribute("data-duration", String(patch.value));
       } else if (p.field === "end") {
         // Patch value is the absolute data-end time — set directly, no re-derivation.
         if (patch.op === "remove") el.removeAttribute("data-end");
@@ -195,14 +230,12 @@ function applyOne(parsed: ParsedDocument, patch: JsonPatchOp, p: ParsedPath): vo
     }
 
     case "variable": {
-      const root = findRoot(parsed.document);
-      if (!root || !p.id) return;
-      const cssVar = `--${p.id}`;
-      if (patch.op === "remove") {
-        setElementStyles(root, { [cssVar]: null });
-      } else {
-        setElementStyles(root, { [cssVar]: String(patch.value) });
-      }
+      if (!p.id) return;
+      // B1: update the JSON model (data-composition-variables) so
+      // getVariables() returns the correct value in both preview and render.
+      // CSS compat is handled by explicit style-path patches emitted by mutate.ts,
+      // so we do NOT write CSS here — the style case above handles those patches.
+      applyVariableDefault(parsed.document, p.id, patch.op === "remove" ? null : patch.value);
       break;
     }
 

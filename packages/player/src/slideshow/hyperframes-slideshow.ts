@@ -1,0 +1,755 @@
+import {
+  parseSlideshowManifest,
+  resolveSlideshow,
+  type ResolvedSlideshow,
+} from "@hyperframes/core/slideshow";
+import { SlideshowController, type PlayerPort } from "./SlideshowController";
+import { SlideshowChannel, buildPresenterLayout, formatElapsed } from "./slideshowPresenter";
+
+interface Hotspot {
+  id: string;
+  label: string;
+  target: string;
+  region?: { x: number; y: number; w: number; h: number };
+}
+
+interface ControllerLike {
+  next(): void;
+  prev(): void;
+  onChange(cb: () => void): () => void;
+  readonly counter: { index: number; total: number };
+  readonly breadcrumb: { id: string; label: string }[];
+  readonly currentSlide: { hotspots: Hotspot[]; notes?: string; sceneId?: string } | undefined;
+  readonly nextSlide: { sceneId: string; notes?: string } | null;
+  readonly position: { sequenceId: string; slideIndex: number; fragmentIndex: number };
+  readonly canPrev?: boolean;
+  readonly canNext?: boolean;
+  goToSlide?(index: number): void;
+  syncTo?(sequenceId: string, slideIndex: number, fragmentIndex: number): void;
+  enterBranch?(id: string): void;
+  back?(): void;
+  backToMain?(): void;
+  dispose?(): void;
+}
+
+type PlayerElement = HTMLElement & {
+  seek(t: number): void;
+  play(): void;
+  pause(): void;
+  readonly currentTime: number;
+  readonly ready: boolean;
+};
+
+function isPlayerElement(el: HTMLElement): el is PlayerElement {
+  return (
+    typeof (el as PlayerElement).seek === "function" &&
+    typeof (el as PlayerElement).play === "function" &&
+    typeof (el as PlayerElement).pause === "function"
+  );
+}
+
+// Injected once per document to avoid duplicating @keyframes across multiple elements.
+let _keyframesInjected = false;
+function injectKeyframesOnce(): void {
+  if (_keyframesInjected) return;
+  _keyframesInjected = true;
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes hf-hotspot-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.35), 0 4px 16px rgba(0,0,0,0.35); }
+      50%       { box-shadow: 0 0 0 8px rgba(255,255,255,0), 0 4px 20px rgba(0,0,0,0.45); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .hf-hotspot-pill { animation: none !important; }
+    }
+    /* Nav-button hover (replaces inline onmouseover/onmouseout — CSP-safe).
+       !important beats the inline base color set on each button. */
+    [data-hf-nav-cluster] button:hover {
+      background: rgba(255,255,255,0.12) !important;
+      color: #fff !important;
+    }
+    /* When muted, the speaker button stays dimmed on hover so the mute-state
+       affordance isn't erased (higher specificity than the rule above). */
+    [data-hf-muted] [data-hf-mute]:hover {
+      color: rgba(255,255,255,0.6) !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// Fullscreen glyphs (enter = expand corners, exit = collapse corners). Module-level
+// so onFsChange can swap just this glyph without re-rendering the whole chrome.
+const ENTER_FS_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`;
+const EXIT_FS_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/></svg>`;
+
+export class HyperframesSlideshow extends HTMLElement {
+  private controller: ControllerLike | null = null;
+  private offChange: (() => void) | null = null;
+  private chrome: HTMLDivElement | null = null;
+  private touchStartX = 0;
+  private touchStartY = 0;
+  private channel: SlideshowChannel | null = null;
+  private presenterStartMs: number | null = null;
+  private presenterInterval: ReturnType<typeof setInterval> | null = null;
+  private disconnected = false;
+  private initTimer: ReturnType<typeof setTimeout> | null = null;
+  private initInFlight = false;
+  private initGeneration = 0;
+  private _muted = false;
+
+  /** Whether audio is currently muted. Reflects `data-hf-muted` attribute. */
+  get muted(): boolean {
+    return this._muted;
+  }
+
+  /** Mode resolves from the `mode` attribute, falling back to the URL query
+   *  (?mode=audience) so the audience window opened by present() is detected. */
+  private resolveMode(): string | null {
+    const attr = this.getAttribute("mode");
+    if (attr) return attr;
+    try {
+      return new URLSearchParams(location.search).get("mode");
+    } catch {
+      return null;
+    }
+  }
+
+  // Observe the attributes the component reads so runtime toggles take effect.
+  static get observedAttributes(): string[] {
+    return ["sound", "mode"];
+  }
+
+  attributeChangedCallback(): void {
+    // Re-render once bound so a flipped `sound`/`mode` is reflected (mute button,
+    // audience-vs-presenter chrome). No-op before the controller binds.
+    if (this.controller) this.render();
+  }
+
+  connectedCallback(): void {
+    this.disconnected = false;
+    this.initInFlight = false;
+    this.initGeneration += 1;
+    this.tabIndex = 0;
+    // note: if the inner player iframe has keyboard focus, window keydown in the
+    // top document won't fire — that edge remains; this listener fixes the dominant
+    // case where the page loads and arrows should work without clicking the element.
+    window.addEventListener("keydown", this.onKey);
+    this.addEventListener("touchstart", this.onTouchStart, { passive: true });
+    this.addEventListener("touchend", this.onTouchEnd);
+    window.addEventListener("message", this.onMessage);
+    document.addEventListener("fullscreenchange", this.onFsChange);
+    this.initChannel();
+    // Defer player-dependent init to a macrotask so that child elements are
+    // parsed before we query for <hyperframes-player>. This matters when the
+    // bundle is loaded synchronously (e.g. <script src> in <head>), where
+    // connectedCallback fires while the parser is still inside the
+    // <hyperframes-slideshow> open tag — before its children exist. A microtask
+    // is NOT sufficient: during streamed parsing the children are appended in a
+    // later task, so a queued microtask still observes an empty subtree. A
+    // setTimeout(0) macrotask yields to the parser so the children land first.
+    this.initTimer = setTimeout(() => {
+      this.initTimer = null;
+      if (this.isConnected && !this.disconnected) void this.init();
+    }, 0);
+  }
+
+  disconnectedCallback(): void {
+    this.disconnected = true;
+    this.initGeneration += 1;
+    if (this.initTimer !== null) {
+      clearTimeout(this.initTimer);
+      this.initTimer = null;
+    }
+    window.removeEventListener("keydown", this.onKey);
+    this.removeEventListener("touchstart", this.onTouchStart);
+    this.removeEventListener("touchend", this.onTouchEnd);
+    window.removeEventListener("message", this.onMessage);
+    document.removeEventListener("fullscreenchange", this.onFsChange);
+    this.offChange?.();
+    this.offChange = null;
+    this.controller?.dispose?.();
+    this.controller = null;
+    this.chrome = null;
+    this.channel?.destroy();
+    this.channel = null;
+    if (this.presenterInterval !== null) {
+      clearInterval(this.presenterInterval);
+      this.presenterInterval = null;
+    }
+  }
+
+  /** Test seam: inject a controller without a live player. */
+  __setControllerForTest(c: ControllerLike): void {
+    this.bindController(c);
+  }
+
+  /**
+   * Opens an audience window and switches this element to presenter layout.
+   * Audience window URL: current page URL with `mode=audience` query param.
+   */
+  present(): void {
+    const sep = location.search ? "&" : "?";
+    // noopener,noreferrer: the audience window must not get a reference back to
+    // this window (it syncs over BroadcastChannel, not window.opener).
+    window.open(location.href + sep + "mode=audience", "_blank", "noopener,noreferrer");
+    this.setAttribute("data-hf-presenting", "true");
+    this.presenterStartMs = Date.now();
+    if (this.presenterInterval === null) {
+      this.presenterInterval = setInterval(() => this.updateElapsed(), 1000);
+    }
+    this.render();
+  }
+
+  /**
+   * Update only the elapsed readout. Re-rendering the whole chrome every second
+   * (the old behavior) rebuilt the nav buttons' DOM on each tick — they
+   * flickered and clicks landing mid-rebuild were dropped.
+   */
+  private updateElapsed(): void {
+    if (this.presenterStartMs === null) return;
+    const el = this.chrome?.querySelector("[data-hf-presenter-elapsed]");
+    if (el) {
+      el.textContent = formatElapsed(Math.floor((Date.now() - this.presenterStartMs) / 1000));
+    }
+  }
+
+  private initChannel(): void {
+    const mode = this.resolveMode();
+    if (mode === "audience") {
+      this.channel = new SlideshowChannel("audience", (msg) => {
+        if (!this.controller) return;
+        this.controller.syncTo?.(msg.sequenceId, msg.slideIndex, msg.fragmentIndex);
+      });
+    } else {
+      this.channel = new SlideshowChannel("presenter", () => {
+        // presenter channel does not receive; posting happens in bindController
+      });
+    }
+  }
+
+  // fallow-ignore-next-line complexity
+  private async init(): Promise<void> {
+    if (this.initInFlight) return;
+    this.initInFlight = true;
+    const gen = this.initGeneration;
+
+    try {
+      const playerEl = this.querySelector("hyperframes-player");
+      if (!playerEl || !(playerEl instanceof HTMLElement)) return;
+      if (!isPlayerElement(playerEl)) return;
+
+      await waitForReady(playerEl);
+
+      // Guard: if a disconnect or reconnect happened while waiting, bail out.
+      if (gen !== this.initGeneration) return;
+
+      const html = this.innerHTML;
+      let manifest: ReturnType<typeof parseSlideshowManifest>;
+      try {
+        manifest = parseSlideshowManifest(html);
+      } catch {
+        // Malformed island (e.g. bad JSON) — fail gracefully, no chrome.
+        return;
+      }
+      if (!manifest) return;
+
+      // Wait for scenes to be populated (the runtime "timeline" postMessage
+      // arrives ~1000ms after waitForReady resolves). Graceful fallback to []
+      // on timeout so explicit startTime/endTime slides still work.
+      const scenes = await waitForScenes(playerEl, 2500, () => gen !== this.initGeneration);
+
+      // Guard again in case we were disconnected or reconnected during the scenes wait.
+      if (gen !== this.initGeneration) return;
+
+      const { resolved, errors } = resolveSlideshow(manifest, scenes);
+      if (errors.length > 0) {
+        console.warn("[hyperframes-slideshow] manifest errors:", errors);
+      }
+      const cleaned = dropInvalidSlides(resolved);
+      if (cleaned.slides.length === 0 && manifest.slides.length > 0) {
+        console.error(
+          "[hyperframes-slideshow] no main-line slides resolved — the scene timeline may not have loaded in time, or sceneIds/timing are invalid:",
+          errors,
+        );
+      }
+
+      const port: PlayerPort = {
+        seek: (t) => playerEl.seek(t),
+        play: () => playerEl.play(),
+        pause: () => playerEl.pause(),
+        get currentTime() {
+          return playerEl.currentTime;
+        },
+        onTimeUpdate: (cb) => {
+          const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ currentTime: number }>).detail;
+            cb(detail.currentTime);
+          };
+          playerEl.addEventListener("timeupdate", handler);
+          return () => playerEl.removeEventListener("timeupdate", handler);
+        },
+      };
+
+      this.bindController(new SlideshowController(port, cleaned));
+
+      // Slow-iframe recovery: if the scene timeline hadn't posted yet (empty
+      // scenes → sceneId-based slides were dropped), re-init once when it finally
+      // arrives so those slides resolve instead of being permanently lost.
+      if (scenes.length === 0 && manifest.slides.length > 0) {
+        playerEl.addEventListener(
+          "scenes",
+          () => {
+            if (gen === this.initGeneration) void this.init();
+          },
+          { once: true },
+        );
+      }
+    } finally {
+      this.initInFlight = false;
+    }
+  }
+
+  private bindController(c: ControllerLike): void {
+    this.offChange?.();
+    this.controller?.dispose?.();
+    this.controller = c;
+    this.offChange = c.onChange(() => {
+      // Presenter posts position to channel on every change
+      if (this.resolveMode() !== "audience" && this.channel) {
+        this.channel.postPosition(c.position);
+      }
+      this.render();
+    });
+    // Post initial position if presenter
+    if (this.resolveMode() !== "audience" && this.channel) {
+      this.channel.postPosition(c.position);
+    }
+    this.render();
+  }
+
+  // fallow-ignore-next-line complexity
+  private onKey = (e: KeyboardEvent): void => {
+    if (!this.controller) return;
+    const target = e.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    ) {
+      return;
+    }
+    const active = document.activeElement;
+    const focused = active === this || this.contains(active);
+    // Arrows act even when nothing is focused (active === body/null) so a freshly
+    // loaded deck responds without a click; Space/Backspace have strong page-level
+    // defaults (scroll / history) so they only act when the deck actually has focus.
+    // When several decks share a page, drop the unfocused-convenience so a key
+    // doesn't drive every instance at once — only the focused deck responds.
+    const multiInstance = document.querySelectorAll("hyperframes-slideshow").length > 1;
+    const ambient = focused || (!multiInstance && (active === document.body || active === null));
+    if (e.key === "ArrowRight") {
+      if (!ambient) return;
+      this.controller.next();
+      e.preventDefault();
+    } else if (e.key === "ArrowLeft") {
+      if (!ambient) return;
+      this.controller.prev();
+      e.preventDefault();
+    } else if (e.key === " ") {
+      if (!focused) return;
+      this.controller.next();
+      e.preventDefault();
+    } else if (e.key === "Backspace") {
+      if (!focused) return;
+      this.controller.prev();
+      e.preventDefault();
+    } else if ((e.key === "f" || e.key === "F") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (!focused) return;
+      this.toggleFullscreen();
+      e.preventDefault();
+    }
+  };
+
+  // fallow-ignore-next-line complexity
+  private onMessage = (e: MessageEvent): void => {
+    // Audience mode is driven by BroadcastChannel; ignore embed postMessage nav.
+    if (this.resolveMode() === "audience") return;
+    const data = e.data as { type?: unknown; slideIndex?: unknown } | null;
+    if (!data || !this.controller) return;
+    if (data.type === "next") {
+      this.controller.next();
+    } else if (data.type === "prev") {
+      this.controller.prev();
+    } else if (data.type === "goto" && typeof data.slideIndex === "number") {
+      this.controller.goToSlide?.(data.slideIndex);
+    } else if (data.type === "back") {
+      this.controller.back?.();
+    }
+  };
+
+  private onTouchStart = (e: TouchEvent): void => {
+    const touch = e.touches[0];
+    if (touch) {
+      this.touchStartX = touch.clientX;
+      this.touchStartY = touch.clientY;
+    }
+  };
+
+  private onTouchEnd = (e: TouchEvent): void => {
+    if (!this.controller) return;
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+    const deltaX = touch.clientX - this.touchStartX;
+    const deltaY = touch.clientY - this.touchStartY;
+    // Require a dominant horizontal gesture: |deltaX| > 40 AND |deltaX| > |deltaY|
+    // so that diagonal page-scrolls do not accidentally trigger slide navigation.
+    if (Math.abs(deltaX) <= 40 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+    if (deltaX < 0) {
+      this.controller.next();
+    } else {
+      this.controller.prev();
+    }
+  };
+
+  // fallow-ignore-next-line complexity
+  private render(): void {
+    if (!this.controller) return;
+
+    if (this.resolveMode() === "audience") {
+      // Audience (viewer) window: no nav controls — but keep a fullscreen toggle
+      // so the presentation can fill the display.
+      const { counter } = this.controller;
+      this.paintChrome(this.buildNavCluster(counter, "28px", "fs-only"));
+      return;
+    }
+
+    if (this.getAttribute("data-hf-presenting") === "true") {
+      this.renderPresenter();
+      return;
+    }
+
+    const { counter, currentSlide } = this.controller;
+    if (!currentSlide) return;
+
+    // Hotspot pills: compact floating buttons anchored to the region's top-left,
+    // sized to content (not filling the region). The region x/y positions the pill;
+    // w/h are ignored for sizing (pill is content-sized). XSS: escHtml guards all
+    // user-supplied strings.
+    const hotspotsHtml = currentSlide.hotspots
+      .map((h) => {
+        const posStyle = h.region
+          ? `left:${h.region.x}%;top:${h.region.y}%;`
+          : "right:5%;bottom:18%;";
+        return `<button
+          class="hf-hotspot-pill"
+          data-hotspot-id="${escHtml(h.id)}"
+          data-hotspot-target="${escHtml(h.target)}"
+          type="button"
+          style="position:absolute;${posStyle}display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--hf-slideshow-accent,rgba(255,255,255,0.92));color:#111;border:none;border-radius:999px;font-size:13px;font-weight:600;letter-spacing:0.01em;cursor:pointer;pointer-events:auto;box-shadow:0 4px 16px rgba(0,0,0,0.35);animation:hf-hotspot-pulse 1.8s ease-in-out infinite;white-space:nowrap;"
+          aria-label="${escHtml(h.label)}"
+        ><span aria-hidden="true" style="font-size:14px;line-height:1;">⊕</span>${escHtml(h.label)}</button>`;
+      })
+      .join("");
+
+    this.paintChrome(hotspotsHtml + this.buildNavCluster(counter, "28px"));
+  }
+
+  /** Ensure the overlay chrome layer exists, set its content, and wire its buttons. */
+  private paintChrome(html: string): void {
+    injectKeyframesOnce(); // nav-button :hover + hotspot keyframes (CSP-safe, once per doc)
+    if (!this.chrome) {
+      this.chrome = document.createElement("div");
+      this.chrome.setAttribute("data-hf-chrome", "");
+      this.appendChild(this.chrome);
+    }
+    this.chrome.style.cssText = "position:absolute;inset:0;pointer-events:none;z-index:10;";
+    this.chrome.innerHTML = html;
+    this.wireChromeButtons();
+  }
+
+  // Builds the nav cluster ([mute?] [prev] counter [next] | [fullscreen]) as a
+  // floating capsule. `bottomCss` positions it (normal view: "28px"; presenter
+  // view: above the notes panel). Reused by render() and renderPresenter().
+  // fallow-ignore-next-line complexity
+  private buildNavCluster(
+    counter: { index: number; total: number },
+    bottomCss: string,
+    variant: "full" | "fs-only" = "full",
+  ): string {
+    const c = this.controller;
+    if (!c) return "";
+    const showPrev = c.canPrev !== false;
+    const showNext = c.canNext !== false;
+    const showSound = this.hasAttribute("sound");
+    const btnStyle =
+      "display:flex;align-items:center;justify-content:center;width:34px;height:34px;background:transparent;border:none;border-radius:999px;color:rgba(255,255,255,0.85);font-size:16px;cursor:pointer;transition:background 0.15s,color 0.15s;padding:0;";
+    const speakerSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+    const speakerMutedSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
+    const muteBtnHtml = showSound
+      ? `<button
+          data-hf-mute
+          type="button"
+          aria-label="${this._muted ? "Unmute" : "Mute"}"
+          aria-pressed="${this._muted ? "true" : "false"}"
+          style="${btnStyle}${this._muted ? "color:rgba(255,255,255,0.45);" : ""}"
+        >${this._muted ? speakerMutedSvg : speakerSvg}</button>`
+      : "";
+    const prevBtnHtml = showPrev
+      ? `<button
+          data-hf-prev
+          type="button"
+          aria-label="Previous slide"
+          style="${btnStyle}"        >&#8249;</button>`
+      : "";
+    const nextBtnHtml = showNext
+      ? `<button
+          data-hf-next
+          type="button"
+          aria-label="Next slide"
+          style="${btnStyle}"        >&#8250;</button>`
+      : "";
+    const isFs = document.fullscreenElement === this;
+    const fsBtnHtml = `<button
+          data-hf-fullscreen
+          type="button"
+          aria-label="${isFs ? "Exit full screen" : "Full screen"}"
+          aria-pressed="${isFs ? "true" : "false"}"
+          style="${btnStyle}"        >${isFs ? EXIT_FS_SVG : ENTER_FS_SVG}</button>`;
+    // Audience/viewer: only the fullscreen control (no navigation).
+    if (variant === "fs-only") {
+      return `
+      <div
+        data-hf-nav-cluster
+        style="position:absolute;bottom:${bottomCss};right:32px;display:inline-flex;align-items:center;background:rgba(20,20,22,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.12);border-radius:999px;box-shadow:0 4px 24px rgba(0,0,0,0.45);padding:4px;pointer-events:auto;"
+      >${fsBtnHtml}</div>`;
+    }
+    const counterPadLeft = showPrev ? "4px" : "10px";
+    const counterPadRight = showNext ? "4px" : "10px";
+    return `
+      <div
+        data-hf-nav-cluster
+        style="position:absolute;bottom:${bottomCss};right:32px;display:inline-flex;align-items:center;gap:2px;background:rgba(20,20,22,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.12);border-radius:999px;box-shadow:0 4px 24px rgba(0,0,0,0.45);padding:4px;pointer-events:auto;"
+      >
+        ${muteBtnHtml}
+        ${showSound ? `<span aria-hidden="true" style="width:1px;height:20px;background:rgba(255,255,255,0.12);margin:0 2px;flex-shrink:0;"></span>` : ""}
+        ${prevBtnHtml}
+        <span
+          data-hf-counter
+          aria-label="Slide ${counter.index} of ${counter.total}"
+          style="min-width:46px;text-align:center;color:rgba(255,255,255,0.9);font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;letter-spacing:0.02em;padding:0 ${counterPadRight} 0 ${counterPadLeft};user-select:none;"
+        >${counter.index}&thinsp;/&thinsp;${counter.total}</span>
+        ${nextBtnHtml}
+        <span aria-hidden="true" style="width:1px;height:20px;background:rgba(255,255,255,0.12);margin:0 2px;flex-shrink:0;"></span>
+        ${fsBtnHtml}
+      </div>`;
+  }
+
+  private wireChromeButtons(): void {
+    const chrome = this.chrome;
+    if (!chrome) return;
+    const muteBtn = chrome.querySelector("[data-hf-mute]");
+    const prevBtn = chrome.querySelector("[data-hf-prev]");
+    const nextBtn = chrome.querySelector("[data-hf-next]");
+    if (muteBtn) muteBtn.addEventListener("click", () => this.toggleMute());
+    if (prevBtn) prevBtn.addEventListener("click", () => this.controller?.prev());
+    if (nextBtn) nextBtn.addEventListener("click", () => this.controller?.next());
+    const fsBtn = chrome.querySelector("[data-hf-fullscreen]");
+    if (fsBtn) fsBtn.addEventListener("click", () => this.toggleFullscreen());
+    for (const btn of chrome.querySelectorAll("[data-hotspot-id]")) {
+      const target = btn.getAttribute("data-hotspot-target") ?? "";
+      btn.addEventListener("click", () => this.controller?.enterBranch?.(target));
+    }
+  }
+
+  private onFsChange = (): void => {
+    // Swap only the fullscreen glyph + label — re-rendering the whole chrome here
+    // would rebuild every nav button on each fullscreen toggle.
+    const btn = this.chrome?.querySelector("[data-hf-fullscreen]");
+    if (!btn) return;
+    const isFs = document.fullscreenElement === this;
+    btn.innerHTML = isFs ? EXIT_FS_SVG : ENTER_FS_SVG;
+    btn.setAttribute("aria-label", isFs ? "Exit full screen" : "Full screen");
+    btn.setAttribute("aria-pressed", isFs ? "true" : "false");
+  };
+
+  private toggleFullscreen(): void {
+    if (document.fullscreenElement === this) {
+      void document.exitFullscreen().catch(() => {});
+    } else {
+      void this.requestFullscreen().catch(() => {});
+    }
+  }
+
+  private toggleMute(): void {
+    this._muted = !this._muted;
+    if (this._muted) {
+      this.setAttribute("data-hf-muted", "");
+    } else {
+      this.removeAttribute("data-hf-muted");
+    }
+    this.dispatchEvent(
+      new CustomEvent("hf-sound", {
+        detail: { muted: this._muted },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    // Re-render to flip the glyph.
+    this.render();
+  }
+
+  private renderPresenter(): void {
+    if (!this.controller) return;
+    const { counter, currentSlide, nextSlide } = this.controller;
+    if (!currentSlide) return;
+
+    const elapsedSec =
+      this.presenterStartMs !== null ? Math.floor((Date.now() - this.presenterStartMs) / 1000) : 0;
+
+    // Pin the live slide to the TOP and reserve the bottom 32% for the notes
+    // panel. The player contains the composition, so the FULL slide stays visible
+    // (letterboxed) at any width — its bottom is never hidden behind the panel —
+    // and it re-fits to the top region on window resize.
+    const playerEl = this.querySelector("hyperframes-player");
+    if (playerEl instanceof HTMLElement) {
+      playerEl.style.top = "0";
+      playerEl.style.bottom = "32%";
+      playerEl.style.height = "auto";
+    }
+
+    // Full-overlay chrome (pointer-events:none); the notes panel and nav cluster
+    // are the only interactive children.
+    this.paintChrome(
+      buildPresenterLayout({
+        notes: currentSlide.notes ?? "",
+        nextText: nextPanelText(nextSlide),
+        counterText: `${counter.index} / ${counter.total}`,
+        elapsedText: formatElapsed(elapsedSec),
+        hotspots: currentSlide.hotspots,
+      }) + this.buildNavCluster(counter, "calc(32% + 18px)"),
+    );
+  }
+}
+
+function nextPanelText(slide: { sceneId: string; notes?: string } | null): string {
+  if (slide === null) return "End of sequence";
+  const firstLine = slide.notes != null ? (slide.notes.split("\n")[0] ?? "") : "";
+  return firstLine.length > 0
+    ? `${escHtml(slide.sceneId)}: ${escHtml(firstLine)}`
+    : escHtml(slide.sceneId);
+}
+
+function readScenes(player: HTMLElement): { id: string; start: number; duration: number }[] {
+  if ("scenes" in player && Array.isArray((player as { scenes: unknown }).scenes)) {
+    return (player as { scenes: { id: string; start: number; duration: number }[] }).scenes;
+  }
+  return [];
+}
+
+const WAIT_FOR_READY_TIMEOUT_MS = 5000;
+
+function waitForReady(player: HTMLElement & { ready?: boolean }): Promise<void> {
+  if (player.ready === true) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const handler = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      resolve();
+    };
+    player.addEventListener("ready", handler, { once: true });
+    timer = setTimeout(() => {
+      player.removeEventListener("ready", handler);
+      resolve();
+    }, WAIT_FOR_READY_TIMEOUT_MS);
+  });
+}
+
+/**
+ * Polls `player.scenes` until at least one scene is present, then resolves
+ * with the scenes array. Resolves with `[]` if no scenes appear within
+ * `timeoutMs` (graceful: explicit startTime/endTime slides still work).
+ *
+ * Avoids Date.now(): counts poll iterations instead (100ms per iteration).
+ *
+ * `isCancelled` is checked before each poll iteration; if it returns true
+ * the promise resolves with `[]` immediately so the caller can bail out.
+ */
+function waitForScenes(
+  player: HTMLElement,
+  timeoutMs: number,
+  isCancelled: () => boolean = () => false,
+): Promise<{ id: string; start: number; duration: number }[]> {
+  const initial = readScenes(player);
+  if (initial.length > 0) return Promise.resolve(initial);
+
+  const maxIterations = Math.ceil(timeoutMs / 100);
+
+  return new Promise((resolve) => {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let iterations = 0;
+
+    const finish = (val: { id: string; start: number; duration: number }[]): void => {
+      if (done) return;
+      done = true;
+      if (timer !== null) clearTimeout(timer);
+      player.removeEventListener("scenes", onScenes);
+      resolve(val);
+    };
+    const onScenes = (): void => {
+      if (isCancelled()) return finish([]);
+      const s = readScenes(player);
+      if (s.length > 0) finish(s);
+    };
+    const poll = (): void => {
+      if (done) return;
+      if (isCancelled()) return finish([]);
+      const cur = readScenes(player);
+      if (cur.length > 0) return finish(cur);
+      iterations += 1;
+      if (iterations >= maxIterations) return finish([]);
+      timer = setTimeout(poll, 100);
+    };
+
+    player.addEventListener("scenes", onScenes);
+    timer = setTimeout(poll, 100);
+  });
+}
+
+/**
+ * Returns a new ResolvedSlideshow with zero-duration (end <= start) slides
+ * removed from the main slide list and every sequence's slide list.
+ *
+ * Valid manifests never produce zero-duration slides — this only drops
+ * phantom slides created from partially-specified refs whose scene is absent.
+ *
+ * Exported as a seam for unit testing.
+ */
+export function dropInvalidSlides(show: ResolvedSlideshow): ResolvedSlideshow {
+  const validSlide = (s: { start: number; end: number }): boolean => s.end > s.start;
+
+  const slides = show.slides.filter(validSlide);
+
+  const sequences: ResolvedSlideshow["sequences"] = {};
+  for (const [id, seq] of Object.entries(show.sequences)) {
+    sequences[id] = { ...seq, slides: seq.slides.filter(validSlide) };
+  }
+
+  return { slides, sequences };
+}
+
+function escHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+if (!customElements.get("hyperframes-slideshow")) {
+  customElements.define("hyperframes-slideshow", HyperframesSlideshow);
+}

@@ -7,7 +7,15 @@
  * Phase 3b (parser-backed) will add setClassStyle + 7 GSAP ops as additional handlers.
  */
 
-import type { CanResult, EditOp, GsapTweenSpec, HfId, JsonPatchOp } from "../types.js";
+import type {
+  CanResult,
+  EditOp,
+  FontValue,
+  GsapTweenSpec,
+  HfId,
+  ImageValue,
+  JsonPatchOp,
+} from "../types.js";
 import type { ParsedDocument } from "./model.js";
 import {
   resolveScoped,
@@ -37,14 +45,17 @@ import {
   styleSheetPath,
   scalarChange,
   scalarDelete,
+  valueChange,
   patchAdd,
   patchRemove,
 } from "./patches.js";
 import { upsertCssRule } from "./cssWriter.js";
+import { mintHfId, EXCLUDED_TAGS } from "@hyperframes/core/hf-ids";
 import { parseGsapScriptAcornForWrite } from "@hyperframes/core/gsap-parser-acorn";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import {
   addAnimationToScript,
+  addAnimationWithKeyframesToScript,
   updateAnimationInScript,
   removeAnimationFromScript,
   removePropertyFromAnimation,
@@ -64,11 +75,17 @@ import {
   unrollDynamicAnimations,
 } from "@hyperframes/core/gsap-writer-acorn";
 import { deriveKeyframeBackfillDefaults } from "./keyframeBackfill.js";
+import { readVariableDefault, writeVariableDefault } from "./variableModel.js";
+import {
+  URI_BEARING_ATTRS,
+  DANGEROUS_URI_SCHEMES,
+  DANGEROUS_DATA_URI,
+} from "@hyperframes/core/html-attr-safety";
 
 export interface MutationResult {
   forward: JsonPatchOp[];
   inverse: JsonPatchOp[];
-  meta?: { animationId?: string };
+  meta?: { animationId?: string; newId?: string };
 }
 
 const EMPTY: MutationResult = { forward: [], inverse: [] };
@@ -88,18 +105,6 @@ const RESERVED_ATTRS = new Set([
   "data-hold-start",
   "data-hold-end",
   "data-hold-fill",
-]);
-
-const DANGEROUS_URI_SCHEMES = /^(?:javascript|vbscript):/i;
-const DANGEROUS_DATA_URI = /^data\s*:\s*text\/html/i;
-const URI_BEARING_ATTRS = new Set([
-  "src",
-  "href",
-  "action",
-  "formaction",
-  "poster",
-  "srcset",
-  "xlink:href",
 ]);
 
 function validateSetAttribute(name: string, value: string | null): void {
@@ -218,11 +223,24 @@ function applyArcPathOp(parsed: ParsedDocument, op: EditOp): MutationResult | un
   }
 }
 
+function applyGsapWithKeyframesOp(parsed: ParsedDocument, op: EditOp): MutationResult | undefined {
+  switch (op.type) {
+    case "addWithKeyframes":
+      return handleAddWithKeyframes(parsed, op);
+    case "replaceWithKeyframes":
+      return handleReplaceWithKeyframes(parsed, op);
+    default:
+      return undefined;
+  }
+}
+
 function applyGsapOp(parsed: ParsedDocument, op: EditOp): MutationResult | undefined {
   const kf = applyGsapKeyframeOp(parsed, op);
   if (kf !== undefined) return kf;
   const arc = applyArcPathOp(parsed, op);
   if (arc !== undefined) return arc;
+  const wkf = applyGsapWithKeyframesOp(parsed, op);
+  if (wkf !== undefined) return wkf;
   switch (op.type) {
     case "addGsapTween":
       return handleAddGsapTween(parsed, op.target, op.tween);
@@ -261,6 +279,8 @@ export function applyOp(parsed: ParsedDocument, op: EditOp): MutationResult {
       return handleMoveElement(parsed, targets(op.target), op.x, op.y);
     case "removeElement":
       return handleRemoveElement(parsed, targets(op.target));
+    case "addElement":
+      return handleAddElement(parsed, op.parent, op.index, op.html);
     case "reorderElements":
       return handleReorderElements(parsed, op.entries);
     case "setCompositionMetadata":
@@ -610,6 +630,105 @@ function handleRemoveElement(parsed: ParsedDocument, ids: HfId[]): MutationResul
   return result;
 }
 
+// ─── addElement handler ───────────────────────────────────────────────────────
+
+/**
+ * Resolve all existing hf-ids in the document into `assigned` so that
+ * mintHfId cannot issue an id that already exists in the composition.
+ */
+function collectDocumentHfIds(document: Document): Set<string> {
+  const assigned = new Set<string>();
+  for (const el of Array.from(document.querySelectorAll("[data-hf-id]"))) {
+    const id = el.getAttribute("data-hf-id");
+    if (id) assigned.add(id);
+  }
+  return assigned;
+}
+
+/**
+ * Stamp data-hf-id onto every un-stamped element in `root` and its
+ * descendants, minting ids against `assigned` (the live document's id set).
+ * Returns the minted id of `root` (or its existing id if already stamped).
+ */
+function mintFragmentIds(root: Element, assigned: Set<string>): string {
+  if (!root.getAttribute("data-hf-id") && !EXCLUDED_TAGS.has(root.tagName.toLowerCase())) {
+    root.setAttribute("data-hf-id", mintHfId(root, assigned));
+  }
+  for (const el of Array.from(root.querySelectorAll("*"))) {
+    if (EXCLUDED_TAGS.has(el.tagName.toLowerCase())) continue;
+    if (el.getAttribute("data-hf-id")) continue; // pinned
+    el.setAttribute("data-hf-id", mintHfId(el, assigned));
+  }
+  return root.getAttribute("data-hf-id") ?? "";
+}
+
+/**
+ * Insert an HTML fragment (single-root) as a child of `parent` at `index`.
+ * Mints ids against the LIVE document's existing id set so new ids can never
+ * collide with elements already in the composition. Returns the minted root id
+ * via result.meta.newId — mirrors the `animationId` pattern in addGsapTween.
+ *
+ * Inverse = patchRemove of the new element's path; mirrors handleRemoveElement's
+ * inverse = patchAdd. Forward/inverse are thus symmetric with that handler.
+ */
+/**
+ * Parse an HTML fragment in the target document and return its single root
+ * element, or null when it is empty, multi-root, or contains a <script>.
+ * The dispatch path skips validateOp, so these guards are re-enforced here:
+ * never insert raw <script>, never silently drop extra roots.
+ */
+function parseInsertableFragment(document: Document, html: string): Element | null {
+  // Same temp-div approach as apply-patches.ts to avoid cross-document issues.
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  if (tmp.querySelector("script")) return null;
+  const node = tmp.firstElementChild;
+  if (!node || node.nextElementSibling) return null;
+  return node;
+}
+
+function handleAddElement(
+  parsed: ParsedDocument,
+  parent: HfId | null,
+  index: number,
+  html: string,
+): MutationResult {
+  // Resolve parent element (null → document body). Narrow rather than assert:
+  // _dispatch does not run validateOp, so a bad parent id must not crash here.
+  const parentEl =
+    parent === null
+      ? ((parsed.document as Document & { body?: Element | null }).body ?? null)
+      : resolveScoped(parsed.document, parent);
+  if (!parentEl) return EMPTY;
+
+  const node = parseInsertableFragment(parsed.document, html);
+  if (!node) return EMPTY;
+
+  // Mint ids against the LIVE doc's existing id set (the #1 landmine — a fresh
+  // ensureHfIds(fragment) is blind to existing doc ids and can collide).
+  // Order: mint → capture outerHTML → insert → build patch (id needed for path).
+  const assigned = collectDocumentHfIds(parsed.document);
+  const newId = mintFragmentIds(node, assigned);
+  const stampedHtml = node.outerHTML;
+
+  // Insert at `index` — append if index >= childCount (RFC-6902 insert semantics).
+  const ref = Array.from(parentEl.children)[index] ?? null;
+  parentEl.insertBefore(node, ref);
+
+  // parentId for the inverse/replay patch: preserve the caller's id verbatim
+  // (scoped "hf-host/hf-leaf" path or composition id), not the bare data-hf-id —
+  // apply-patches resolves it via findById→resolveScoped, so dropping the host
+  // prefix would re-insert under the wrong (canonical) parent on redo/replay.
+  const parentId = parent;
+
+  const path = elementPath(newId);
+  return {
+    forward: [patchAdd(path, { html: stampedHtml, parentId, siblingIndex: index })],
+    inverse: [patchRemove(path)],
+    meta: { newId },
+  };
+}
+
 function handleReorderElements(
   parsed: ParsedDocument,
   entries: Array<{ target: HfId; zIndex: number }>,
@@ -680,23 +799,66 @@ function handleSetCompositionMetadata(
   return result;
 }
 
+// ─── Variable JSON model helpers ─────────────────────────────────────────────
+// readVariableDefault / writeVariableDefault now live in ./variableModel.ts,
+// shared with the patch-replay path (apply-patches.ts) so the model shape can't
+// diverge between forward mutation and replay.
+
+/**
+ * True when the value is a FontValue or ImageValue object
+ * (object-valued; must NOT be written as a CSS custom property).
+ */
+function isObjectVariableValue(
+  value: string | number | boolean | FontValue | ImageValue,
+): value is FontValue | ImageValue {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function handleSetVariableValue(
   parsed: ParsedDocument,
   id: string,
-  value: string | number | boolean,
+  value: string | number | boolean | FontValue | ImageValue,
 ): MutationResult {
   const root = findRoot(parsed.document);
   if (!root) return EMPTY;
 
+  const modelPath = variablePath(id);
+  const oldVarDefault = readVariableDefault(parsed.document, id);
+
+  if (isObjectVariableValue(value)) {
+    // Object values (font / image): write to JSON model only — objects are not
+    // valid CSS custom property values (LOCKED §7).
+    writeVariableDefault(parsed.document, id, value);
+    const p = valueChange(modelPath, oldVarDefault ?? null, value);
+    return { forward: [p.forward], inverse: [p.inverse] };
+  }
+
+  // Scalar values: update the JSON model (B1 — drives the runtime) and also
+  // keep the CSS custom prop as secondary / compat for compositions that
+  // CSS-bind directly to --{id}.
   const cssVar = `--${id}`;
+  const rootId = root.getAttribute("data-hf-id");
   const oldStyles = getElementStyles(root);
-  const oldValue = oldStyles[cssVar] ?? null;
+  const oldCssValue = oldStyles[cssVar] ?? null;
   const newVal = String(value);
   setElementStyles(root, { [cssVar]: newVal });
+  writeVariableDefault(parsed.document, id, value);
 
-  const path = variablePath(id);
-  const p = scalarChange(path, oldValue, newVal);
-  return { forward: [p.forward], inverse: [p.inverse] };
+  // Emit explicit patches for both the JSON model (canonical) and the CSS compat
+  // prop. Keeping them separate means apply-patches.ts can handle each path type
+  // purely (variable path → model only; style path → CSS only), so inverse patches
+  // correctly restore the exact pre-call state without CSS-side-effect ambiguity.
+  const modelP = valueChange(modelPath, oldVarDefault ?? null, value);
+  const forward: JsonPatchOp[] = [modelP.forward];
+  const inverse: JsonPatchOp[] = [modelP.inverse];
+
+  if (rootId) {
+    const cssPatch = scalarChange(stylePath(rootId, cssVar), oldCssValue, newVal);
+    forward.push(cssPatch.forward);
+    inverse.push(cssPatch.inverse);
+  }
+
+  return { forward, inverse };
 }
 
 // ─── GSAP selector helpers ───────────────────────────────────────────────────
@@ -742,6 +904,65 @@ function cascadeRemoveAnimations(script: string, id: HfId): string {
     if (next === current) return current; // guard against a non-removing match
     current = next;
   }
+}
+
+// ─── addWithKeyframes / replaceWithKeyframes handlers ────────────────────────
+
+function handleAddWithKeyframes(
+  parsed: ParsedDocument,
+  op: Extract<EditOp, { type: "addWithKeyframes" }>,
+): MutationResult {
+  const script = getGsapScript(parsed.document);
+  if (!script) throw new Error("No GSAP script block found in the composition.");
+  // Dispatch skips validateOp — re-enforce the empty-keyframes guard here so we
+  // never emit a degenerate `keyframes: {}` tween.
+  if (op.keyframes.length === 0) return EMPTY;
+  const { script: newScript, id: animationId } = addAnimationWithKeyframesToScript(
+    script,
+    op.targetSelector,
+    op.position,
+    op.duration,
+    op.keyframes,
+    op.ease,
+  );
+  if (!animationId) return EMPTY;
+  setGsapScript(parsed.document, newScript);
+  return { ...gsapScriptChange(script, newScript), meta: { animationId } };
+}
+
+function handleReplaceWithKeyframes(
+  parsed: ParsedDocument,
+  op: Extract<EditOp, { type: "replaceWithKeyframes" }>,
+): MutationResult {
+  const script = getGsapScript(parsed.document);
+  if (!script) throw new Error("No GSAP script block found in the composition.");
+  if (op.keyframes.length === 0) return EMPTY;
+  // #11: tween IDs are position-derived and re-point after any structural edit,
+  // so a stale `animationId` can resolve to a DIFFERENT tween. Require the
+  // located animation to still target the selector the caller expects; if it is
+  // absent or now points at another element, bail rather than silently replace
+  // the wrong tween. (validateOp's gsapAnimationMissing only catches absent ids.)
+  const located = locateGsapAnimation(parsed, op.animationId);
+  if (!located || located.animation.targetSelector !== op.targetSelector) return EMPTY;
+  // Step 1: remove the existing tween. Position-derived IDs renumber, so the
+  // inverse patch restores the full GSAP script rather than trying to re-insert
+  // by ID (handled by the coarse gsapScriptChange patch pair).
+  const afterRemove = removeAnimationFromScript(script, op.animationId);
+  // Defense in depth: if the id resolved to nothing the script is unchanged —
+  // bail rather than degrade the replace into a plain add (duplicate tween).
+  if (afterRemove === script) return EMPTY;
+  // Step 2: insert the replacement keyframed tween.
+  const { script: newScript, id: animationId } = addAnimationWithKeyframesToScript(
+    afterRemove,
+    op.targetSelector,
+    op.position,
+    op.duration,
+    op.keyframes,
+    op.ease,
+  );
+  if (!animationId) return EMPTY;
+  setGsapScript(parsed.document, newScript);
+  return { ...gsapScriptChange(script, newScript), meta: { animationId } };
 }
 
 // ─── setClassStyle handler ────────────────────────────────────────────────────
@@ -1208,6 +1429,30 @@ export function validateOp(parsed: ParsedDocument, op: EditOp): CanResult {
         );
       return CAN_OK;
     }
+    case "addElement": {
+      if (op.parent !== null && resolveScoped(parsed.document, op.parent) === null)
+        return canErr(
+          "E_TARGET_NOT_FOUND",
+          `Parent element not found: "${op.parent}".`,
+          "Verify the parent id against comp.getElements() or comp.find().",
+        );
+      if (op.index < 0) return canErr("E_INVALID_ARGS", `index must be >= 0 (got ${op.index}).`);
+      if (!op.html || op.html.trim().length === 0)
+        return canErr("E_INVALID_HTML", "html must not be empty.");
+      // Parse to check for <script> and zero-element fragments.
+      // Use the same temp-div pattern as apply-patches.ts for consistency.
+      const tmp = parsed.document.createElement("div");
+      tmp.innerHTML = op.html;
+      if (tmp.firstElementChild === null)
+        return canErr("E_INVALID_HTML", "html parses to zero element nodes.");
+      if (tmp.querySelector("script") !== null)
+        return canErr(
+          "E_INVALID_HTML",
+          "<script> elements are not permitted in addElement html.",
+          "GSAP is managed by the composition's single script block; add tweens via addGsapTween.",
+        );
+      return CAN_OK;
+    }
     case "reorderElements": {
       if (op.entries.length === 0) return CAN_OK;
       const missing = op.entries
@@ -1274,6 +1519,29 @@ export function validateOp(parsed: ParsedDocument, op: EditOp): CanResult {
     case "deleteAllForSelector":
     case "removeLabel":
       return gsapScriptMissing(parsed) ?? CAN_OK;
+    case "addWithKeyframes":
+      return (
+        gsapScriptMissing(parsed) ??
+        (op.keyframes.length === 0
+          ? canErr(
+              "E_INVALID_ARGS",
+              "addWithKeyframes requires at least one keyframe.",
+              "An empty keyframe list would create an animation with no keyframes.",
+            )
+          : CAN_OK)
+      );
+    case "replaceWithKeyframes":
+      return (
+        gsapScriptMissing(parsed) ??
+        gsapAnimationMissing(parsed, op.animationId) ??
+        (op.keyframes.length === 0
+          ? canErr(
+              "E_INVALID_ARGS",
+              "replaceWithKeyframes requires at least one keyframe.",
+              "An empty keyframe list would create an animation with no keyframes.",
+            )
+          : CAN_OK)
+      );
     case "unrollDynamicAnimations":
       return (
         gsapScriptMissing(parsed) ??

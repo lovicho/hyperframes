@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   changelogArtifacts,
   compareSemver,
+  findBlockingTags,
   findUnexpectedChanges,
   isPrerelease,
   parseReleaseOptions,
@@ -74,6 +75,30 @@ describe("set-version release options", () => {
       "releases/v1.2.3.md",
       "docs/changelog.mdx#HyperFrames v1.2.3",
     ]);
+  });
+});
+
+describe("tag-monotonicity guard", () => {
+  it("blocks a higher tag that is reachable from HEAD", () => {
+    assert.deepEqual(
+      findBlockingTags(["0.6.112", "0.7.0"], "0.6.113", () => true),
+      ["0.7.0"],
+    );
+  });
+
+  it("ignores a higher tag that is not reachable from HEAD (orphan)", () => {
+    // v1.0.3 is higher but lives on a dead branch — not an ancestor of HEAD.
+    assert.deepEqual(
+      findBlockingTags(["0.6.112", "1.0.3"], "0.6.113", (t) => t !== "1.0.3"),
+      [],
+    );
+  });
+
+  it("ignores lower-or-equal tags regardless of reachability", () => {
+    assert.deepEqual(
+      findBlockingTags(["0.6.112", "0.6.113"], "0.6.113", () => true),
+      [],
+    );
   });
 });
 

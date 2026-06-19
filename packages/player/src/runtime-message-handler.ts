@@ -15,6 +15,20 @@ import type { ShaderTransitionState } from "./shader-options.js";
 
 const FPS = 30;
 
+type SceneRecord = { id: string; start: number; duration: number };
+
+function extractScenes(raw: unknown): SceneRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (s): s is SceneRecord =>
+      typeof s === "object" &&
+      s !== null &&
+      typeof (s as Record<string, unknown>)["id"] === "string" &&
+      typeof (s as Record<string, unknown>)["start"] === "number" &&
+      typeof (s as Record<string, unknown>)["duration"] === "number",
+  );
+}
+
 export interface MessageHandlerCallbacks extends PlaybackStateCallbacks {
   getPlaybackState: () => PlaybackState;
   setPlaybackState: (next: PlaybackState) => void;
@@ -27,8 +41,11 @@ export interface MessageHandlerCallbacks extends PlaybackStateCallbacks {
    *  uses it to replay current bridge state (mute, volume, playback rate) so
    *  control messages sent before the iframe's listener registered aren't lost. */
   onRuntimeReady: () => void;
+  /** Called with the scene list whenever a "timeline" message is received. */
+  setScenes: (scenes: SceneRecord[]) => void;
 }
 
+// fallow-ignore-next-line complexity
 export function handleRuntimeMessage(
   event: MessageEvent,
   frameWindow: Window | null,
@@ -90,6 +107,7 @@ export function handleRuntimeMessage(
       callbacks.setPlaybackState({ ...pb, duration });
       callbacks.updateControlsTime(pb.currentTime, duration);
     }
+    callbacks.setScenes(extractScenes(data["scenes"]));
     return;
   }
 

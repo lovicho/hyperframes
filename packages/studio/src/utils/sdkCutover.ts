@@ -8,6 +8,7 @@ import { trackStudioEvent } from "./studioTelemetry";
 import { markSelfWrite } from "../hooks/sdkSelfWriteRegistry";
 import { patchOpsToSdkEditOps } from "./sdkOpMapping";
 import { recordResolverParity, recordAnimationResolverParity } from "./sdkResolverShadow";
+import { isAllowedHtmlAttribute, isSafeAttributeValue } from "./htmlAttrSafety";
 
 const CUTOVER_OP_TYPES = new Set<PatchOperation["type"]>([
   "inline-style",
@@ -52,6 +53,54 @@ function mapsToReservedAttr(op: PatchOperation): boolean {
   return name !== null && RESERVED_CUTOVER_ATTRS.has(name.toLowerCase());
 }
 
+// ─── html-attribute safety ───────────────────────────────────────────────────
+
+function hasUnsafeHtmlAttributeOp(ops: PatchOperation[]): boolean {
+  return ops.some(
+    (op) =>
+      op.type === "html-attribute" &&
+      (!isAllowedHtmlAttribute(op.property) ||
+        (op.value !== null && !isSafeAttributeValue(op.property, op.value))),
+  );
+}
+
+function hasTextContentOp(ops: PatchOperation[]): boolean {
+  return ops.some((op) => op.type === "text-content");
+}
+
+function targetChildren(target: unknown): unknown[] | null {
+  if (!target || typeof target !== "object" || !("children" in target)) return null;
+  const children = (target as { children?: unknown }).children;
+  return Array.isArray(children) ? children : null;
+}
+
+function elementTag(element: unknown): string | null {
+  if (!element || typeof element !== "object" || !("tag" in element)) return null;
+  const tag = (element as { tag?: unknown }).tag;
+  return typeof tag === "string" ? tag.toLowerCase() : null;
+}
+
+// Tags that are non-HTML namespace elements in a linkedom-parsed HTML body.
+// Mirrors the engine's `isHTMLElementTarget` (model.ts) which uses `instanceof
+// HTMLElement` — that runtime check catches the same set, but we can't use it
+// here because `target` is a plain SDK object, not a DOM Element. If linkedom
+// (or a future parser) surfaces additional foreign-content elements as
+// non-HTMLElement, add them here.
+const NON_HTML_CHILD_TAGS = new Set(["svg", "math"]);
+
+function shouldDeclineTextCutoverForTarget(target: unknown, ops: PatchOperation[]): boolean {
+  if (!hasTextContentOp(ops)) return false;
+  const children = targetChildren(target);
+  if (!children) return false;
+  // Legacy patch-element replaces the whole element for multi-child targets and
+  // for single non-HTML children. The SDK text patch stream stores a scalar
+  // inverse, so those shapes cannot be made both byte-identical and undo-safe
+  // here. Let the server path remain authoritative for them.
+  if (children.length > 1) return true;
+  const tag = elementTag(children[0]);
+  return tag !== null && NON_HTML_CHILD_TAGS.has(tag);
+}
+
 export function shouldUseSdkCutover(
   flagEnabled: boolean,
   hasSession: boolean,
@@ -64,7 +113,8 @@ export function shouldUseSdkCutover(
     !!hfId &&
     ops.length > 0 &&
     ops.every((o) => CUTOVER_OP_TYPES.has(o.type)) &&
-    !ops.some(mapsToReservedAttr)
+    !ops.some(mapsToReservedAttr) &&
+    !hasUnsafeHtmlAttributeOp(ops)
   );
 }
 
@@ -144,10 +194,11 @@ interface CutoverOptions {
   skipRefresh?: boolean;
 }
 
-// ponytail: internal; export only if a third caller appears.
+// ponytail: exported for setSlideshowManifest (third caller — island write bypasses
+// the SDK dispatch path since <script> nodes are not in the element tree).
 // `after` is serialized once by the caller (which also did the no-op check
 // against its pre-dispatch snapshot), so this never re-serializes.
-async function persistSdkSerialize(
+export async function persistSdkSerialize(
   after: string,
   targetPath: string,
   originalContent: string,
@@ -185,7 +236,9 @@ export async function sdkCutoverPersist(
   if (!sdkSession) return false;
   const hfId = selection.hfId;
   if (!hfId) return false;
-  if (!sdkSession.getElement(hfId)) return false;
+  const target = sdkSession.getElement(hfId);
+  if (!target) return false;
+  if (shouldDeclineTextCutoverForTarget(target, ops)) return false;
   if (wrongCompositionFile(deps, targetPath)) return false;
   try {
     const before = sdkSession.serialize();
@@ -432,6 +485,86 @@ export function sdkGsapConvertToKeyframesPersist(
     options,
     (s) => s.dispatch({ type: "convertToKeyframes", animationId, resolvedFromValues }),
     { animationId, opLabel: "convertToKeyframes" },
+  );
+}
+
+type KeyframeSpec = {
+  percentage: number;
+  properties: Record<string, number | string>;
+  ease?: string;
+  auto?: boolean;
+};
+
+type KeyframesPayload = {
+  targetSelector: string;
+  position: number;
+  duration: number;
+  keyframes: KeyframeSpec[];
+  ease?: string;
+};
+
+/** Shared inner dispatch for addWithKeyframes / replaceWithKeyframes ops. */
+function dispatchWithKeyframes(
+  s: Composition,
+  payload: KeyframesPayload,
+  animationId?: string,
+): void {
+  if (animationId !== undefined) {
+    s.dispatch({ type: "replaceWithKeyframes", animationId, ...payload });
+  } else {
+    s.dispatch({ type: "addWithKeyframes", ...payload });
+  }
+}
+
+export function sdkAddWithKeyframesPersist(
+  targetPath: string,
+  targetSelector: string,
+  position: number,
+  duration: number,
+  keyframes: KeyframeSpec[],
+  ease: string | undefined,
+  sdkSession: Composition | null | undefined,
+  deps: CutoverDeps,
+  options?: CutoverOptions,
+): Promise<boolean> {
+  const payload: KeyframesPayload = {
+    targetSelector,
+    position,
+    duration,
+    keyframes,
+    ...(ease ? { ease } : {}),
+  };
+  return dispatchGsapOpAndPersist(targetPath, sdkSession, deps, options, (s) =>
+    dispatchWithKeyframes(s, payload),
+  );
+}
+
+export function sdkReplaceWithKeyframesPersist(
+  targetPath: string,
+  animationId: string,
+  targetSelector: string,
+  position: number,
+  duration: number,
+  keyframes: KeyframeSpec[],
+  ease: string | undefined,
+  sdkSession: Composition | null | undefined,
+  deps: CutoverDeps,
+  options?: CutoverOptions,
+): Promise<boolean> {
+  const payload: KeyframesPayload = {
+    targetSelector,
+    position,
+    duration,
+    keyframes,
+    ...(ease ? { ease } : {}),
+  };
+  return dispatchGsapOpAndPersist(
+    targetPath,
+    sdkSession,
+    deps,
+    options,
+    (s) => dispatchWithKeyframes(s, payload, animationId),
+    { animationId, opLabel: "replaceWithKeyframes" },
   );
 }
 
