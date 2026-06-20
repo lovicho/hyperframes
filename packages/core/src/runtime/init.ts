@@ -1506,11 +1506,12 @@ export function initSandboxRuntimeModular(): void {
       timeSeconds: state.currentTime,
       playing: state.isPlaying,
       playbackRate: state.playbackRate,
-      outputMuted: state.mediaOutputMuted || webAudio.isActive(),
+      outputMuted: state.mediaOutputMuted,
       userMuted: state.bridgeMuted,
       userVolume: state.bridgeVolume,
       forceSync,
       onElementVolume: (el, volume) => webAudio.setElementVolume(el, volume),
+      isWebAudioOwned: (el) => webAudio.ownsElement(el),
       onAutoplayBlocked: () => {
         if (state.mediaAutoplayBlockedPosted) return;
         state.mediaAutoplayBlockedPosted = true;
@@ -1837,6 +1838,13 @@ export function initSandboxRuntimeModular(): void {
     onPause: () => {
       player.pause();
       emitAnalyticsEvent("composition_paused", { time: player.getTime() });
+    },
+    onStopMedia: () => {
+      webAudio.stopAll();
+      const mediaEls = document.querySelectorAll("video, audio");
+      for (const el of mediaEls) {
+        if (el instanceof HTMLMediaElement && !el.paused) el.pause();
+      }
     },
     onSeek: (frame, _seekMode) => {
       const time = Math.max(0, frame) / state.canonicalFps;

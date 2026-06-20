@@ -3,6 +3,7 @@ import { isControlsClick, setupControls, setupPoster } from "./controls-setup.js
 import { adoptShadowStyles, createCompositionIframe, scaleIframeToFit } from "./iframe-dom.js";
 import { DirectTimelineClock } from "./direct-timeline-clock.js";
 import { ParentMediaManager } from "./parent-media.js";
+import { isRealmHtmlMediaElement } from "./media-element-guards.js";
 import { handleRuntimeMessage } from "./runtime-message-handler.js";
 import {
   SHADER_CAPTURE_SCALE_ATTR,
@@ -309,6 +310,12 @@ class HyperframesPlayer extends HTMLElement {
     this.dispatchEvent(new Event("pause"));
   }
 
+  stopMedia() {
+    this._sendControl("stop-media");
+    this._stopIframeMedia();
+    this._media.stopAdoptedMedia();
+  }
+
   seek(timeInSeconds: number) {
     if (!this._trySyncSeek(timeInSeconds) && !this._tryDirectTimelineSeek(timeInSeconds)) {
       this._sendControl("seek", { frame: Math.round(timeInSeconds * 30) });
@@ -434,6 +441,7 @@ class HyperframesPlayer extends HTMLElement {
       return;
     }
     this._media.updateMuted(val !== null);
+    this._setIframeMediaMuted(val !== null);
     this._sendControl("set-muted", { muted: val !== null });
     this.controlsApi?.updateMuted(val !== null);
     this.dispatchEvent(new Event("volumechange"));
@@ -473,6 +481,35 @@ class HyperframesPlayer extends HTMLElement {
       );
     } catch {
       /* cross-origin */
+    }
+  }
+
+  /**
+   * Returns the iframe's contentDocument if same-origin and reachable,
+   * otherwise null. Accessing contentDocument can throw on cross-origin
+   * iframes — this swallows that as a clean null sentinel.
+   */
+  private _getSameOriginIframeDocument(): Document | null {
+    try {
+      return this.iframe.contentDocument;
+    } catch {
+      return null;
+    }
+  }
+
+  private _setIframeMediaMuted(muted: boolean): void {
+    const iframeDoc = this._getSameOriginIframeDocument();
+    if (!iframeDoc) return;
+    for (const el of iframeDoc.querySelectorAll("video, audio")) {
+      if (isRealmHtmlMediaElement(el)) el.muted = muted || el.defaultMuted;
+    }
+  }
+
+  private _stopIframeMedia(): void {
+    const iframeDoc = this._getSameOriginIframeDocument();
+    if (!iframeDoc) return;
+    for (const el of iframeDoc.querySelectorAll("video, audio")) {
+      if (isRealmHtmlMediaElement(el)) el.pause();
     }
   }
 
@@ -531,7 +568,10 @@ class HyperframesPlayer extends HTMLElement {
   // GSAP seek() preserves play state; player seek() contract lands paused.
   private _tryDirectTimelineSeek(t: number): boolean {
     return this._withDirectTimeline((tl) => {
-      tl.seek(t);
+      // suppressEvents=false: fire the timeline's onUpdate so compositions that
+      // drive scene visibility imperatively (via the root timeline's onUpdate,
+      // e.g. slideshow decks) repaint on a paused seek — not only while playing.
+      tl.seek(t, false);
       tl.pause();
     });
   }
@@ -624,6 +664,7 @@ class HyperframesPlayer extends HTMLElement {
     } catch {
       /* cross-origin */
     }
+    this._setIframeMediaMuted(this.muted);
     if (this.hasAttribute("autoplay")) this.play();
   }
 
