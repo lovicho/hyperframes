@@ -9,6 +9,38 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.6.117"
+  description="Released - 2026-06-20"
+  tags={["Release", "Core"]}
+>
+This hotfix restores the published `@hyperframes/core` subpath contract used by Studio,
+SDK, and CLI consumers. Installed packages can now resolve the `beats`, `storyboard`,
+HTML attribute safety, package metadata, and clip tree entry points that already existed
+in source.
+
+## Fixes
+
+- **Core:** Publish missing subpath exports ([960690e8e](https://github.com/heygen-com/hyperframes/commit/960690e8e5b64d9cd10c815819e1bf7b010970cd), [#1616](https://github.com/heygen-com/hyperframes/pull/1616))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.116...v0.6.117).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.116"
+  description="Released - 2026-06-20"
+  tags={["Release", "Engine"]}
+>
+This hotfix improves render reliability across WebM and MP4 outputs: VP9 encodes now use a shared, tunable speed default across render paths, and MP4 muxing preserves AAC start offsets so audio stays aligned.
+
+## Fixes
+
+- **Engine:** Preserve AAC start time during MP4 mux ([0473254b](https://github.com/heygen-com/hyperframes/commit/0473254bdd8a545991a52d0e547d7d62e2b1f5a6), [#1615](https://github.com/heygen-com/hyperframes/pull/1615))
+- **Engine:** Tune VP9 cpu-used across render paths ([8408a447](https://github.com/heygen-com/hyperframes/commit/8408a4474553307f8b82e65d8847922f482bd9c7), [#1614](https://github.com/heygen-com/hyperframes/pull/1614))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.115...v0.6.116).
+</Update>
+
+<Update
   label="HyperFrames v0.6.115"
   description="Released - 2026-06-20"
   tags={["Release", "Slideshow", "Core", "Core,studio"]}
