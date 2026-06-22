@@ -14,7 +14,7 @@ import { useDomEditOverlayRects } from "./useDomEditOverlayRects";
 import { createDomEditOverlayGestureHandlers } from "./useDomEditOverlayGestures";
 import { SnapGuideOverlay, type SnapGuidesState } from "./SnapGuideOverlay";
 import { GridOverlay } from "./GridOverlay";
-import { GestureRecordBadge, type GestureRecordingState } from "./GestureRecordControl";
+import type { GestureRecordingState } from "./GestureRecordControl";
 
 // Re-exports for external consumers — preserving existing import paths.
 export {
@@ -55,6 +55,7 @@ interface DomEditOverlayProps {
   onPathOffsetCommit: (
     selection: DomEditSelection,
     next: { x: number; y: number },
+    modifiers?: { altKey?: boolean },
   ) => Promise<void> | void;
   onGroupPathOffsetCommit: (updates: DomEditGroupPathOffsetCommit[]) => Promise<void> | void;
   onBoxSizeCommit: (
@@ -87,8 +88,6 @@ export const DomEditOverlay = memo(function DomEditOverlay({
   onGroupPathOffsetCommit,
   onBoxSizeCommit,
   onRotationCommit,
-  recordingState,
-  onToggleRecording,
 }: DomEditOverlayProps) {
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -243,6 +242,7 @@ export const DomEditOverlay = memo(function DomEditOverlay({
     if (!selection) return "none";
     return `${selection.sourceFile}:${selection.id ?? selection.selector ?? selection.label}:${selection.selectorIndex ?? 0}`;
   }, [selection]);
+
   const groupBounds = useMemo(
     () => resolveDomEditGroupOverlayRect(groupOverlayItems.map((item) => item.rect)),
     [groupOverlayItems],
@@ -432,13 +432,6 @@ export const DomEditOverlay = memo(function DomEditOverlay({
                 }}
               />
             </div>
-          )}
-          {onToggleRecording && (
-            <GestureRecordBadge
-              rect={overlayRect}
-              recordingState={recordingState}
-              onToggleRecording={onToggleRecording}
-            />
           )}
           <div
             key={selectionKey}

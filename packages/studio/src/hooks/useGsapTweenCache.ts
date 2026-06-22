@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { GsapAnimation, GsapKeyframesData, ParsedGsap } from "@hyperframes/core/gsap-parser";
 import type { GsapPercentageKeyframe } from "@hyperframes/core/gsap-parser";
+import { isStudioHoldSet } from "@hyperframes/core/gsap-parser";
 import { usePlayerStore } from "../player/store/playerStore";
 import { readRuntimeKeyframes, scanAllRuntimeKeyframes } from "./gsapRuntimeBridge";
 import {
@@ -107,7 +108,12 @@ export async function fetchParsedAnimations(
     const res = await fetch(
       `/api/projects/${encodeURIComponent(projectId)}/gsap-animations/${encodeURIComponent(sourceFile)}`,
     );
-    return res.ok ? ((await res.json()) as ParsedGsap) : null;
+    if (!res.ok) return null;
+    const parsed = (await res.json()) as ParsedGsap;
+    // Studio-emitted pre-keyframe hold `set`s are an internal runtime detail (they
+    // hold an element's first keyframe before its tween). They must not surface as
+    // user animations — otherwise they pollute the keyframe cache / timeline diamonds.
+    return { ...parsed, animations: parsed.animations.filter((a) => !isStudioHoldSet(a)) };
   } catch {
     return null;
   }
@@ -131,7 +137,8 @@ export function useGsapAnimationsForElement(
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const fetchKey = `${projectId}:${sourceFile}:${version}`;
+    const targetKey = target?.id ?? target?.selector ?? "";
+    const fetchKey = `${projectId}:${sourceFile}:${version}:${targetKey}`;
     if (fetchKey === lastFetchKeyRef.current) return;
     lastFetchKeyRef.current = fetchKey;
 
@@ -360,9 +367,7 @@ export function usePopulateKeyframeCacheForFile(
 
     const sf = sourceFile;
     fetchParsedAnimations(projectId, sf).then((parsed) => {
-      if (!parsed) {
-        return;
-      }
+      if (!parsed) return;
       const { setKeyframeCache } = usePlayerStore.getState();
       clearKeyframeCacheForFile(sf);
       const { elements } = usePlayerStore.getState();
@@ -370,13 +375,9 @@ export function usePopulateKeyframeCacheForFile(
       for (const anim of parsed.animations) {
         const id = extractIdFromSelector(anim.targetSelector);
         if (!id) continue;
-        if (anim.hasUnresolvedKeyframes) {
-          continue;
-        }
+        if (anim.hasUnresolvedKeyframes) continue;
         const kfData = anim.keyframes ?? synthesizeFlatTweenKeyframes(anim);
-        if (!kfData) {
-          continue;
-        }
+        if (!kfData) continue;
         const tweenPos =
           anim.resolvedStart ?? (typeof anim.position === "number" ? anim.position : 0);
         const tweenDur = anim.duration ?? 1;

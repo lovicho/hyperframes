@@ -27,7 +27,6 @@ import {
   truncateSnippet,
   stripJsComments,
   WINDOW_TIMELINE_ASSIGN_PATTERN,
-  TIMELINE_REGISTRY_ASSIGN_PATTERN,
 } from "../utils";
 
 // ── GSAP-specific types ────────────────────────────────────────────────────
@@ -768,6 +767,43 @@ export const gsapRules: LintRule<LintContext>[] = [
     return findings;
   },
 
+  // gsap_timeline_registered_before_async_build — registering window.__timelines[id]
+  // BEFORE the timeline is built inside document.fonts.ready (or any async callback)
+  // leaves an EMPTY timeline registered. The runtime's sub-composition readiness gate
+  // treats "key present" as "ready" and nests the child ONCE, while still empty — so the
+  // animation never renders when this composition is mounted as a sub-composition.
+  // Register only AFTER the build completes (the documented async-setup contract).
+  ({ scripts }) => {
+    const findings: HyperframeLintFinding[] = [];
+    for (const script of scripts) {
+      const content = stripJsComments(script.content);
+      const regIdx = content.search(/window\s*\.\s*__timelines\s*\[/);
+      if (regIdx < 0) continue;
+      const fontsReadyIdx = content.search(/document\s*\.\s*fonts\s*\.\s*ready/);
+      if (fontsReadyIdx < 0) continue;
+      // Registering after the async boundary is the correct pattern — skip it.
+      if (regIdx >= fontsReadyIdx) continue;
+      // Confirm the build is actually deferred past the boundary (a tween/build call
+      // appears after document.fonts.ready), i.e. the registered timeline starts empty.
+      const tail = content.slice(fontsReadyIdx);
+      if (!/\.(?:to|from|fromTo)\s*\(|buildEffect\s*\(/.test(tail)) continue;
+      findings.push({
+        code: "gsap_timeline_registered_before_async_build",
+        severity: "error",
+        message:
+          "window.__timelines is assigned BEFORE the timeline is built inside " +
+          "document.fonts.ready. An empty timeline registered early gets nested empty " +
+          "when this composition is used as a sub-composition (the readiness gate treats " +
+          '"key present" as "ready" and never re-nests), so the animation renders blank.',
+        fixHint:
+          "Move the `window.__timelines[id] = tl;` assignment to the END of the " +
+          "document.fonts.ready callback, after the tweens are added. Optionally call " +
+          "window.__hfForceTimelineRebind() right after, to re-nest the populated timeline.",
+      });
+    }
+    return findings;
+  },
+
   // gsap_from_opacity_noop — CSS opacity:0 + gsap.from({opacity:0}) = invisible forever
   // fallow-ignore-next-line complexity
   async ({ styles, scripts, tags }) => {
@@ -852,41 +888,6 @@ export const gsapRules: LintRule<LintContext>[] = [
           snippet: truncateSnippet(content.slice(contextStart, contextEnd)),
         });
       }
-    }
-    return findings;
-  },
-
-  // gsap_studio_edit_blocked
-  // When a script both registers a timeline on window.__timelines AND contains
-  // GSAP mutation calls targeting element selectors, Studio's isElementGsapTargeted
-  // check returns true for those elements and silently skips saving drag/resize
-  // position changes back to source HTML.
-  ({ scripts }) => {
-    const findings: HyperframeLintFinding[] = [];
-    const GSAP_MUTATION_SELECTOR_RE = /\.\s*(?:set|to|from|fromTo)\s*\(\s*["']([#.][^"']+)["']/g;
-
-    for (const script of scripts) {
-      const content = stripJsComments(script.content);
-      if (!TIMELINE_REGISTRY_ASSIGN_PATTERN.test(content)) continue;
-
-      const targets = new Set<string>();
-      let match: RegExpExecArray | null;
-      const re = new RegExp(GSAP_MUTATION_SELECTOR_RE.source, "g");
-      while ((match = re.exec(content)) !== null) {
-        if (match[1]) targets.add(match[1]);
-      }
-      if (targets.size === 0) continue;
-
-      const selList = [...targets].map((s) => `"${s}"`).join(", ");
-      findings.push({
-        code: "gsap_studio_edit_blocked",
-        severity: "warning",
-        message: `GSAP tweens target ${selList} in a registered timeline. Studio cannot save drag/resize edits to these elements — the runtime skips write-back for any element that appears in a registered window.__timelines timeline.`,
-        fixHint:
-          "The hyperframes runtime registers timelines automatically. Do not add a manual window.__timelines script unless GSAP intentionally controls element positions. " +
-          "For initial visibility states, use CSS (e.g. opacity:0) instead of gsap.set(). " +
-          "If GSAP must own these elements' positions, avoid drag-editing them in Studio.",
-      });
     }
     return findings;
   },

@@ -9,6 +9,65 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.7.1"
+  description="Released - 2026-06-22"
+  tags={["Release", "Studio", "Producer"]}
+>
+Fixes gesture recording selection sync and video-heavy render base64 frame injection.
+
+## Fixes
+
+- **Studio:** `selectedGsapAnimations` empty after gesture recording — motion path nodes non-interactive, timeline diamonds missing. Root cause: animation fetch dedup key didn't include the selection target, and the preview sync didn't re-run after soft reloads ([82a5298](https://github.com/heygen-com/hyperframes/commit/82a529805), [#1646](https://github.com/heygen-com/hyperframes/pull/1646))
+- **Producer:** Inline base64 frames in injector to unblock video-heavy renders ([4be81b4](https://github.com/heygen-com/hyperframes/commit/4be81b4fb), [#1630](https://github.com/heygen-com/hyperframes/pull/1630))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.0...v0.7.1).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.0"
+  description="Released - 2026-06-22"
+  tags={["Release", "Studio", "Core", "Skills"]}
+>
+Studio GSAP keyframe and motion-path editing, instant flicker-free manual editing, sub-composition rendering fixes, and frame-preset foundation for skills.
+
+## Features
+
+- **Studio:** GSAP keyframe + motion-path editing — drag to add keyframes, Alt+drag to move entire animation path, click-to-add waypoints on motion paths, canvas shortcuts panel ([091137e](https://github.com/heygen-com/hyperframes/commit/091137e3c), [#1605](https://github.com/heygen-com/hyperframes/pull/1605))
+- **Studio:** Instant, flicker-free manual editing — soft-reload preserves inline styles, stale-ID guard prevents duplicate tweens, resize delete+add pattern ([091137e](https://github.com/heygen-com/hyperframes/commit/091137e3c), [#1605](https://github.com/heygen-com/hyperframes/pull/1605))
+- **Skills:** Frame-preset library + shared audio engine foundation ([d0f0ec2](https://github.com/heygen-com/hyperframes/commit/d0f0ec29e), [#1632](https://github.com/heygen-com/hyperframes/pull/1632))
+- **Skills:** Product-launch, pr-to-video, faceless-explainer moved to script-driven architecture ([1967901](https://github.com/heygen-com/hyperframes/commit/1967901b5), [#1635](https://github.com/heygen-com/hyperframes/pull/1635))
+
+## Fixes
+
+- **Studio:** Preview freeze after ~10s — clock duration no longer shrinks during playback ([1f5dbdb](https://github.com/heygen-com/hyperframes/commit/1f5dbdbc4), [#1636](https://github.com/heygen-com/hyperframes/pull/1643))
+- **Studio:** `crypto.randomUUID` fallback for plain HTTP preview ([1f5dbdb](https://github.com/heygen-com/hyperframes/commit/1f5dbdbc4), [#1637](https://github.com/heygen-com/hyperframes/pull/1643))
+- **Producer:** ENOTEMPTY race on worker directory cleanup ([1f5dbdb](https://github.com/heygen-com/hyperframes/commit/1f5dbdbc4), [#1644](https://github.com/heygen-com/hyperframes/pull/1643))
+- **Core:** Register sub-composition timelines after async build ([4db708e](https://github.com/heygen-com/hyperframes/commit/4db708eb4), [#1638](https://github.com/heygen-com/hyperframes/pull/1638))
+- **Core:** Render standalone sub-composition previews + surface captured video assets ([0e75eb2](https://github.com/heygen-com/hyperframes/commit/0e75eb251), [#1631](https://github.com/heygen-com/hyperframes/pull/1631))
+- **CLI:** Classify missing whisper-cpp as a setup gap, not a command error ([f12754f](https://github.com/heygen-com/hyperframes/commit/f12754f5a), [#1628](https://github.com/heygen-com/hyperframes/pull/1628))
+- **Skills:** Reject empty/partial scene files at assembly, not at render ([a843b2a](https://github.com/heygen-com/hyperframes/commit/a843b2acb), [#1629](https://github.com/heygen-com/hyperframes/pull/1629))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.121...v0.7.0).
+</Update>
+
+<Update
+  label="HyperFrames v0.6.121"
+  description="Released - 2026-06-21"
+  tags={["Release", "CLI"]}
+>
+This hotfix restores `hyperframes skills` on Windows by invoking npm's `npx.cmd`
+shim through `cmd.exe`, while preserving direct `npx` execution on Linux and macOS.
+The same resolver also covers the local Studio preview's `npx vite` path and is
+verified by CI on all three operating systems.
+
+## Fixes
+
+- **CLI:** Resolve npx shims on Windows ([25b717dd](https://github.com/heygen-com/hyperframes/commit/25b717dd9c0e1777adafa23dcfb4ad87c4989d91), [#1626](https://github.com/heygen-com/hyperframes/pull/1626))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.6.120...v0.6.121).
+</Update>
+
+<Update
   label="HyperFrames v0.6.120"
   description="Released - 2026-06-21"
   tags={["Release", "Shader Transitions"]}

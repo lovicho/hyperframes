@@ -3,6 +3,7 @@
  * Extracted from App.tsx to keep file sizes under the 600-line limit.
  */
 import { useState, useCallback, useRef, useEffect } from "react";
+import { editLog } from "../utils/editDebugLog";
 import { useGestureRecording } from "./useGestureRecording";
 import { simplifyGestureSamples } from "../utils/rdpSimplify";
 import { usePlayerStore } from "../player";
@@ -10,6 +11,46 @@ import type { DomEditSelection } from "../components/editor/domEditing";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import { roundTo3 } from "../utils/rounding";
 import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
+
+type RecordedKeyframe = { percentage: number; properties: Record<string, number | string> };
+
+/**
+ * Split recorded keyframes into one keyframe-set per property group (position /
+ * scale / rotation / …), each keyframe carrying only that group's props.
+ *
+ * A mixed-prop gesture (e.g. x/y + opacity) emitted as ONE add-with-keyframes
+ * mutation parses back as an untagged legacy mixed tween, which breaks the
+ * position-only drag intercept (it can't find a pure position tween to edit).
+ * Emitting one tween per group keeps the position tween tagged and editable.
+ * Keyframes with no prop in a group are dropped from that group's set.
+ */
+function partitionKeyframesByGroup(keyframes: RecordedKeyframe[]): RecordedKeyframe[][] {
+  // Preserve first-seen group order for deterministic, stable mutation ordering.
+  const groupOrder: string[] = [];
+  const byGroup = new Map<string, RecordedKeyframe[]>();
+  for (const kf of keyframes) {
+    const perGroup = new Map<string, Record<string, number | string>>();
+    for (const [key, value] of Object.entries(kf.properties)) {
+      const group = classifyPropertyGroup(key);
+      let props = perGroup.get(group);
+      if (!props) {
+        props = {};
+        perGroup.set(group, props);
+      }
+      props[key] = value;
+    }
+    for (const [group, props] of perGroup) {
+      let set = byGroup.get(group);
+      if (!set) {
+        set = [];
+        byGroup.set(group, set);
+        groupOrder.push(group);
+      }
+      set.push({ percentage: kf.percentage, properties: props });
+    }
+  }
+  return groupOrder.map((group) => byGroup.get(group)!);
+}
 
 // Minimal subset of the session used by gesture commit
 interface GestureSessionRef {
@@ -121,76 +162,100 @@ export function useGestureCommit({
           ? allAnims.find((a) => a.propertyGroup === "position" && a.targetSelector === selector)
           : undefined;
         if (existingPositionTween) {
-          const tweenStart = existingPositionTween.resolvedStart ?? 0;
-          const tweenDur = existingPositionTween.duration ?? duration;
-          const tweenEnd = tweenStart + tweenDur;
-          const recEnd = recStart + duration;
-
-          // Only merge if the recording overlaps the existing tween's time range.
-          // No overlap → fall through to add-with-keyframes (creates a separate tween).
-          const overlaps = recStart < tweenEnd + 0.05 && recEnd > tweenStart - 0.05;
-
-          if (overlaps) {
-            const existingKfs = existingPositionTween.keyframes?.keyframes ?? [];
-            const rangeStartPct =
-              tweenDur > 0 ? Math.max(0, ((recStart - tweenStart) / tweenDur) * 100) : 0;
-            const rangeEndPct =
-              tweenDur > 0 ? Math.min(100, ((recEnd - tweenStart) / tweenDur) * 100) : 100;
-
-            const preserved = existingKfs
-              .filter(
-                (kf) => kf.percentage < rangeStartPct - 0.5 || kf.percentage > rangeEndPct + 0.5,
-              )
-              .map((kf) => ({
-                percentage: kf.percentage,
-                properties: kf.properties,
-                ...(kf.ease ? { ease: kf.ease } : {}),
-              }));
-
-            const mapped = keyframes.map((kf) => ({
-              percentage: rangeStartPct + (kf.percentage / 100) * (rangeEndPct - rangeStartPct),
-              properties: kf.properties,
-            }));
-
-            const merged = [...preserved, ...mapped].sort((a, b) => a.percentage - b.percentage);
-
+          if (existingPositionTween.method === "set") {
+            // A `set` is a static hold, not a tween to merge into — replace it with
+            // the recorded motion (which already starts from the set's position).
             await liveSession.commitMutation(
               {
                 type: "replace-with-keyframes",
                 animationId: existingPositionTween.id,
                 targetSelector: selector,
-                position:
-                  typeof existingPositionTween.position === "number"
-                    ? existingPositionTween.position
-                    : tweenStart,
-                duration: tweenDur,
-                keyframes: merged,
+                position: roundTo3(recStart),
+                duration: roundTo3(duration),
+                keyframes,
               },
-              { label: "Gesture recording (merge)", softReload: true },
+              { label: "Gesture recording (replace set)", softReload: true },
             );
           } else {
+            const tweenStart = existingPositionTween.resolvedStart ?? 0;
+            const tweenDur = existingPositionTween.duration ?? duration;
+            const tweenEnd = tweenStart + tweenDur;
+            const recEnd = recStart + duration;
+
+            // Only merge if the recording overlaps the existing tween's time range.
+            // No overlap → fall through to add-with-keyframes (creates a separate tween).
+            const overlaps = recStart < tweenEnd + 0.05 && recEnd > tweenStart - 0.05;
+
+            if (overlaps) {
+              const existingKfs = existingPositionTween.keyframes?.keyframes ?? [];
+              const rangeStartPct =
+                tweenDur > 0 ? Math.max(0, ((recStart - tweenStart) / tweenDur) * 100) : 0;
+              const rangeEndPct =
+                tweenDur > 0 ? Math.min(100, ((recEnd - tweenStart) / tweenDur) * 100) : 100;
+
+              const preserved = existingKfs
+                .filter(
+                  (kf) => kf.percentage < rangeStartPct - 0.5 || kf.percentage > rangeEndPct + 0.5,
+                )
+                .map((kf) => ({
+                  percentage: kf.percentage,
+                  properties: kf.properties,
+                  ...(kf.ease ? { ease: kf.ease } : {}),
+                }));
+
+              const mapped = keyframes.map((kf) => ({
+                percentage: rangeStartPct + (kf.percentage / 100) * (rangeEndPct - rangeStartPct),
+                properties: kf.properties,
+              }));
+
+              const merged = [...preserved, ...mapped].sort((a, b) => a.percentage - b.percentage);
+
+              await liveSession.commitMutation(
+                {
+                  type: "replace-with-keyframes",
+                  animationId: existingPositionTween.id,
+                  targetSelector: selector,
+                  position:
+                    typeof existingPositionTween.position === "number"
+                      ? existingPositionTween.position
+                      : tweenStart,
+                  duration: tweenDur,
+                  keyframes: merged,
+                },
+                { label: "Gesture recording (merge)", softReload: true },
+              );
+            } else {
+              // Emit one tween per property group so a mixed-prop gesture (e.g.
+              // x/y + opacity) doesn't collapse into an untagged legacy mixed
+              // tween that the position-only drag intercept can't edit.
+              for (const groupKfs of partitionKeyframesByGroup(keyframes)) {
+                await liveSession.commitMutation(
+                  {
+                    type: "add-with-keyframes",
+                    targetSelector: selector,
+                    position: roundTo3(recStart),
+                    duration: roundTo3(duration),
+                    keyframes: groupKfs,
+                  },
+                  { label: "Gesture recording (new range)", softReload: true },
+                );
+              }
+            }
+          }
+        } else {
+          // No existing tween — same per-group split as the new-range branch above.
+          for (const groupKfs of partitionKeyframesByGroup(keyframes)) {
             await liveSession.commitMutation(
               {
                 type: "add-with-keyframes",
                 targetSelector: selector,
                 position: roundTo3(recStart),
                 duration: roundTo3(duration),
-                keyframes,
+                keyframes: groupKfs,
               },
-              { label: "Gesture recording (new range)", softReload: true },
+              { label: "Gesture recording", softReload: true },
             );
           }
-        } else {
-          await liveSession.commitMutation(
-            {
-              type: "add-with-keyframes",
-              targetSelector: selector,
-              position: roundTo3(recStart),
-              duration: roundTo3(duration),
-              keyframes,
-            },
-            { label: "Gesture recording", softReload: true },
-          );
         }
       }
       showToast(`Recorded ${sortedPcts.length} keyframes`, "info");
@@ -206,6 +271,9 @@ export function useGestureCommit({
   }, [gestureRecording, showToast, isGestureRecordingRef, domEditSessionRef]);
 
   const handleToggleRecording = useCallback(() => {
+    editLog("gesture", gestureStateRef.current === "recording" ? "stop" : "start", {
+      id: domEditSessionRef.current.domEditSelection?.id,
+    });
     if (gestureStateRef.current === "recording") {
       void stopAndCommitRecording();
       return;

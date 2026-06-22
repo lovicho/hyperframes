@@ -101,7 +101,7 @@ export function useGsapAnimationOps({
       void commitMutation(
         selection,
         { type: "delete-all-for-selector", targetSelector },
-        { label: "Delete all animations for element" },
+        { label: "Delete all animations for element", softReload: true },
       );
     },
     [commitMutation, activeCompPath, sdkSession, sdkDeps],
