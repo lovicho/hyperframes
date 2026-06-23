@@ -321,6 +321,78 @@ function cssTransformToGsapProps(cssTransform: string): string | null {
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
+// ── CSS-transform ↔ GSAP-transform conflict matching ─────────────────────────
+
+// Transform components that COMBINE with a CSS translate/scale on the same
+// element. GSAP bakes the element's existing CSS transform in when it seeks, so
+// these stack rather than override in the capture path (e.g. CSS translateX(-50%)
+// + xPercent:-50 renders as -100% — off-centre). `rotation` is excluded: it maps
+// to CSS rotate(), which this rule treats separately (no false positive on spin).
+const CONFLICTING_TRANSLATE_PROPS = ["x", "y", "xPercent", "yPercent"];
+const CONFLICTING_SCALE_PROPS = ["scale", "scaleX", "scaleY"];
+
+type GsapTransformCall = {
+  method: string;
+  selector: string;
+  properties: string[];
+  raw: string;
+};
+
+// Decompose a (possibly grouped / descendant / compound) GSAP target selector
+// into the simple `#id` / `.class` tokens of the elements it actually targets —
+// the RIGHTMOST compound of each comma group is the targeted element. This lets a
+// CSS rule keyed by a simple selector (`.m04-label`) match a scoped GSAP selector
+// (`"#root .m04-label, #root .m04-sub"`), which the prior exact-string lookup
+// missed — so every scoped/grouped selector slipped past the rule entirely.
+function targetedSelectorTokens(selector: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const group of selector.split(",")) {
+    const compounds = group
+      .trim()
+      .split(/[\s>+~]+/)
+      .filter(Boolean);
+    const last = compounds[compounds.length - 1];
+    if (!last) continue;
+    const simple = last.match(/[#.][A-Za-z0-9_-]+/g);
+    if (simple) for (const token of simple) tokens.add(token);
+  }
+  return tokens;
+}
+
+// Find a CSS transform conflicting with a GSAP target selector: exact-string
+// match first (fast path + back-compat with the original behaviour), then a
+// token match so scoped/grouped/descendant selectors resolve to their class/id.
+function matchCssTransform(gsapSelector: string, cssMap: Map<string, string>): string | undefined {
+  if (cssMap.size === 0) return undefined;
+  const direct = cssMap.get(gsapSelector);
+  if (direct) return direct;
+  const tokens = targetedSelectorTokens(gsapSelector);
+  for (const [cssSelector, value] of cssMap) {
+    if (tokens.has(cssSelector)) return value;
+  }
+  return undefined;
+}
+
+// Scan for STANDALONE `gsap.set/to/from/fromTo("selector", { ...props })` calls.
+// The acorn timeline parser only captures calls rooted on the timeline var
+// (`tl.to`, `tl.set`, …); a top-level `gsap.set("#root .label", { xPercent: -50 })`
+// — a common way to seat shared base transforms before the timeline runs — is
+// invisible to it, so the conflict rule never saw it. Variable selectors
+// (`gsap.set(kicker, …)`) can't be resolved statically and are skipped.
+function extractStandaloneGsapTransformCalls(script: string): GsapTransformCall[] {
+  const calls: GsapTransformCall[] = [];
+  const pattern = /gsap\.(set|to|from|fromTo)\s*\(\s*(["'])([^"']+)\2\s*,\s*\{([^{}]*)\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(script)) !== null) {
+    const method = match[1] ?? "set";
+    const selector = match[3] ?? "";
+    const propsBody = match[4] ?? "";
+    const properties = [...propsBody.matchAll(/([A-Za-z_$][\w$]*)\s*:/g)].map((m) => m[1] ?? "");
+    calls.push({ method, selector, properties, raw: truncateSnippet(match[0]) ?? match[0] });
+  }
+  return calls;
+}
+
 // ── GSAP rules ─────────────────────────────────────────────────────────────
 
 // fallow-ignore-next-line complexity
@@ -505,27 +577,40 @@ export const gsapRules: LintRule<LintContext>[] = [
       if (!/gsap\.timeline/.test(script.content)) continue;
       const windows = await cachedExtractGsapWindows(script.content);
 
+      // Two sources of transform-setting calls: timeline-rooted tweens (from the
+      // acorn parser) and standalone gsap.* calls (regex — the parser ignores
+      // these). Normalize both into one shape and run the same conflict check.
+      const calls: GsapTransformCall[] = [
+        ...windows.map((win) => ({
+          method: win.method,
+          selector: win.targetSelector,
+          properties: win.properties,
+          raw: win.raw,
+        })),
+        ...extractStandaloneGsapTransformCalls(stripJsComments(script.content)),
+      ];
+
       type Conflict = { cssTransform: string; props: Set<string>; raw: string };
       const conflicts = new Map<string, Conflict>();
 
-      for (const win of windows) {
+      for (const call of calls) {
         // from() and fromTo() both supply explicit start values so GSAP owns
         // the full transform from t=0, making the CSS conflict moot
-        if (win.method === "fromTo" || win.method === "from") continue;
-        const sel = win.targetSelector;
-        const cssKey = sel.startsWith("#") || sel.startsWith(".") ? sel : `#${sel}`;
-        const translateProps = win.properties.filter((p) =>
-          ["x", "y", "xPercent", "yPercent"].includes(p),
+        if (call.method === "fromTo" || call.method === "from") continue;
+        const sel = call.selector;
+        const translateProps = call.properties.filter((p) =>
+          CONFLICTING_TRANSLATE_PROPS.includes(p),
         );
-        const scaleProps = win.properties.filter((p) => p === "scale");
+        const scaleProps = call.properties.filter((p) => CONFLICTING_SCALE_PROPS.includes(p));
         const cssFromTranslate =
-          translateProps.length > 0 ? cssTranslateSelectors.get(cssKey) : undefined;
-        const cssFromScale = scaleProps.length > 0 ? cssScaleSelectors.get(cssKey) : undefined;
+          translateProps.length > 0 ? matchCssTransform(sel, cssTranslateSelectors) : undefined;
+        const cssFromScale =
+          scaleProps.length > 0 ? matchCssTransform(sel, cssScaleSelectors) : undefined;
         if (!cssFromTranslate && !cssFromScale) continue;
         const existing = conflicts.get(sel) ?? {
           cssTransform: [cssFromTranslate, cssFromScale].filter(Boolean).join(" "),
           props: new Set<string>(),
-          raw: win.raw,
+          raw: call.raw,
         };
         for (const p of [...translateProps, ...scaleProps]) existing.props.add(p);
         conflicts.set(sel, existing);

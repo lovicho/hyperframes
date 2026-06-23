@@ -519,6 +519,77 @@ describe("GSAP rules", () => {
     expect(conflicts.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("detects conflict via a SCOPED descendant selector (tl.to)", async () => {
+    const html = `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <div class="lab">Label</div>
+  </div>
+  <style>
+    .lab { transform: translateX(-50%); }
+  </style>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#root .lab", { x: 40, opacity: 1, duration: 0.4 }, 0.5);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "gsap_css_transform_conflict");
+    expect(finding).toBeDefined();
+    expect(finding?.selector).toBe("#root .lab");
+  });
+
+  it("detects conflict via a standalone gsap.set with a GROUPED scoped selector", async () => {
+    // The exact shape that slipped through: centering seated with a standalone
+    // gsap.set on a grouped, #root-scoped selector, against a CSS class transform.
+    const html = `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <div class="lab">A</div><div class="sub">B</div>
+  </div>
+  <style>
+    .lab { transform: translateX(-50%); }
+    .sub { transform: translateX(-50%); }
+  </style>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    gsap.set("#root .lab, #root .sub", { xPercent: -50 });
+    tl.to(".lab", { y: 0, opacity: 1, duration: 0.4 }, 0.5);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find(
+      (f) => f.code === "gsap_css_transform_conflict" && f.selector === "#root .lab, #root .sub",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("error");
+  });
+
+  it("does NOT false-positive when a scoped selector targets a class WITHOUT a CSS transform", async () => {
+    const html = `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <div class="lab">Label</div>
+  </div>
+  <style>
+    .lab { opacity: 0; }
+  </style>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#root .lab", { x: 40, opacity: 1, duration: 0.4 }, 0.5);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const conflict = result.findings.find((f) => f.code === "gsap_css_transform_conflict");
+    expect(conflict).toBeUndefined();
+  });
+
   it("reports error when GSAP is used without a GSAP script tag", async () => {
     const html = `
 <html><body>

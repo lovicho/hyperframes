@@ -1,4 +1,4 @@
-import type { LintContext, HyperframeLintFinding } from "../context";
+import type { LintContext, HyperframeLintFinding, ExtractedBlock } from "../context";
 import { findHtmlTag, readAttr, readJsonAttr, stripJsComments, truncateSnippet } from "../utils";
 import { COMPOSITION_VARIABLE_TYPES } from "../../core.types";
 
@@ -35,6 +35,45 @@ function isCompositionRootOrMount(rawTag: string): boolean {
   return Boolean(
     readAttr(rawTag, "data-composition-id") || readAttr(rawTag, "data-composition-src"),
   );
+}
+
+// Top-level CSS selectors (comma-split) in a stylesheet, skipping at-rule headers
+// (@media/@keyframes/...) and keyframe stops. Heuristic — the lint layer has no
+// full CSS parser, and rules elsewhere in this file scan CSS the same way.
+function extractCssSelectors(css: string): string[] {
+  const out: string[] = [];
+  const noComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruleHeader = /([^{}]+)\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = ruleHeader.exec(noComments)) !== null) {
+    const header = (m[1] ?? "").trim();
+    if (!header || header.startsWith("@")) continue;
+    for (const sel of header.split(",")) {
+      const s = sel.trim();
+      if (s) out.push(s);
+    }
+  }
+  return out;
+}
+
+// Class tokens in a selector's leftmost compound (before the first descendant /
+// child / sibling combinator). `.frame .title` → ["frame"]; `.a.b > .c` → ["a","b"].
+function leftmostCompoundClasses(selector: string): string[] {
+  const leftmost = selector.trim().split(/[\s>+~]+/)[0] ?? "";
+  return (leftmost.match(/\.([\w-]+)/g) ?? []).map((c) => c.slice(1));
+}
+
+// Distinct selectors across all <style> blocks whose leftmost compound keys off one
+// of the root element's own classes — the ones that break under id-scoping.
+function rootClassStyledSelectors(styles: ExtractedBlock[], rootClasses: string[]): string[] {
+  const offenders: string[] = [];
+  for (const style of styles) {
+    for (const selector of extractCssSelectors(style.content)) {
+      const hitsRoot = leftmostCompoundClasses(selector).some((c) => rootClasses.includes(c));
+      if (hitsRoot && !offenders.includes(selector)) offenders.push(selector);
+    }
+  }
+  return offenders;
 }
 
 export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
@@ -575,5 +614,45 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       });
     }
     return findings;
+  },
+
+  // subcomposition_root_styled_by_class
+  // A sub-composition's <style> is scoped at render time to
+  // `[data-composition-id="<id>"] <selector>` so scenes inlined into one document
+  // can't leak styles into each other. A rule whose LEFTMOST selector is the ROOT
+  // element's own class (e.g. `.frame { ... }` on the same element that carries
+  // data-composition-id) therefore becomes a DESCENDANT selector that can never
+  // match the root — the whole scene renders unstyled (tiny text top-left, images
+  // at natural size). lint/validate/inspect evaluate the file in isolation (no
+  // scoping) and Studio previews each scene in its own iframe (no scoping), so the
+  // break is invisible until the composited MP4 render. Style the root via `#root`
+  // (the scoper special-cases the root id) and descendants via plain selectors,
+  // like the registry blocks — the runtime already scopes each scene by id, so a
+  // class namespace on the root is redundant.
+  ({ rootTag, rootCompositionId, styles, options }) => {
+    if (!options.isSubComposition) return [];
+    if (isRegistrySourceFile(options.filePath)) return [];
+    if (!rootTag || !rootCompositionId) return [];
+
+    const rootClasses = (readAttr(rootTag.raw, "class") || "").split(/\s+/).filter(Boolean);
+    if (rootClasses.length === 0) return [];
+
+    const offenders = rootClassStyledSelectors(styles, rootClasses);
+    if (offenders.length === 0) return [];
+
+    const example = offenders.slice(0, 3).join(", ");
+    return [
+      {
+        code: "subcomposition_root_styled_by_class",
+        severity: "error",
+        message:
+          `Root element has class="${rootClasses.join(" ")}" and is styled by ${offenders.length} rule(s) keyed off that class (e.g. ${example}). ` +
+          `At render, every sub-composition rule is scoped to [data-composition-id="${rootCompositionId}"] <selector>, so a selector whose leftmost part is the ROOT's own class becomes a descendant selector that cannot match the root — the scene renders unstyled (tiny text top-left, full-size images). ` +
+          `lint/validate/inspect and Studio's per-frame iframe preview do not scope, so this passes every static check and looks correct in preview.`,
+        selector: example,
+        fixHint: `Give the root id="root" and style it with \`#root { ... }\` plus plain descendant selectors (\`.kicker\`, \`#hero\`) — the runtime already scopes each sub-composition by data-composition-id, so a class namespace on the root is redundant and breaks under scoping.`,
+        snippet: truncateSnippet(rootTag.raw),
+      },
+    ];
   },
 ];

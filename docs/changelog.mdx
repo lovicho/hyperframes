@@ -9,6 +9,49 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.7.3"
+  description="Released - 2026-06-23"
+  tags={["Release", "Producer"]}
+>
+This stable release fixes a production render visibility leak where timed descendants could remain visible after their parent clip ended. It also includes producer render performance cleanup and documentation coverage for package entrypoints.
+
+## Fixes
+
+- Hide descendants of inactive render clips ([11d6227d0](https://github.com/heygen-com/hyperframes/commit/11d6227d06fff50145d26a8382585ad95f44e54c), [#1662](https://github.com/heygen-com/hyperframes/pull/1662))
+
+## Performance
+
+- **Producer:** Skip wasted Chrome media work + injector page.evaluates during render ([b651a9d21](https://github.com/heygen-com/hyperframes/commit/b651a9d218b6a1d2649bfb7d8595ea83a04e69a5), [#1651](https://github.com/heygen-com/hyperframes/pull/1651))
+
+## Docs & Examples
+
+- Add missing package pages ([e4058e8bb](https://github.com/heygen-com/hyperframes/commit/e4058e8bbf4630a58cfa5587224f4452b82cb828), [#1660](https://github.com/heygen-com/hyperframes/pull/1660))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.2...v0.7.3).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.2"
+  description="Released - 2026-06-22"
+  tags={["Release", "Compiler", "Producer", "Engine"]}
+>
+Fixes several production-rendering edge cases: shader transitions now survive the producer capture path, audio muxing preserves full stream duration, and CSS variable font declarations no longer trip deterministic font resolution.
+
+## Fixes
+
+- **Compiler:** Skip CSS var() in font resolver ([468f7ec3](https://github.com/heygen-com/hyperframes/commit/468f7ec35b823e281590fc6967ea1a6ee86a5789), [#1655](https://github.com/heygen-com/hyperframes/pull/1655))
+- **Producer:** Capture page-side shader composites via screenshot ([8c13a726](https://github.com/heygen-com/hyperframes/commit/8c13a72696c47d1435d1f4ec80d58cc78a59779a), [#1656](https://github.com/heygen-com/hyperframes/pull/1656))
+- **Producer:** Split capture average timing ([4976b5e0](https://github.com/heygen-com/hyperframes/commit/4976b5e0362e7bf6d49eea8b7b5a7b8addf8ed43), [#1657](https://github.com/heygen-com/hyperframes/pull/1657))
+- **Engine:** Remove -shortest from muxVideoWithAudio (#1648) ([e9957eca](https://github.com/heygen-com/hyperframes/commit/e9957ecaf46902eaadc1a8139e4961c85307e5b6), [#1650](https://github.com/heygen-com/hyperframes/pull/1650))
+
+## Internal
+
+- **Producer:** Add stream duration parity check to regression harness ([60d3eeb1](https://github.com/heygen-com/hyperframes/commit/60d3eeb1f7f59787b77bbce08df987ed59bfd87d), [#1652](https://github.com/heygen-com/hyperframes/pull/1652))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.1...v0.7.2).
+</Update>
+
+<Update
   label="HyperFrames v0.7.1"
   description="Released - 2026-06-22"
   tags={["Release", "Studio", "Producer"]}

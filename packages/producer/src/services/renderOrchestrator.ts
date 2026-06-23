@@ -293,6 +293,14 @@ export interface RenderPerfSummary {
   videoExtractBreakdown?: ExtractionPhaseBreakdown;
   /** Bytes on disk in the render's workDir at assembly time (sampled before cleanup). Lets callers correlate peak temp usage with render duration. */
   tmpPeakBytes?: number;
+  /**
+   * Average wall-clock capture time per output frame.
+   *
+   * Uses `stages.captureFrameMs` when present so fixed Stage 4 setup costs
+   * (file server creation, calibration, readiness/session init, strategy
+   * resolution) do not get amortized into a per-frame metric. Older summaries
+   * without the split fall back to `stages.captureMs`.
+   */
   captureAvgMs?: number;
   capturePeakMs?: number;
   captureCalibration?: {
@@ -759,6 +767,20 @@ export function shouldUseStreamingEncode(
   return workerCount === 1;
 }
 
+export function resolveCaptureForceScreenshotForPageSideCompositing(args: {
+  forceScreenshot: boolean;
+  usePageSideCompositing: boolean;
+}): boolean {
+  return args.usePageSideCompositing ? true : args.forceScreenshot;
+}
+
+export function shouldDiscardProbeSessionForPageSideCompositing(args: {
+  hasProbeSession: boolean;
+  usePageSideCompositing: boolean;
+}): boolean {
+  return args.hasProbeSession && args.usePageSideCompositing;
+}
+
 /**
  * Main render pipeline
  */
@@ -892,6 +914,14 @@ export async function executeRenderJob(
     assertNotAborted();
     assertConfiguredFfmpegBinariesExist();
 
+    if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
+
+    if (job.config.debug) {
+      const logPath = join(workDir, "render.log");
+      restoreLogger = installDebugLogger(logPath, log);
+      log.info("[Render] Debug artifacts enabled", { workDir, logPath });
+    }
+
     log.info("[Render] Pipeline started", {
       platform: process.platform,
       arch: process.arch,
@@ -916,13 +946,6 @@ export async function executeRenderJob(
       playerReadyTimeoutMs: cfg.playerReadyTimeout,
       requestedWorkers: job.config.workers ?? "auto",
     });
-
-    if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
-
-    if (job.config.debug) {
-      const logPath = join(workDir, "render.log");
-      restoreLogger = installDebugLogger(logPath, log);
-    }
 
     const entryFile = job.config.entryFile || "index.html";
     let htmlPath = join(projectDir, entryFile);
@@ -1190,7 +1213,11 @@ export async function executeRenderJob(
       quality: needsAlpha ? undefined : job.config.quality === "draft" ? 80 : 95,
       variables: job.config.variables,
       deviceScaleFactor,
+      captureBeyondViewport: composition.videos.length > 0,
     };
+    updateCaptureObservability({
+      captureBeyondViewport: captureOptions.captureBeyondViewport ?? false,
+    });
 
     // Capture sessions do not need native browser metadata for videos whose
     // pixels come from out-of-band FFmpeg frame extraction. Waiting on those
@@ -1373,9 +1400,28 @@ export async function executeRenderJob(
       !needsAlpha;
     if (usePageSideCompositingForTransitions) {
       activeFileServer.addPreHeadScript(HF_PAGE_SIDE_COMPOSITING_STUB);
+      if (
+        shouldDiscardProbeSessionForPageSideCompositing({
+          hasProbeSession: probeSession !== null,
+          usePageSideCompositing: true,
+        }) &&
+        probeSession
+      ) {
+        lastBrowserConsole = probeSession.browserConsoleBuffer;
+        await closeCaptureSession(probeSession);
+        probeSession = null;
+        log.info(
+          "[Render] Recreating capture session so page-side compositing pre-head script is loaded.",
+        );
+      }
+      captureForceScreenshot = resolveCaptureForceScreenshotForPageSideCompositing({
+        forceScreenshot: captureForceScreenshot,
+        usePageSideCompositing: true,
+      });
+      updateCaptureObservability({ forceScreenshot: captureForceScreenshot });
       log.info(
         "[Render] Page-side compositing enabled — bypassing Node-side layered " +
-          "shader-blend path. Engine will capture one opaque RGB frame per output frame.",
+          "shader-blend path. Engine will capture one opaque RGB screenshot per output frame.",
       );
     }
     const useLayeredComposite =
@@ -1396,6 +1442,7 @@ export async function executeRenderJob(
     observability.checkpoint("capture_strategy", "resolved", {
       workerCount,
       forceScreenshot: captureForceScreenshot,
+      captureBeyondViewport: captureOptions.captureBeyondViewport ?? false,
       useStreamingEncode,
       useLayeredComposite,
       usePageSideCompositing: usePageSideCompositingForTransitions,
@@ -1488,6 +1535,8 @@ export async function executeRenderJob(
       lastBrowserConsole = hdrRes.lastBrowserConsole;
       hdrPerf = hdrRes.hdrPerf;
       perfStages.captureMs = hdrRes.captureDurationMs;
+      perfStages.captureFrameMs = hdrRes.captureDurationMs;
+      perfStages.captureSetupMs = Math.max(0, Date.now() - stage4Start - hdrRes.captureDurationMs);
       perfStages.encodeMs = hdrRes.encodeMs;
     } else {
       // ── Standard capture paths (SDR or DOM-only HDR) ──────────────────
@@ -1497,6 +1546,7 @@ export async function executeRenderJob(
       // and we fall back to the disk path below.
       let streamingHandled = false;
       if (useStreamingEncode) {
+        const captureFrameStart = Date.now();
         const streamingRes = await observeRenderStage(
           observability,
           "capture_streaming",
@@ -1537,6 +1587,7 @@ export async function executeRenderJob(
               dedupPerfs,
             }),
         );
+        const captureFrameMs = Date.now() - captureFrameStart;
         if (streamingRes.success) {
           streamingHandled = true;
           workerCount = streamingRes.workerCount;
@@ -1544,6 +1595,8 @@ export async function executeRenderJob(
           probeSession = streamingRes.probeSession;
           lastBrowserConsole = streamingRes.lastBrowserConsole;
           perfStages.captureMs = Date.now() - stage4Start;
+          perfStages.captureFrameMs = captureFrameMs;
+          perfStages.captureSetupMs = Math.max(0, perfStages.captureMs - captureFrameMs);
           perfStages.encodeMs = streamingRes.encodeMs; // Overlapped with capture
         } else {
           useStreamingEncode = false;
@@ -1554,6 +1607,7 @@ export async function executeRenderJob(
 
       if (!streamingHandled) {
         // ── Disk-based capture (original flow) ────────────────────────────
+        const captureFrameStart = Date.now();
         const captureRes = await observeRenderStage(
           observability,
           "capture_disk",
@@ -1580,12 +1634,15 @@ export async function executeRenderJob(
               onProgress,
             }),
         );
+        const captureFrameMs = Date.now() - captureFrameStart;
         workerCount = captureRes.workerCount;
         updateCaptureObservability({ workerCount });
         probeSession = captureRes.probeSession;
         lastBrowserConsole = captureRes.lastBrowserConsole;
 
         perfStages.captureMs = Date.now() - stage4Start;
+        perfStages.captureFrameMs = captureFrameMs;
+        perfStages.captureSetupMs = Math.max(0, perfStages.captureMs - captureFrameMs);
 
         const encodeRes = await observeRenderStage(
           observability,
