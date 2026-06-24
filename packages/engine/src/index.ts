@@ -82,6 +82,7 @@ export {
   getCapturePerfSummary,
   prepareCaptureSessionForReuse,
   type CaptureSession,
+  isTransientBrowserError,
   type BeforeCaptureHook,
   type DiscardWarmupInnerCapture,
 } from "./services/frameCapture.js";

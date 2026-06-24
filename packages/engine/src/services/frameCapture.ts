@@ -1932,3 +1932,25 @@ export function getCapturePerfSummary(session: CaptureSession): CapturePerfSumma
     staticDedupSkipReason: session.staticDedupSkipReason,
   };
 }
+
+// ── Transient browser error classification ─────────────────────────────────
+// Puppeteer/Chrome can fail with transient errors that succeed on retry with a
+// fresh browser session. These are infrastructure-level failures (frame
+// detachment, connection drop, OOM kill, launch failure) — NOT composition bugs.
+
+const TRANSIENT_BROWSER_ERROR_PATTERNS = [
+  /Navigating frame was detached/i,
+  /Target closed/i,
+  /Session closed/i,
+  /browser has disconnected/i,
+  /Page crashed/i,
+  /Execution context was destroyed/i,
+  /Cannot find context with specified id/i,
+  /Failed to launch the browser process/i,
+  /ECONNREFUSED/i,
+];
+
+export function isTransientBrowserError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return TRANSIENT_BROWSER_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
