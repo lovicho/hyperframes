@@ -1,16 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePlayerStore, liveTime } from "../player/store/playerStore";
 
-// `import.meta.env` may be undefined in non-Vite bundlers (Next.js Turbopack),
-// so guard the access like the telemetry client does.
-function isDevBuild(): boolean {
-  try {
-    return import.meta.env.DEV === true;
-  } catch {
-    return false;
-  }
-}
-
 export interface GestureSample {
   time: number;
   properties: Record<string, number>;
@@ -385,13 +375,9 @@ export function useGestureRecording() {
         if (r.runtime) {
           try {
             applyRuntimePreview(r.runtime, time, properties);
-          } catch (err) {
+          } catch {
             // Preview failed — disable it for the rest of the gesture (recording
-            // continues). Surface in dev so a dead preview isn't silent; `r.runtime`
-            // is nulled below so this warns at most once per gesture.
-            if (isDevBuild()) {
-              console.warn("[GR] live preview disabled — runtime threw:", err);
-            }
+            // continues). `r.runtime` is nulled so we don't retry on every frame.
             r.runtime = null;
           }
         }

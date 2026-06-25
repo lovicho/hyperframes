@@ -30,6 +30,8 @@ export const GsapAnimationSection = memo(function GsapAnimationSection({
   onLivePreviewEnd,
   onSetArcPath,
   onUpdateArcSegment,
+  onUpdateKeyframeEase,
+  onSetAllKeyframeEases,
   onUnroll,
 }: GsapAnimationSectionProps) {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -68,6 +70,8 @@ export const GsapAnimationSection = memo(function GsapAnimationSection({
               onLivePreviewEnd={onLivePreviewEnd}
               onSetArcPath={onSetArcPath}
               onUpdateArcSegment={onUpdateArcSegment}
+              onUpdateKeyframeEase={onUpdateKeyframeEase}
+              onSetAllKeyframeEases={onSetAllKeyframeEases}
               onUnroll={onUnroll}
             />
           ))}

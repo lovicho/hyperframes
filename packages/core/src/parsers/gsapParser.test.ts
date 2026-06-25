@@ -577,6 +577,23 @@ describe("stagger/yoyo/repeat round-trip", () => {
     expect(updatedScript).toContain("stagger: 0.1");
     expect(updatedScript).toContain("opacity: 0.5");
   });
+
+  it("apply-to-all (resetKeyframeEases) sets easeEach and strips every per-keyframe ease", () => {
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#card", { keyframes: { "0%": { x: 0 }, "30%": { x: 50, ease: "custom(M0,0 C0.333,0 0.667,1 1,1)" }, "70%": { x: 80, ease: "power2.in" }, "100%": { x: 100 }, easeEach: "power2.out" }, duration: 1 }, 0);
+    `;
+    const parsed = parseGsapScript(script);
+    const animId = parsed.animations[0].id;
+    const result = updateAnimationInScript(script, animId, {
+      easeEach: "back.out",
+      resetKeyframeEases: true,
+    });
+    expect(result).toContain('easeEach: "back.out"');
+    // Every per-keyframe override is gone — the single easeEach governs all segments.
+    expect(result).not.toContain('ease: "custom');
+    expect(result).not.toContain('ease: "power2.in"');
+  });
 });
 
 describe("unresolvable value round-trip", () => {
@@ -1790,6 +1807,19 @@ describe("keyframe mutations", () => {
     const kf100 = reparsed.animations[0].keyframes!.keyframes.find((k) => k.percentage === 100)!;
     expect(kf100.properties.x).toBe(300);
     expect(kf100.properties.y).toBe(50);
+  });
+
+  it("updateKeyframeInScript — ease-only update preserves existing properties", () => {
+    // Per-keyframe ease editing passes empty properties + an ease. The existing
+    // property bag must survive (don't wipe x/opacity when only the ease changes).
+    const id = getAnimId(KF_SCRIPT);
+    const updated = updateKeyframeInScript(KF_SCRIPT, id, 100, {}, "power2.inOut");
+    const kf100 = parseGsapScript(updated).animations[0].keyframes!.keyframes.find(
+      (k) => k.percentage === 100,
+    )!;
+    expect(kf100.ease).toBe("power2.inOut");
+    expect(kf100.properties.x).toBe(200);
+    expect(kf100.properties.opacity).toBe(1);
   });
 
   // Array-form keyframes (`keyframes: [{x,y}, …]`) carry no percentages — GSAP

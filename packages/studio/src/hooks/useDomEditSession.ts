@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import type { TimelineElement } from "../player";
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { EditHistoryKind } from "../utils/editHistory";
@@ -123,6 +124,7 @@ export function useDomEditSession({
     buildDomSelectionForTimelineElement,
     handleTimelineElementSelect,
     refreshDomEditSelectionFromPreview,
+    applyMarqueeSelection,
   } = useDomSelection({
     projectId,
     activeCompPath,
@@ -389,6 +391,44 @@ export function useDomEditSession({
     updateArcSegment,
   });
 
+  const handleUpdateKeyframeEase = useCallback(
+    (animationId: string, percentage: number, ease: string) => {
+      const sel = domEditSelectionRef.current;
+      if (!sel) return;
+      gsapCommitMutation(
+        sel,
+        {
+          type: "update-keyframe",
+          animationId,
+          percentage,
+          properties: {},
+          ease,
+        },
+        { label: "Update keyframe ease", softReload: true },
+      );
+    },
+    [gsapCommitMutation, domEditSelectionRef],
+  );
+
+  // Apply one ease to every segment at once (AE select-all + F9): set easeEach
+  // and strip per-keyframe overrides in a single mutation.
+  const handleSetAllKeyframeEases = useCallback(
+    (animationId: string, ease: string) => {
+      const sel = domEditSelectionRef.current;
+      if (!sel) return;
+      gsapCommitMutation(
+        sel,
+        {
+          type: "update-meta",
+          animationId,
+          updates: { easeEach: ease, resetKeyframeEases: true },
+        },
+        { label: "Apply ease to all segments", softReload: true },
+      );
+    },
+    [gsapCommitMutation, domEditSelectionRef],
+  );
+
   return {
     // State
     domEditSelection,
@@ -429,6 +469,7 @@ export function useDomEditSession({
     buildDomSelectionFromTarget,
     buildDomSelectionForTimelineElement,
     updateDomEditHoverSelection,
+    applyMarqueeSelection,
     resolveImportedFontAsset,
     setAgentModalOpen,
     setAgentPromptSelectionContext,
@@ -454,6 +495,8 @@ export function useDomEditSession({
     handleGsapConvertToKeyframes,
     handleGsapRemoveAllKeyframes,
     handleResetSelectedElementKeyframes,
+    handleUpdateKeyframeEase,
+    handleSetAllKeyframeEases,
     commitAnimatedProperty,
     handleSetArcPath,
     handleUpdateArcSegment,

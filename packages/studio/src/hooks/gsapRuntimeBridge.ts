@@ -18,6 +18,7 @@ import {
   commitStaticGsapPosition,
   commitStaticGsapRotation,
   commitStaticGsapSize,
+  commitKeyframedSizeFromResize,
   commitWholePathOffset,
   computeCurrentPercentage,
   findPositionSetAnimation,
@@ -239,7 +240,9 @@ export async function tryGsapDragIntercept(
   // `tl.set("#el",{x,y})`, not a keyframe conversion: re-nudge an existing set in
   // place (idempotent), else add a new one. This also covers the stale-cache
   // phantom — committing a set is correct because the element genuinely has no live motion.
-  if (!hasNonHoldTweenForElement(iframe, selector)) {
+  const hasNonHold = hasNonHoldTweenForElement(iframe, selector);
+
+  if (!hasNonHold) {
     const existingSet =
       posAnim && posAnim.method === "set" && posAnim.targetSelector === selector
         ? posAnim
@@ -251,7 +254,9 @@ export async function tryGsapDragIntercept(
     return true;
   }
 
-  if (!posAnim) return false;
+  if (!posAnim) {
+    return false;
+  }
 
   // Verify the anim ID is still valid in the current file. The React-state
   // `animations` list can lag behind the file after a prior mutation changed
@@ -325,6 +330,27 @@ export async function tryGsapResizeIntercept(
     const sel = selectorFromSelection(selection);
     if (!sel) return false;
     const sizeSet = anim?.method === "set" ? anim : findSizeSetAnimation(animations, sel);
+
+    // If the element is animated (has a real tween, not just a static size
+    // hold), keyframe the size at the playhead so other keyframes keep theirs —
+    // instead of a global set that resizes every frame.
+    if (resizeGroup === "size") {
+      const animatedTween = pickClosestToPlayhead(
+        animations.filter((a) => a.method !== "set" && resolveTweenDuration(a) > 0),
+      );
+      if (animatedTween) {
+        const handled = await commitKeyframedSizeFromResize(
+          selection,
+          size,
+          sel,
+          sizeSet,
+          animatedTween,
+          { commitMutation, fetchAnimations: fetchFallbackAnimations },
+        );
+        if (handled) return true;
+      }
+    }
+
     await commitStaticGsapSize(selection, size, sel, sizeSet, {
       commitMutation,
       fetchAnimations: fetchFallbackAnimations,

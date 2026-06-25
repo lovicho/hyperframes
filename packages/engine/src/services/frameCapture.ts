@@ -28,6 +28,7 @@ import {
   getCdpSession,
   pageScreenshotCapture,
   initTransparentBackground,
+  shouldDefaultCaptureBeyondViewport,
 } from "./screenshotService.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import type {
@@ -310,6 +311,18 @@ export async function driveWarmupTicks(
   }
 }
 
+export function resolveCaptureSessionOptions(
+  options: CaptureOptions,
+  browserVersion: string,
+  platform: NodeJS.Platform = process.platform,
+): CaptureOptions {
+  return {
+    ...options,
+    captureBeyondViewport:
+      options.captureBeyondViewport ?? shouldDefaultCaptureBeyondViewport(browserVersion, platform),
+  };
+}
+
 async function waitForCloseWithTimeout(promise: Promise<unknown>): Promise<boolean> {
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -417,6 +430,7 @@ export async function createCaptureSession(
     }, variablesJson);
   }
   const browserVersion = await browser.version();
+  const sessionOptions = resolveCaptureSessionOptions(options, browserVersion);
   const expectedMajor = config?.expectedChromiumMajor;
   if (Number.isFinite(expectedMajor)) {
     const actualChromiumMajor = Number.parseInt(
@@ -430,9 +444,9 @@ export async function createCaptureSession(
     }
   }
   const viewport: Viewport = {
-    width: options.width,
-    height: options.height,
-    deviceScaleFactor: options.deviceScaleFactor || 1,
+    width: sessionOptions.width,
+    height: sessionOptions.height,
+    deviceScaleFactor: sessionOptions.deviceScaleFactor || 1,
   };
   await page.setViewport(viewport);
 
@@ -446,7 +460,7 @@ export async function createCaptureSession(
   return {
     browser,
     page,
-    options,
+    options: sessionOptions,
     serverUrl,
     outputDir,
     onBeforeCapture,

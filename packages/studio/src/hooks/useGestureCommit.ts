@@ -3,16 +3,21 @@
  * Extracted from App.tsx to keep file sizes under the 600-line limit.
  */
 import { useState, useCallback, useRef, useEffect } from "react";
-import { editLog } from "../utils/editDebugLog";
 import { useGestureRecording } from "./useGestureRecording";
 import { simplifyGestureSamples } from "../utils/rdpSimplify";
+import { fitEasesFromVelocity } from "../utils/velocityEaseFitter";
+import { smoothGestureKeyframes } from "../utils/gestureSmoother";
 import { usePlayerStore } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import { roundTo3 } from "../utils/rounding";
 import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
 
-type RecordedKeyframe = { percentage: number; properties: Record<string, number | string> };
+type RecordedKeyframe = {
+  percentage: number;
+  properties: Record<string, number | string>;
+  ease?: string;
+};
 
 /**
  * Split recorded keyframes into one keyframe-set per property group (position /
@@ -24,6 +29,7 @@ type RecordedKeyframe = { percentage: number; properties: Record<string, number 
  * Emitting one tween per group keeps the position tween tagged and editable.
  * Keyframes with no prop in a group are dropped from that group's set.
  */
+// fallow-ignore-next-line complexity
 function partitionKeyframesByGroup(keyframes: RecordedKeyframe[]): RecordedKeyframe[][] {
   // Preserve first-seen group order for deterministic, stable mutation ordering.
   const groupOrder: string[] = [];
@@ -46,7 +52,11 @@ function partitionKeyframesByGroup(keyframes: RecordedKeyframe[]): RecordedKeyfr
         byGroup.set(group, set);
         groupOrder.push(group);
       }
-      set.push({ percentage: kf.percentage, properties: props });
+      set.push({
+        percentage: kf.percentage,
+        properties: props,
+        ...(kf.ease ? { ease: kf.ease } : {}),
+      });
     }
   }
   return groupOrder.map((group) => byGroup.get(group)!);
@@ -130,6 +140,7 @@ export function useGestureCommit({
 
       // Per-property epsilon: small-range properties (opacity 0–1, scale ~0.01–10)
       // need a much tighter tolerance than positional properties (x/y in px).
+      // fallow-ignore-next-line complexity
       const simplified = simplifyGestureSamples(frozenSamples, duration, (key) => {
         if (key === "opacity") return 0.01;
         if (key === "scale" || key === "scaleX" || key === "scaleY") return 0.01;
@@ -150,10 +161,12 @@ export function useGestureCommit({
       }
       if (liveSession.commitMutation) {
         const recStart = recordingStartTimeRef.current;
-        const keyframes = sortedPcts.map((pct) => ({
+        const rawKeyframes = sortedPcts.map((pct) => ({
           percentage: pct,
           properties: simplified.get(pct) as Record<string, number | string>,
         }));
+        const smoothed = smoothGestureKeyframes(rawKeyframes, 3);
+        const keyframes = fitEasesFromVelocity(smoothed, frozenSamples, duration);
         const hasPositionProps = keyframes.some((kf) =>
           Object.keys(kf.properties).some((k) => classifyPropertyGroup(k) === "position"),
         );
@@ -206,6 +219,7 @@ export function useGestureCommit({
               const mapped = keyframes.map((kf) => ({
                 percentage: rangeStartPct + (kf.percentage / 100) * (rangeEndPct - rangeStartPct),
                 properties: kf.properties,
+                ...(kf.ease ? { ease: kf.ease } : {}),
               }));
 
               const merged = [...preserved, ...mapped].sort((a, b) => a.percentage - b.percentage);
@@ -236,6 +250,11 @@ export function useGestureCommit({
                     position: roundTo3(recStart),
                     duration: roundTo3(duration),
                     keyframes: groupKfs,
+                    // Linear fallback: the velocity fitter assigns a per-keyframe
+                    // ease to non-constant segments and intentionally leaves
+                    // constant-speed segments undefined → they must stay linear,
+                    // not inherit a sigmoid.
+                    easeEach: "none",
                   },
                   { label: "Gesture recording (new range)", softReload: true },
                 );
@@ -252,6 +271,8 @@ export function useGestureCommit({
                 position: roundTo3(recStart),
                 duration: roundTo3(duration),
                 keyframes: groupKfs,
+                // Linear fallback (see above) — constant-speed segments stay linear.
+                easeEach: "none",
               },
               { label: "Gesture recording", softReload: true },
             );
@@ -270,10 +291,8 @@ export function useGestureCommit({
     }
   }, [gestureRecording, showToast, isGestureRecordingRef, domEditSessionRef]);
 
+  // fallow-ignore-next-line complexity
   const handleToggleRecording = useCallback(() => {
-    editLog("gesture", gestureStateRef.current === "recording" ? "stop" : "start", {
-      id: domEditSessionRef.current.domEditSelection?.id,
-    });
     if (gestureStateRef.current === "recording") {
       void stopAndCommitRecording();
       return;

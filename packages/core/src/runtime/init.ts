@@ -72,6 +72,46 @@ export function initSandboxRuntimeModular(): void {
   }
 
   window.__timelines = window.__timelines || {};
+
+  // Resolve the root composition element with the same priority the rest of
+  // the runtime uses (explicit `data-root` marker first, then the topmost
+  // non-nested composition, then first in DOM order). Defined here so the
+  // array-normalization + data-start defaults below pick the same root the
+  // closure-based `resolveRootCompositionElement` does on multi-comp pages.
+  const findRootCompositionEl = (): HTMLElement | null => {
+    const explicitRoot = document.querySelector('[data-composition-id][data-root="true"]');
+    if (explicitRoot instanceof HTMLElement) return explicitRoot;
+    const nodes = Array.from(document.querySelectorAll("[data-composition-id]")) as HTMLElement[];
+    return (
+      nodes.find((node) => !node.parentElement?.closest("[data-composition-id]")) ??
+      nodes[0] ??
+      null
+    );
+  };
+
+  // Agents often write `window.__timelines = [tl]` (array) instead of the
+  // keyed-by-composition-id object the runtime expects. Normalize at init so
+  // the rest of the pipeline can assume a Record<string, timeline>.
+  if (Array.isArray(window.__timelines)) {
+    const arr = window.__timelines as unknown[];
+    const rootId = findRootCompositionEl()?.getAttribute("data-composition-id") ?? "root";
+    const normalized: Record<string, unknown> = {};
+    if (arr.length === 1) {
+      normalized[rootId] = arr[0];
+    } else {
+      for (let i = 0; i < arr.length; i++) normalized[`tl-${i}`] = arr[i];
+    }
+    (window as Record<string, unknown>).__timelines = normalized;
+  }
+
+  // Agents sometimes omit data-start on the root composition element. The
+  // runtime skips timed-visibility for elements without it, making clips
+  // invisible and timelines non-seekable. Default to 0 for the root.
+  const rootComp = findRootCompositionEl();
+  if (rootComp && !rootComp.hasAttribute("data-start")) {
+    rootComp.setAttribute("data-start", "0");
+  }
+
   const registerRuntimeCleanup = (callback: () => void) => {
     runtimeCleanupCallbacks.push(callback);
   };
@@ -218,23 +258,7 @@ export function initSandboxRuntimeModular(): void {
     return `${parsed}px`;
   };
 
-  const resolveRootCompositionElement = (): HTMLElement | null => {
-    // 1. Explicit root marker takes priority
-    const explicitRoot = document.querySelector('[data-composition-id][data-root="true"]');
-    if (explicitRoot instanceof HTMLElement) {
-      return explicitRoot;
-    }
-    // 3. Topmost composition element (not nested inside another)
-    const compositionNodes = Array.from(
-      document.querySelectorAll("[data-composition-id]"),
-    ) as HTMLElement[];
-    if (compositionNodes.length === 0) return null;
-    return (
-      compositionNodes.find((node) => !node.parentElement?.closest("[data-composition-id]")) ??
-      compositionNodes[0] ??
-      null
-    );
-  };
+  const resolveRootCompositionElement = (): HTMLElement | null => findRootCompositionEl();
 
   const applyCompositionSizing = () => {
     const rootEl = resolveRootCompositionElement();
@@ -291,6 +315,15 @@ export function initSandboxRuntimeModular(): void {
       const tag = el.tagName.toLowerCase();
       if (tag === "script" || tag === "style" || tag === "link" || tag === "meta") continue;
       if (!el.hasAttribute("data-start")) continue;
+      // Runtime-stamped clips are NOT authored overlay clips. In Studio/preview
+      // the runtime stamps `data-start` onto ID'd or GSAP-targeted flow children
+      // (a <header>/<footer> in a flex column) so the design panel can discover
+      // them — see the stamping pass in bindCapturedTimeline. Forcing those out
+      // of document flow collapses the layout: the footer shrink-wraps and its
+      // `justify-content: space-between` clusters in the top-left. Leave them in
+      // flow so the preview matches the rendered video, which never stamps
+      // (production renders run as the top-level page, not in an iframe).
+      if (el.hasAttribute("data-hf-autostamped")) continue;
       const hasLegacyAnchoredDefaults =
         (el.style.top === "0px" || el.style.top === "0") &&
         (el.style.left === "0px" || el.style.left === "0") &&
@@ -1003,16 +1036,38 @@ export function initSandboxRuntimeModular(): void {
       state.capturedTimeline.timeScale(state.playbackRate);
     }
     const boundDuration = getSafeTimelineDurationSeconds(state.capturedTimeline, 0);
+    if (boundDuration <= 0) {
+      // No resolvable duration (e.g. a set()-only timeline, or one whose
+      // duration isn't known yet). Kick GSAP off the creation position so the
+      // set() renders. For a finite-but-zero timeline progress(1) === progress(0);
+      // for an infinite-repeat timeline this lands on the first iteration's end
+      // frame, which is the best we can do without a known cycle length.
+      if (typeof state.capturedTimeline.progress === "function") {
+        state.capturedTimeline.progress(1, true);
+        state.capturedTimeline.progress(0, false);
+        state.capturedTimeline.pause();
+      }
+    }
     if (boundDuration > 0) {
       try {
         clock.setDuration(boundDuration);
       } catch {
         // clock not yet initialized — duration will be set during TransportClock setup
       }
-      state.capturedTimeline.pause();
-      const seekTime = Math.max(0, state.currentTime || 0);
+
       if (typeof state.capturedTimeline.totalTime === "function") {
+        // GSAP won't render tl.set() at position 0 when the paused timeline
+        // starts there — play/pause/seek/totalTime are all no-ops at the
+        // creation position. Force the set to render by cycling progress past
+        // 0 (when the timeline implements it), then seek to the prior playhead
+        // (state.currentTime) so a rebind after a user scrub or soft-reload
+        // restore doesn't snap back to 0.
+        if (typeof state.capturedTimeline.progress === "function") {
+          state.capturedTimeline.progress(0.0001, true);
+        }
+        const seekTime = Math.max(0, state.currentTime || 0);
         state.capturedTimeline.totalTime(seekTime, false);
+        state.capturedTimeline.pause();
       }
 
       // GSAP bakes the CSS `translate` into style.transform on seek.
@@ -1080,6 +1135,9 @@ export function initSandboxRuntimeModular(): void {
               seen.add(target);
               target.setAttribute("data-start", "0");
               target.setAttribute("data-duration", dur);
+              // Mark as runtime-stamped so applyClipLayout leaves it in document
+              // flow instead of treating it as an authored overlay clip.
+              target.setAttribute("data-hf-autostamped", "1");
             }
           }
         } catch {
@@ -1101,6 +1159,9 @@ export function initSandboxRuntimeModular(): void {
           seen.add(el);
           el.setAttribute("data-start", "0");
           el.setAttribute("data-duration", dur);
+          // Mark as runtime-stamped so applyClipLayout leaves it in document
+          // flow instead of treating it as an authored overlay clip.
+          el.setAttribute("data-hf-autostamped", "1");
         }
       }
     }

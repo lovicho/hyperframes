@@ -85,6 +85,7 @@ export interface UseDomSelectionReturn {
   handleTimelineElementSelect: (element: TimelineElement | null) => Promise<void>;
   refreshDomEditSelectionFromPreview: (selection: DomEditSelection) => Promise<void>;
   refreshDomEditGroupSelectionsFromPreview: (selections: DomEditSelection[]) => Promise<void>;
+  applyMarqueeSelection: (selections: DomEditSelection[], additive: boolean) => void;
 }
 
 // ── Hook ──
@@ -419,6 +420,50 @@ export function useDomSelection({
     applyDomSelection(null, { revealPanel: false });
   }, [applyDomSelection, captionEditMode]);
 
+  const applyMarqueeSelection = useCallback(
+    // fallow-ignore-next-line complexity
+    (selections: DomEditSelection[], additive: boolean) => {
+      // Honor the inspector-panels kill switch like applyDomSelection does, so
+      // marquee can't land selections while the inspector UI is suppressed.
+      if (!STUDIO_INSPECTOR_PANELS_ENABLED) {
+        domEditSelectionRef.current = null;
+        domEditGroupSelectionsRef.current = [];
+        setDomEditSelection(null);
+        setDomEditGroupSelections([]);
+        return;
+      }
+      if (selections.length === 0) {
+        if (!additive) applyDomSelection(null, { revealPanel: false });
+        return;
+      }
+      const current = domEditSelectionRef.current;
+      const currentGroup = domEditGroupSelectionsRef.current;
+      let nextGroup: DomEditSelection[];
+      if (additive) {
+        nextGroup = seedDomEditGroupWithSelection(currentGroup, current);
+        for (const s of selections) {
+          if (!domEditSelectionInGroup(nextGroup, s)) nextGroup = [...nextGroup, s];
+        }
+      } else {
+        nextGroup = selections;
+      }
+      const nextSelection = additive && current ? current : selections[0];
+      domEditSelectionRef.current = nextSelection;
+      domEditGroupSelectionsRef.current = nextGroup;
+      setDomEditSelection(nextSelection);
+      setDomEditGroupSelections(nextGroup);
+      const nextTimelineId =
+        findMatchingTimelineElementId(nextSelection, timelineElements) ??
+        findTimelineIdByAncestor(
+          nextSelection.element,
+          timelineElements,
+          nextSelection.sourceFile || "index.html",
+        );
+      setSelectedTimelineElementId(nextTimelineId);
+    },
+    [applyDomSelection, timelineElements, setSelectedTimelineElementId],
+  );
+
   // Disabled inspector effect
   // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
@@ -451,5 +496,6 @@ export function useDomSelection({
     handleTimelineElementSelect,
     refreshDomEditSelectionFromPreview,
     refreshDomEditGroupSelectionsFromPreview,
+    applyMarqueeSelection,
   };
 }

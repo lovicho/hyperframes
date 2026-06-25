@@ -61,6 +61,9 @@ export interface DomEditActionsValue extends Pick<
   | "invalidateGsapCache"
   | "previewIframeRef"
   | "commitMutation"
+  | "applyMarqueeSelection"
+  | "handleUpdateKeyframeEase"
+  | "handleSetAllKeyframeEases"
 > {}
 
 export interface DomEditSelectionValue extends Pick<
@@ -167,6 +170,9 @@ export function DomEditProvider({
     invalidateGsapCache,
     previewIframeRef,
     commitMutation,
+    applyMarqueeSelection,
+    handleUpdateKeyframeEase,
+    handleSetAllKeyframeEases,
   },
   children,
 }: {
@@ -238,6 +244,9 @@ export function DomEditProvider({
       invalidateGsapCache,
       previewIframeRef,
       commitMutation: stableCommitMutation,
+      applyMarqueeSelection,
+      handleUpdateKeyframeEase,
+      handleSetAllKeyframeEases,
     }),
     [
       handleTimelineElementSelect,
@@ -295,6 +304,9 @@ export function DomEditProvider({
       invalidateGsapCache,
       previewIframeRef,
       stableCommitMutation,
+      applyMarqueeSelection,
+      handleUpdateKeyframeEase,
+      handleSetAllKeyframeEases,
     ],
   );
 
