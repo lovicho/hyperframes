@@ -573,6 +573,40 @@ async function scaffoldProject(
   }
 }
 
+/**
+ * Ensure the project's AI coding skills are present and current. Checks the
+ * installed skills against the latest published on GitHub and only (re)installs
+ * when something is outdated or missing — so re-running `init` on an already
+ * up-to-date project is a no-op. Best-effort: if the version check can't reach
+ * GitHub, it installs anyway. The install itself (`installAllSkills`) pulls the
+ * full set straight from the GitHub repo.
+ */
+async function ensureSkillsCurrent(destDir: string): Promise<void> {
+  const { installAllSkills } = await import("./skills.js");
+  const { checkSkills } = await import("../utils/skillsManifest.js");
+
+  console.log();
+  console.log(c.bold("Checking AI coding skills against GitHub..."));
+  let needsInstall = true;
+  try {
+    const result = await checkSkills({ cwd: destDir });
+    needsInstall = result.updateAvailable;
+  } catch {
+    // Couldn't reach GitHub (offline, rate-limited) — install anyway.
+  }
+
+  if (needsInstall) {
+    // installAllSkills resolves the agent target set from destDir + the
+    // environment (Claude Code → claude-code; otherwise installed CLIs, else a
+    // Claude-Code + `.agents` floor). A freshly-scaffolded project has no agent
+    // folders yet, so this lands skills where the running agent will read them
+    // rather than spraying to every agent convention.
+    await installAllSkills({ cwd: destDir });
+  } else {
+    console.log(c.success("AI coding skills are already up to date."));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Exported command
 // ---------------------------------------------------------------------------
@@ -802,12 +836,7 @@ export default defineCommand({
       }
 
       if (!skipSkills) {
-        const { installAllSkills } = await import("./skills.js");
-        // --yes keeps it non-interactive. When Claude Code is driving
-        // (CLAUDECODE env var), target its native dir so skills land in
-        // .claude/skills/ instead of only .agents/skills/.
-        const args = process.env["CLAUDECODE"] ? ["--agent", "claude-code", "--yes"] : ["--yes"];
-        await installAllSkills({ cwd: destDir, extraArgs: args });
+        await ensureSkillsCurrent(destDir);
       }
 
       console.log();
@@ -815,7 +844,7 @@ export default defineCommand({
       console.log();
       if (skipSkills) {
         console.log(`  ${c.accent("1.")} Install AI coding skills (one-time):`);
-        console.log(`     ${c.accent("npx skills add heygen-com/hyperframes --yes")}`);
+        console.log(`     ${c.accent("npx hyperframes skills update")}`);
       } else {
         console.log(
           `  ${c.accent("1.")} Restart your AI agent (new session) so it loads the skills.`,
@@ -1023,20 +1052,10 @@ export default defineCommand({
     const files = readdirSync(destDir);
     clack.note(files.map((f) => c.accent(f)).join("\n"), c.success(`Created ${name}/`));
 
-    // Offer to install AI coding skills
+    // Check skills against GitHub and (re)install only if outdated or missing —
+    // init is the one place the full set is pulled. Opt out with --skip-skills.
     if (!skipSkills) {
-      const installSkills = await clack.confirm({
-        message: "Install AI coding skills? (for Claude Code, Cursor, Codex, etc.)",
-        initialValue: true,
-      });
-      if (clack.isCancel(installSkills)) {
-        clack.cancel("Setup cancelled.");
-        process.exit(0);
-      }
-      if (installSkills) {
-        const { installAllSkills } = await import("./skills.js");
-        await installAllSkills({ cwd: destDir });
-      }
+      await ensureSkillsCurrent(destDir);
     }
 
     // Auto-launch studio preview

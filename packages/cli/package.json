@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/cli",
-  "version": "0.7.10",
+  "version": "0.7.11",
   "description": "HyperFrames CLI — create, preview, and render HTML video compositions",
   "repository": {
     "type": "git",
@@ -22,7 +22,8 @@
     "build:runtime": "tsx scripts/build-runtime.ts",
     "build:beat-analyzer": "node scripts/build-beat-analyzer.mjs",
     "build:copy": "node scripts/build-copy.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "gen:skills-manifest": "tsx scripts/gen-skills-manifest.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.8.0",
