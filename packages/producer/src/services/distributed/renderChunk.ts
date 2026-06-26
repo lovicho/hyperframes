@@ -166,10 +166,19 @@ export interface ChunkResult {
  * Rebuild the engine's in-memory `ExtractedFrames[]` from the on-disk
  * planDir layout. `<planDir>/video-frames/<videoId>/` holds the numbered
  * frame files plan() extracted; this lists each dir and rebuilds the
- * 1-based `framePaths` Map that `FrameLookupTable` / `videoFrameInjector`
- * both index against.
+ * 0-based `framePaths` Map that `FrameLookupTable` / `videoFrameInjector`
+ * both index against — the consumer is
+ * `videoFrameExtractor.ts:getFrameAtTime`, which floors `localTime * fps`
+ * to a 0-based index and reads `framePaths.get(frameIndex)`. Any drift
+ * from that key convention silently drops every `<video>`'s first-paint
+ * frame; see HF#1731 / HF#1730.
+ *
+ * Exported so a unit test can pin the 0-based contract without spinning
+ * up the heavyweight Docker fixture — the bug surfaces only under
+ * distributed mode and only at video first-paint, so this primitive is
+ * the right granularity to guard.
  */
-function rebuildExtractedFramesFromPlanDir(
+export function rebuildExtractedFramesFromPlanDir(
   planDir: string,
   videos: PlanVideosJson["extracted"],
 ): ExtractedFrames[] {
@@ -194,8 +203,7 @@ function rebuildExtractedFramesFromPlanDir(
     for (let i = 0; i < frames.length; i++) {
       const frameName = frames[i];
       if (!frameName) continue;
-      // FrameLookupTable indexes frames 1-based.
-      framePaths.set(i + 1, join(outputDir, frameName));
+      framePaths.set(i, join(outputDir, frameName));
     }
     result.push({
       videoId: v.videoId,
