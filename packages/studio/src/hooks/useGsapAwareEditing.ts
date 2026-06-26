@@ -21,6 +21,7 @@ import {
   useSafeGsapCommitMutation,
 } from "./useSafeGsapCommitMutation";
 import type { CommitMutation } from "./gsapScriptCommitTypes";
+import type { DomEditGroupPathOffsetCommit } from "../components/editor/DomEditOverlay";
 
 export interface UseGsapAwareEditingParams {
   domEditSelection: DomEditSelection | null;
@@ -122,6 +123,33 @@ export function useGsapAwareEditing({
     ],
   );
 
+  // Multi-select (group) drag: route EACH element through the SAME GSAP intercept as
+  // a single drag, so every position is written as GSAP code (tl.set / keyframes /
+  // gsap.set) — NEVER the deprecated `--hf-studio-offset` CSS var, and GSAP-animated
+  // elements are no longer blocked in a group. No CSS fallback: with no GSAP
+  // composition there's nothing to write (a no-op, exactly like the single-drag path).
+  const handleGsapAwareGroupPathOffsetCommit = useCallback(
+    async (updates: DomEditGroupPathOffsetCommit[]) => {
+      if (!gsapCommitMutation) return;
+      for (const { selection, next } of updates) {
+        try {
+          await tryGsapDragIntercept(
+            selection,
+            next,
+            [],
+            previewIframeRef.current,
+            gsapCommitMutation,
+            makeFetchFallback(selection),
+          );
+        } catch (error) {
+          trackGsapInteractionFailure(error, selection, "drag", "Move animated layer (group)");
+          throw error;
+        }
+      }
+    },
+    [gsapCommitMutation, previewIframeRef, makeFetchFallback, trackGsapInteractionFailure],
+  );
+
   const handleGsapAwareBoxSizeCommit = useCallback(
     async (selection: DomEditSelection, next: { width: number; height: number }) => {
       if (gsapCommitMutation) {
@@ -184,7 +212,7 @@ export function useGsapAwareEditing({
 
   // ── Animated property commit ──
 
-  const commitAnimatedProperty = useAnimatedPropertyCommit({
+  const { commitAnimatedProperty, commitAnimatedProperties } = useAnimatedPropertyCommit({
     selectedGsapAnimations,
     gsapCommitMutation,
     addGsapAnimation: (sel, method, time) => addGsapAnimation(sel, method, time),
@@ -246,9 +274,11 @@ export function useGsapAwareEditing({
 
   return {
     handleGsapAwarePathOffsetCommit,
+    handleGsapAwareGroupPathOffsetCommit,
     handleGsapAwareBoxSizeCommit,
     handleGsapAwareRotationCommit,
     commitAnimatedProperty,
+    commitAnimatedProperties,
     handleSetArcPath,
     handleUpdateArcSegment,
     handleUnroll,

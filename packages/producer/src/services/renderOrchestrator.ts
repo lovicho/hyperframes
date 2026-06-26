@@ -548,6 +548,23 @@ export function getNextRetryWorkerCount(currentWorkers: number): number {
   return Math.max(1, Math.floor(currentWorkers / 2));
 }
 
+/**
+ * A retry only pays off if the attempt that just finished captured at least one
+ * frame toward its target. When it captured nothing (frames still missing >=
+ * frames it set out to capture), the composition is structurally broken — a
+ * never-ready page, zero duration, or unparseable HTML — not a flaky worker.
+ * Re-running it at lower parallelism just burns another full readiness/protocol
+ * timeout per worker, turning a render that can never succeed into a long hang.
+ * A partially-captured attempt still retries, so genuine flaky-worker gaps are
+ * unaffected.
+ */
+export function captureAttemptMadeProgress(
+  attemptTargetFrameCount: number,
+  remainingFrameCount: number,
+): boolean {
+  return remainingFrameCount < attemptTargetFrameCount;
+}
+
 export function isRecoverableParallelCaptureError(error: unknown): boolean {
   const message = normalizeErrorMessage(error);
   return (
@@ -673,10 +690,16 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
       if (remaining.length === 0) {
         return attempts;
       }
-      if (!options.allowRetry || currentWorkers <= 1) {
-        throw new Error(
-          `[Render] Capture completed but ${countFrameRanges(remaining)} frame(s) are missing`,
+      const remainingCount = countFrameRanges(remaining);
+      const madeProgress = captureAttemptMadeProgress(frameCount, remainingCount);
+      if (!madeProgress) {
+        options.log.warn(
+          "[Render] Capture attempt made no forward progress; composition is likely structurally broken — not retrying.",
+          { attempt, frameCount, remainingCount, workers: currentWorkers },
         );
+      }
+      if (!options.allowRetry || currentWorkers <= 1 || !madeProgress) {
+        throw new Error(`[Render] Capture completed but ${remainingCount} frame(s) are missing`);
       }
 
       const nextWorkers = getNextRetryWorkerCount(currentWorkers);
@@ -697,7 +720,20 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
       if (remaining.length === 0) {
         return attempts;
       }
-      if (!options.allowRetry || currentWorkers <= 1 || !isRecoverableParallelCaptureError(error)) {
+      const remainingCount = countFrameRanges(remaining);
+      const madeProgress = captureAttemptMadeProgress(frameCount, remainingCount);
+      if (!madeProgress) {
+        options.log.warn(
+          "[Render] Capture attempt made no forward progress; composition is likely structurally broken — not retrying.",
+          { attempt, frameCount, remainingCount, workers: currentWorkers },
+        );
+      }
+      if (
+        !options.allowRetry ||
+        currentWorkers <= 1 ||
+        !isRecoverableParallelCaptureError(error) ||
+        !madeProgress
+      ) {
         throw error;
       }
 

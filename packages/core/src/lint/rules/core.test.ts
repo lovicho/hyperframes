@@ -1,6 +1,33 @@
 import { describe, it, expect } from "vitest";
 import { lintHyperframeHtml } from "../hyperframeLinter.js";
 
+function compositionWithHead(headContent: string): string {
+  return `
+<html>
+<head>
+${headContent}
+</head>
+<body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script>window.__timelines = {};</script>
+</body>
+</html>`;
+}
+
+function templateCompositionWithHead(headContent: string): string {
+  return `
+<template>
+  <html>
+    <head>
+${headContent}
+    </head>
+    <body>
+      <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+    </body>
+  </html>
+</template>`;
+}
+
 describe("core rules", () => {
   it("reports error when root is missing data-composition-id", async () => {
     const html = `
@@ -132,6 +159,198 @@ describe("core rules", () => {
     const result = await lintHyperframeHtml(validComposition);
     const finding = result.findings.find((f) => f.code === "timeline_registry_missing_init");
     expect(finding).toBeUndefined();
+  });
+
+  it("reports error when CSS text is left outside a style block in the document head", async () => {
+    const html = compositionWithHead(`
+  <style>
+    body { margin: 0; }
+  </style>
+  </style>
+  /* Decorative Elements */
+  .particle {
+    position: absolute;
+    width: 4px;
+    height: 4px;
+    background: #fff;
+  }
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("error");
+    expect(finding?.message).toContain("<head>");
+    expect(finding?.snippet).toContain(".particle");
+  });
+
+  it("reports error when a stray style close tag is left in the document head", async () => {
+    const html = compositionWithHead(`
+  <style>
+    body { margin: 0; }
+  </style>
+  </style>
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeDefined();
+    expect(finding?.snippet).toContain("</style>");
+  });
+
+  it("reports error when a stray script close tag is left in the document head", async () => {
+    const html = compositionWithHead(`
+  <script>
+    window.__headReady = true;
+  </script>
+  </script>
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeDefined();
+    expect(finding?.snippet).toContain("</script>");
+  });
+
+  it("does not report leaked head text for valid closing tags with trailing whitespace", async () => {
+    const html = compositionWithHead(`
+  <style>
+    body { margin: 0; }
+  </style data-parser-error-close>
+  <script>
+    window.__headReady = true;
+  </script
+    data-parser-error-close>
+  <title>Particle Field</title	>
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeUndefined();
+  });
+
+  it("reports error when markdown code fences leak into the document head", async () => {
+    const withLanguage = compositionWithHead(`
+  \`\`\`css
+  .particle {
+    position: absolute;
+  }
+  \`\`\`
+`);
+    const withoutLanguage = compositionWithHead(`
+  \`\`\`
+  .particle {
+    position: absolute;
+  }
+  \`\`\`
+`);
+    const withTsxLanguage = compositionWithHead(`
+  \`\`\`tsx
+  export function Particle() {
+    return <div className="particle" />;
+  }
+  \`\`\`
+`);
+    const withLanguageResult = await lintHyperframeHtml(withLanguage);
+    const withoutLanguageResult = await lintHyperframeHtml(withoutLanguage);
+    const withTsxLanguageResult = await lintHyperframeHtml(withTsxLanguage);
+    const languageFinding = withLanguageResult.findings.find((f) => f.code === "head_leaked_text");
+    const unlabeledFinding = withoutLanguageResult.findings.find(
+      (f) => f.code === "head_leaked_text",
+    );
+    const tsxLanguageFinding = withTsxLanguageResult.findings.find(
+      (f) => f.code === "head_leaked_text",
+    );
+
+    expect(languageFinding).toBeDefined();
+    expect(languageFinding?.snippet).toContain("```css");
+    expect(unlabeledFinding).toBeDefined();
+    expect(unlabeledFinding?.snippet).toContain("```");
+    expect(tsxLanguageFinding).toBeDefined();
+    expect(tsxLanguageFinding?.snippet).toContain("```tsx");
+  });
+
+  it("reports error when CSS at-rules leak into the document head", async () => {
+    const html = compositionWithHead(`
+  @media (min-width: 800px) {
+    .particle {
+      transform: scale(1.2);
+    }
+  }
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeDefined();
+    expect(finding?.snippet).toContain("@media");
+  });
+
+  it("reports leaked CSS when a style block is unclosed in the document head", async () => {
+    const html = compositionWithHead(`
+  <style>
+    .particle {
+      color: white;
+    }
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeDefined();
+    expect(finding?.snippet).toContain(".particle");
+  });
+
+  it("does not report leaked head text for commented CSS", async () => {
+    const html = compositionWithHead(`
+  <!-- .particle { color: red; } -->
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeUndefined();
+  });
+
+  it("does not report leaked head text for valid noscript content", async () => {
+    const html = compositionWithHead(`
+  <noscript>
+    .no-js { display: block; }
+  </noscript>
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeUndefined();
+  });
+
+  it("does not report orphan CSS for valid head metadata and style blocks", async () => {
+    const html = compositionWithHead(`
+  <title>Particle Field</title>
+  <meta name="description" content="Particle field">
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <base href="https://example.com/">
+  <style>
+    .particle {
+      position: absolute;
+      width: 4px;
+      height: 4px;
+    }
+  </style>
+`);
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeUndefined();
+  });
+
+  it("reports leaked head text inside template-wrapped sub-compositions", async () => {
+    const html = templateCompositionWithHead(`
+      </style>
+      .particle { color: white; }
+`);
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+    const finding = result.findings.find((f) => f.code === "head_leaked_text");
+
+    expect(finding).toBeDefined();
+    expect(finding?.snippet).toContain(".particle");
   });
 
   describe("timeline_id_mismatch", () => {

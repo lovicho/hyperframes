@@ -440,6 +440,8 @@ interface TweenCallInfo {
   varsArg: AstNode;
   fromArg?: AstNode;
   positionArg?: AstNode;
+  /** True for a base `gsap.set(...)` (off-timeline) rather than `tl.set(...)`. */
+  global?: boolean;
 }
 
 /**
@@ -465,10 +467,24 @@ function findAllTweenCalls(
     visitCallExpression(path: AstPath) {
       const node = path.node;
       const callee = node.callee;
+      // A base `gsap.set("#sel", props)` is an off-timeline static hold (no position,
+      // no keyframe marker). Treat it as an editable `set` animation so a static
+      // value (e.g. a 3D transform) round-trips and re-edits in place. Restricted to
+      // a STRING-LITERAL selector: variable-target `gsap.set(el, ...)` holds stay
+      // opaque surrounding source (editing them by selector would be ambiguous).
+      const gsapSetArg = node.arguments?.[0];
+      const isGlobalSet =
+        callee?.type === "MemberExpression" &&
+        callee.object?.type === "Identifier" &&
+        callee.object.name === "gsap" &&
+        callee.property?.type === "Identifier" &&
+        callee.property.name === "set" &&
+        (gsapSetArg?.type === "StringLiteral" ||
+          (gsapSetArg?.type === "Literal" && typeof gsapSetArg.value === "string"));
       if (
         callee?.type === "MemberExpression" &&
         callee.property?.type === "Identifier" &&
-        isTimelineRootedCall(node, timelineVar)
+        (isTimelineRootedCall(node, timelineVar) || isGlobalSet)
       ) {
         const method = callee.property.name;
         if (!GSAP_METHODS.has(method)) {
@@ -501,6 +517,7 @@ function findAllTweenCalls(
             selector: selectorValue,
             varsArg: args[1],
             positionArg: args[2],
+            ...(isGlobalSet ? { global: true } : {}),
           });
         }
       }
@@ -968,6 +985,7 @@ function tweenCallToAnimation(
     group = classifyTweenPropertyGroup(kfProps);
   }
   if (group) anim.propertyGroup = group;
+  if (call.global) anim.global = true;
   if (Object.keys(extras).length > 0) anim.extras = extras;
   if (keyframesData) anim.keyframes = keyframesData;
   if (motionPathResult) anim.arcPath = motionPathResult.arcPath;
@@ -1027,6 +1045,15 @@ function resolveTimelinePositions(anims: Omit<GsapAnimation, "id">[]): void {
   let cursor = 0;
   let prevStart = 0;
   for (const anim of anims) {
+    // A global `gsap.set(...)` is off-timeline — it's applied once at load, not
+    // sequenced on the master timeline. It carries no position arg, so the
+    // cursor-based fallback below would otherwise hand it the comp-end time
+    // (every prior tween's duration summed). Pin it to 0 (its load-time start)
+    // and don't let it advance the cursor/prevStart for following tweens.
+    if (anim.method === "set" && anim.global) {
+      anim.resolvedStart = 0;
+      continue;
+    }
     const duration = anim.method === "set" ? 0 : (anim.duration ?? GSAP_DEFAULT_DURATION);
     let start: number | null;
 
@@ -1306,8 +1333,9 @@ function buildTweenStatementCode(timelineVar: string, anim: Omit<GsapAnimation, 
   const entries = Object.entries(props).map(([k, v]) => `${safeKey(k)}: ${valueToCode(v)}`);
   // immediateRender forces GSAP to apply the set when added to the timeline,
   // not on the first seek — without it, tl.set at position 0 on a paused
-  // timeline is invisible until the playhead moves past 0.
-  if (anim.method === "set") entries.push("immediateRender: true");
+  // timeline is invisible until the playhead moves past 0. A base `gsap.set`
+  // already runs immediately, so it doesn't need (or get) the flag.
+  if (anim.method === "set" && !anim.global) entries.push("immediateRender: true");
   if (anim.extras) {
     for (const [k, v] of Object.entries(anim.extras)) {
       entries.push(`${safeKey(k)}: ${valueToCode(v as number | string)}`);
@@ -1323,6 +1351,10 @@ function buildTweenStatementCode(timelineVar: string, anim: Omit<GsapAnimation, 
     );
     const fromCode = `{ ${fromEntries.join(", ")} }`;
     return `${timelineVar}.fromTo(${selector}, ${fromCode}, ${objCode}, ${posCode});`;
+  }
+  // A base `gsap.set` is off the timeline: no timeline var, no position arg.
+  if (anim.method === "set" && anim.global) {
+    return `gsap.set(${selector}, ${objCode});`;
   }
   return `${timelineVar}.${anim.method}(${selector}, ${objCode}, ${posCode});`;
 }
@@ -2302,12 +2334,13 @@ export function convertToKeyframesInScript(
   script: string,
   animationId: string,
   resolvedFromValues?: Record<string, number | string>,
+  setDuration = 1,
 ): string {
   let loc = locateAnimationWithFallback(script, animationId);
   if (!loc) return script;
 
   const anim = loc.target.animation;
-  if (anim.keyframes || anim.method === "set") return script;
+  if (anim.keyframes) return script;
 
   const { fromProps, toProps } = resolveConversionProps(anim, resolvedFromValues);
   const varsArg = loc.target.call.varsArg;
@@ -2324,6 +2357,27 @@ export function convertToKeyframesInScript(
   if (anim.method === "from" || anim.method === "fromTo") {
     loc.target.call.node.callee.property.name = "to";
     if (anim.method === "fromTo") loc.target.call.node.arguments.splice(1, 1);
+  }
+
+  // A static `set` becomes an animatable `to`: flip the method, drop the
+  // immediateRender hold marker, and give it a real duration so the keyframes
+  // span time. This is what makes a static 3D transform keyframeable.
+  if (anim.method === "set") {
+    // A GLOBAL `gsap.set(...)` is off-timeline; flipping only the method would
+    // emit `gsap.to(...)`, which fires once at load and is NOT on the paused
+    // master timeline (the engine can't seek/render it). Re-root it onto the
+    // timeline var and add the position arg (a gsap.set has none) so the
+    // converted tween is seekable. A `tl.set` already has the right object.
+    const calleeObj = loc.target.call.node.callee.object;
+    if (anim.global && calleeObj?.type === "Identifier") {
+      calleeObj.name = loc.parsed.timelineVar;
+      if (loc.target.call.node.arguments.length < 3) {
+        loc.target.call.node.arguments.push(parseExpr("0"));
+      }
+    }
+    loc.target.call.node.callee.property.name = "to";
+    removeVarsKey(varsArg, "immediateRender");
+    setVarsKey(varsArg, "duration", Math.max(0.001, setDuration));
   }
 
   return recast.print(loc.parsed.ast).code;

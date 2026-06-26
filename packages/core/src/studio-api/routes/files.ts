@@ -429,6 +429,14 @@ type GsapMutationRequest =
       value: number | string;
     }
   | {
+      // Merge MULTIPLE properties into an animation in ONE call. A per-property
+      // loop on a `set` can shift its group-derived id mid-way (e.g. adding `scale`
+      // to a rotation set), 404-ing the next update; this lands them all at once.
+      type: "update-properties";
+      animationId: string;
+      properties: Record<string, number | string>;
+    }
+  | {
       type: "update-from-property";
       animationId: string;
       property: string;
@@ -454,6 +462,8 @@ type GsapMutationRequest =
       ease?: string;
       properties: Record<string, number | string>;
       fromProperties?: Record<string, number | string>;
+      /** Emit a base `gsap.set` (off-timeline, no keyframe marker) instead of `tl.set`. */
+      global?: boolean;
     }
   | { type: "delete"; animationId: string; stripStudioEdits?: boolean }
   | {
@@ -490,6 +500,8 @@ type GsapMutationRequest =
       type: "convert-to-keyframes";
       animationId: string;
       resolvedFromValues?: Record<string, number | string>;
+      /** Duration (s) to give a converted static `set`, which has none. */
+      duration?: number;
     }
   | { type: "remove-all-keyframes"; animationId: string }
   | {
@@ -697,6 +709,13 @@ function executeGsapMutationAcorn(
         properties: { ...r.anim.properties, [body.property]: val },
       });
     }
+    case "update-properties": {
+      const r = requireAnimation(block.scriptText, body.animationId);
+      if ("err" in r) return r.err;
+      return updateAnimationInScript(block.scriptText, body.animationId, {
+        properties: { ...r.anim.properties, ...body.properties },
+      });
+    }
     case "update-from-property":
     case "add-from-property": {
       const r = requireFromToAnimation(block.scriptText, body.animationId);
@@ -721,6 +740,7 @@ function executeGsapMutationAcorn(
         ease: body.ease,
         properties: body.properties,
         fromProperties: body.fromProperties,
+        ...(body.global ? { global: true } : {}),
       });
       return result.script;
     }
@@ -788,6 +808,7 @@ function executeGsapMutationAcorn(
         block.scriptText,
         body.animationId,
         body.resolvedFromValues,
+        body.duration,
       );
     }
     case "remove-all-keyframes": {
@@ -979,6 +1000,13 @@ async function executeGsapMutationRecast(
         properties: { ...r.anim.properties, [body.property]: val },
       });
     }
+    case "update-properties": {
+      const r = requireAnimation(block.scriptText, body.animationId);
+      if ("err" in r) return r.err;
+      return updateAnimationInScript(block.scriptText, body.animationId, {
+        properties: { ...r.anim.properties, ...body.properties },
+      });
+    }
     case "update-from-property":
     case "add-from-property": {
       const r = requireFromToAnimation(block.scriptText, body.animationId);
@@ -1014,6 +1042,7 @@ async function executeGsapMutationRecast(
         ease: body.ease,
         properties: body.properties,
         fromProperties: body.fromProperties,
+        ...(body.global ? { global: true } : {}),
       });
       return result.script;
     }
@@ -1081,6 +1110,7 @@ async function executeGsapMutationRecast(
         block.scriptText,
         body.animationId,
         body.resolvedFromValues,
+        body.duration,
       );
     }
     case "remove-all-keyframes": {

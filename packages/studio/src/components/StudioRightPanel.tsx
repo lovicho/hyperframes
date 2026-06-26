@@ -118,6 +118,7 @@ export function StudioRightPanel({
     handleGsapAddFromProperty,
     handleGsapRemoveFromProperty,
     commitAnimatedProperty,
+    commitAnimatedProperties,
     handleSetArcPath,
     handleUpdateArcSegment,
     handleUnroll,
@@ -269,9 +270,12 @@ export function StudioRightPanel({
       onRemoveGsapFromProperty={handleGsapRemoveFromProperty}
       onAddGsapAnimation={handleGsapAddAnimation}
       onCommitAnimatedProperty={commitAnimatedProperty}
+      onCommitAnimatedProperties={commitAnimatedProperties}
       onAddKeyframe={handleGsapAddKeyframe}
       onRemoveKeyframe={handleGsapRemoveKeyframe}
-      onConvertToKeyframes={handleGsapConvertToKeyframes}
+      onConvertToKeyframes={(animId, duration) =>
+        handleGsapConvertToKeyframes(animId, undefined, duration)
+      }
       onSeekToTime={(t) => usePlayerStore.getState().requestSeek(t)}
       onSetArcPath={handleSetArcPath}
       onUpdateArcSegment={handleUpdateArcSegment}

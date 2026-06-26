@@ -68,11 +68,17 @@ export interface PropertyPanelProps {
   onRemoveKeyframe?: (animationId: string, percentage: number) => void;
   onUpdateKeyframeEase?: (animationId: string, percentage: number, ease: string) => void;
   onSetAllKeyframeEases?: (animationId: string, ease: string) => void;
-  onConvertToKeyframes?: (animationId: string) => void;
+  onConvertToKeyframes?: (animationId: string, duration?: number) => void;
   onCommitAnimatedProperty?: (
     selection: DomEditSelection,
     property: string,
     value: number | string,
+  ) => Promise<void>;
+  /** Batched variant: commit several props into ONE keyframe (e.g. the 3D cube's
+   * rotationX/Y/Z) so multi-axis edits don't race into adjacent duplicates. */
+  onCommitAnimatedProperties?: (
+    selection: DomEditSelection,
+    props: Record<string, number | string>,
   ) => Promise<void>;
   onSeekToTime?: (time: number) => void;
   recordingState?: "idle" | "recording" | "preview";
@@ -212,10 +218,8 @@ export const LABEL = "text-[11px] font-medium text-panel-text-3";
 export const RESPONSIVE_GRID = "grid grid-cols-[repeat(auto-fit,minmax(118px,1fr))] gap-3";
 export const EMPTY_STYLES: Record<string, string> = {};
 
-// fallow-ignore-next-line unused-exports -- pre-existing; surfaced in this file's diff by an unrelated line shift
-export const EMPTY_FILTER_VALUE = "none";
-// fallow-ignore-next-line unused-exports -- pre-existing; surfaced in this file's diff by an unrelated line shift
-export const BOX_SHADOW_PRESETS = {
+const EMPTY_FILTER_VALUE = "none";
+const BOX_SHADOW_PRESETS = {
   none: "none",
   soft: "0 12px 36px rgba(0, 0, 0, 0.28)",
   lift: "0 18px 54px rgba(0, 0, 0, 0.38)",
@@ -275,13 +279,7 @@ export function parsePxMetricValue(value: string): number | null {
   return token.value;
 }
 
-// fallow-ignore-next-line unused-exports -- pre-existing; surfaced in this file's diff by an unrelated line shift
-export function clampPanelNumber(
-  value: number,
-  min: number,
-  max: number,
-  fallback: number,
-): number {
+function clampPanelNumber(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, value));
 }
@@ -491,6 +489,38 @@ export function extractBackgroundImageUrl(value: string | undefined): string {
 // ── GSAP runtime value readers (used by PropertyPanel) ────────────────────
 
 // fallow-ignore-next-line complexity -- pre-existing; surfaced in this file's diff by an unrelated line shift
+// Core transform channels the panel ALWAYS reads live — even before a just-set
+// value (e.g. rotationX) has re-parsed into `gsapAnimations`. Without this the
+// cube + fields drop the prop and flicker to 0 on every commit; gsap.getProperty
+// reflects the in-place instant patch, so it's the true current value.
+const ALWAYS_READ_CHANNELS = [
+  "x",
+  "y",
+  "rotation",
+  "rotationX",
+  "rotationY",
+  "rotationZ",
+  "z",
+  "scale",
+  "transformPerspective",
+  "opacity",
+];
+
+/** Every property key the panel should read for an element: animated props + the
+ * always-read transform channels. */
+function collectPanelPropKeys(gsapAnimations: GsapAnimation[]): Set<string> {
+  const keys = new Set<string>(ALWAYS_READ_CHANNELS);
+  for (const anim of gsapAnimations) {
+    if (anim.keyframes) {
+      for (const kf of anim.keyframes.keyframes) {
+        for (const p of Object.keys(kf.properties)) keys.add(p);
+      }
+    }
+    for (const p of Object.keys(anim.properties)) keys.add(p);
+  }
+  return keys;
+}
+
 export function readGsapRuntimeValuesForPanel(
   gsapAnimId: string | null,
   gsapAnimations: GsapAnimation[],
@@ -511,15 +541,7 @@ export function readGsapRuntimeValuesForPanel(
     if (!gsap?.getProperty) return null;
     const el = iframe.contentDocument?.querySelector(selector);
     if (!el) return null;
-    const propKeys = new Set<string>();
-    for (const anim of gsapAnimations) {
-      if (anim.keyframes) {
-        for (const kf of anim.keyframes.keyframes) {
-          for (const p of Object.keys(kf.properties)) propKeys.add(p);
-        }
-      }
-      for (const p of Object.keys(anim.properties)) propKeys.add(p);
-    }
+    const propKeys = collectPanelPropKeys(gsapAnimations);
     const result: Record<string, number> = {};
     for (const prop of propKeys) {
       const v = Number(gsap.getProperty(el, prop));

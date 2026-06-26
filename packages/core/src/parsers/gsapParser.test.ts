@@ -297,6 +297,24 @@ describe("parseGsapScript", () => {
 });
 
 describe("resolvedStart — timeline position resolution", () => {
+  it("a global gsap.set is off-timeline: resolvedStart is 0, not the comp-end cursor", () => {
+    // The trailing global `gsap.set` carries no position; the cursor has advanced
+    // to ~3 by the time it's reached. It must NOT inherit that as its start — it's
+    // a load-time hold at 0. (Regression: setStart=cursor blocked Enable-keyframes.)
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#a", { x: 100, duration: 3 }, 0);
+      gsap.set("#card", { x: -74, y: -469 });
+    `;
+    const result = parseGsapScript(script);
+    const set = result.animations.find((a) => a.targetSelector === "#card");
+    expect(set?.method).toBe("set");
+    expect(set?.global).toBe(true);
+    expect(set?.resolvedStart).toBe(0);
+    // The off-timeline set must not perturb the real tween's position either.
+    expect(result.animations.find((a) => a.targetSelector === "#a")?.resolvedStart).toBe(0);
+  });
+
   it("resolves chained from() tweens with relative positions (sdk-test pattern)", () => {
     const script = `
       const tl = gsap.timeline({ defaults: { ease: "power3.out" } });
@@ -576,6 +594,47 @@ describe("stagger/yoyo/repeat round-trip", () => {
     // stagger should still be in the output
     expect(updatedScript).toContain("stagger: 0.1");
     expect(updatedScript).toContain("opacity: 0.5");
+  });
+
+  it("converts a static set into a keyframed to() with a duration (keyframable 3D)", () => {
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      tl.set("#card", { rotationX: 50, rotationY: 20, immediateRender: true }, 0);
+    `;
+    const parsed = parseGsapScript(script);
+    const animId = parsed.animations[0].id;
+    const result = convertToKeyframesInScript(script, animId, undefined, 4);
+    // Flips set → to, drops the hold marker, gains a duration + keyframes.
+    expect(result).toContain('tl.to("#card"');
+    expect(result).not.toContain("immediateRender");
+    expect(result).toContain("duration: 4");
+    expect(result).toContain("keyframes:");
+    // Both endpoints start at the set's value (visual unchanged until edited).
+    const reparsed = parseGsapScript(result).animations[0];
+    expect(reparsed.keyframes).toBeTruthy();
+    expect(reparsed.keyframes!.keyframes[0]!.properties.rotationX).toBe(50);
+    expect(reparsed.keyframes!.keyframes.at(-1)!.properties.rotationX).toBe(50);
+  });
+
+  it("converts a GLOBAL gsap.set into a timeline-rooted to() (seekable, not gsap.to)", () => {
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      gsap.set("#card", { rotationX: 50, rotationY: 20 });
+    `;
+    const parsed = parseGsapScript(script);
+    const animId = parsed.animations[0].id;
+    expect(parsed.animations[0].global).toBe(true);
+    const result = convertToKeyframesInScript(script, animId, undefined, 4);
+    // Must re-root onto the master timeline (tl.to), NOT emit an off-timeline
+    // gsap.to that fires once at load and can't be seeked/rendered.
+    expect(result).toMatch(/tl\.to\(\s*"#card"/);
+    expect(result).not.toMatch(/gsap\.to\(/);
+    expect(result).toContain("duration: 4");
+    expect(result).toContain("keyframes:");
+    // Re-parsed tween is a real timeline keyframe tween, no longer global.
+    const reparsed = parseGsapScript(result).animations[0];
+    expect(reparsed.keyframes).toBeTruthy();
+    expect(reparsed.global).toBeFalsy();
   });
 
   it("apply-to-all (resetKeyframeEases) sets easeEach and strips every per-keyframe ease", () => {
@@ -2810,5 +2869,59 @@ tl.to("#el", { y: 50, duration: 1 }, "+=0.5");`;
     const parsed = parseGsapScript(result);
     expect(parsed.animations[0].position).toBeCloseTo(1.333, 2);
     expect(parsed.animations[1].position).toBe("+=0.5");
+  });
+});
+
+describe("base gsap.set (off-timeline global hold)", () => {
+  const SCRIPT = `
+    const tl = gsap.timeline({ paused: true });
+    gsap.set("#box", { rotationX: 17, rotationY: 93 });
+    tl.to("#box", { x: 260, duration: 1 }, 0.3);
+    window.__timelines = { main: tl };
+  `;
+
+  it("parses a string-literal gsap.set as a global set animation", () => {
+    const anims = parseGsapScript(SCRIPT).animations.filter((a) => a.targetSelector === "#box");
+    const set = anims.find((a) => a.method === "set");
+    expect(set?.global).toBe(true);
+    expect(set?.properties).toEqual({ rotationX: 17, rotationY: 93 });
+    expect(anims.find((a) => a.method === "to")?.global).toBeUndefined();
+  });
+
+  it("creates a base gsap.set (not tl.set) when global is set", () => {
+    const base = `const tl = gsap.timeline({ paused: true });\ntl.to("#box", { x: 1, duration: 1 }, 0);\nwindow.__timelines = { main: tl };`;
+    const { script } = addAnimationToScript(base, {
+      targetSelector: "#box",
+      method: "set",
+      position: 0,
+      properties: { rotationX: 30 },
+      global: true,
+    });
+    expect(script).toContain('gsap.set("#box"');
+    expect(script).not.toContain('tl.set("#box"');
+  });
+
+  it("updates a global set in place, keeping it gsap.set", () => {
+    const set = parseGsapScript(SCRIPT).animations.find(
+      (a) => a.targetSelector === "#box" && a.method === "set",
+    )!;
+    const updated = updateAnimationInScript(SCRIPT, set.id, {
+      properties: { rotationX: 99, rotationY: 93 },
+    });
+    expect(updated).toContain('gsap.set("#box"');
+    expect(updated).toContain("99");
+    expect(updated).not.toContain('tl.set("#box"');
+  });
+
+  it("leaves a VARIABLE-target gsap.set as surrounding source (not parsed)", () => {
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      const el = document.querySelector("#box");
+      gsap.set(el, { rotationX: 5 });
+      tl.to("#box", { x: 10, duration: 1 }, 0);
+      window.__timelines = { main: tl };
+    `;
+    const sets = parseGsapScript(script).animations.filter((a) => a.method === "set");
+    expect(sets).toHaveLength(0);
   });
 });
