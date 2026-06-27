@@ -9,6 +9,60 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.7.14"
+  description="Released - 2026-06-27"
+  tags={["Release", "CLI"]}
+>
+This CLI release makes HyperFrames skills self-healing: installs now keep a
+freshness manifest, install once globally, and mirror only HyperFrames-owned
+skills into detected agent stores.
+
+## Features
+
+- **CLI:** Skills freshness — version check, manifest, global install + multi-agent mirror ([bf961d12](https://github.com/heygen-com/hyperframes/commit/bf961d1268427997a9e0a909d13198f50d1ab8c5), [#1753](https://github.com/heygen-com/hyperframes/pull/1753))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.13...v0.7.14).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.13"
+  description="Released - 2026-06-26"
+  tags={["Release", "Lint"]}
+>
+This lint reliability release catches malformed generated HTML that leaves CSS
+or code-looking text between the document head and the composition root, where a
+browser would render it as visible video text.
+
+## Fixes
+
+- **Lint:** Catch visible css before composition root ([c7830b54](https://github.com/heygen-com/hyperframes/commit/c7830b54c617f1435a97575b9a7eaa104594c835), [#1751](https://github.com/heygen-com/hyperframes/pull/1751))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.12...v0.7.13).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.12"
+  description="Released - 2026-06-26"
+  tags={["Release", "Lint", "CLI", "Skills"]}
+>
+This release unblocks Zephyr and other producer-backed generation flows that use
+Google Fonts: those imports now warn instead of hard-failing lint when the
+producer can resolve them. It also keeps HyperFrames skills installs targeted to
+the agents a project actually uses and adds a product-launch video skill.
+
+## Features
+
+- **Skills:** Product-launch-video skill + consolidate motion knowledge into hyperframes-animation ([05af482f](https://github.com/heygen-com/hyperframes/commit/05af482f22a3df534c38056f7d7894b9e469d655), [#1745](https://github.com/heygen-com/hyperframes/pull/1745))
+
+## Fixes
+
+- **Lint:** Allow producer-resolved google fonts ([aacce27a](https://github.com/heygen-com/hyperframes/commit/aacce27a33140857a3ee2d6384cb9c5d44a556fe), [#1750](https://github.com/heygen-com/hyperframes/pull/1750))
+- **CLI:** Scope skill installs to relevant agents, not all ~70 via --all ([70a03f78](https://github.com/heygen-com/hyperframes/commit/70a03f788bac97a04342a4db2310204766a0eacd), [#1748](https://github.com/heygen-com/hyperframes/pull/1748))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.11...v0.7.12).
+</Update>
+
+<Update
   label="HyperFrames v0.7.11"
   description="Released - 2026-06-26"
   tags={["Release", "CLI", "Runtime", "Producer"]}

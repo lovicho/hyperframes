@@ -6,11 +6,12 @@ import { buildNpxCommand } from "../utils/npxCommand.js";
 import { withMeta } from "../utils/updateCheck.js";
 import {
   checkSkills,
+  hyperframesSkillNames,
   SKILLS_CLI_LOCK_PATHS_VERIFIED_AT,
   type SkillDiff,
   type SkillsCheckResult,
 } from "../utils/skillsManifest.js";
-import { buildSkillsAddArgs, resolveAgentTargets } from "../utils/skillsTargets.js";
+import { mirrorGlobalSkills } from "../utils/skillsMirror.js";
 import type { Example } from "./_examples.js";
 
 export const examples: Example[] = [
@@ -35,15 +36,25 @@ function spawnNpx(args: string[], opts: { cwd?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(npx.command, npx.args, {
       stdio: "inherit",
-      timeout: 120_000,
+      // We install with --full-depth (a full `git clone` of the repo, the only
+      // path that bypasses the laggy skills.sh blob — see GLOBAL_INSTALL_ARGS),
+      // which is heavier than the blob fetch, so allow more headroom.
+      timeout: 300_000,
       cwd: opts.cwd,
-      // GH #316 — the upstream `skills` CLI shells out to `git clone`.
-      // When Git's clone-hook protection is active (shipped on by default in
-      // 2.45.1, reverted in 2.45.2, still present on many corporate and CI
-      // setups), a globally-registered `git lfs install` post-checkout hook
-      // aborts the clone. The args reaching this function are hardcoded — no
-      // user input reaches the spawn — so opting out here is safe.
-      env: { ...process.env, GIT_CLONE_PROTECTION_ACTIVE: "0" },
+      env: {
+        ...process.env,
+        // GH #316 — the upstream `skills` CLI shells out to `git clone`. When
+        // Git's clone-hook protection is active (default in 2.45.1, reverted in
+        // 2.45.2, still present on many corporate/CI setups), a globally
+        // registered `git lfs install` post-checkout hook aborts the clone. The
+        // args reaching this function are hardcoded (no user input), so opting
+        // out is safe.
+        GIT_CLONE_PROTECTION_ACTIVE: "0",
+        // Skills are text; the repo's LFS objects are unrelated binary assets.
+        // Skip the smudge so --full-depth doesn't drag down (or fail on) large
+        // LFS blobs the install doesn't need.
+        GIT_LFS_SKIP_SMUDGE: "1",
+      },
     });
     child.on("close", (code, signal) => {
       if (code === 0) resolve();
@@ -54,37 +65,37 @@ function spawnNpx(args: string[], opts: { cwd?: string } = {}): Promise<void> {
   });
 }
 
+// One faithful global install: --copy lands real files in Claude Code's global
+// store (~/.claude/skills, which Claude Code reads at global priority) plus the
+// shared universal store (~/.agents/skills). mirrorGlobalSkills then fans that
+// store out to every OTHER installed agent's global dir. Skills are
+// framework-general knowledge, so installing once globally beats copying a full
+// set into every project — and avoids the ~70-agent `--all` spray entirely.
+//
+// Why --copy: real files (not the upstream symlink default, which re-serialises
+// each SKILL.md's frontmatter) so an installed bundle byte-matches the published
+// manifest and `skills check` reads it as current. Why --full-depth: it forces a
+// full `git clone` of HEAD; without it even a full-URL `skills add` fetches the
+// skills.sh registry blob, which lags GitHub main by hours, so a fresh install
+// would read as several skills "outdated" (verified: blob → ~9 outdated;
+// --full-depth → all current).
+const GLOBAL_INSTALL_ARGS = [
+  "--skill",
+  "*",
+  "--global",
+  "--agent",
+  "claude-code",
+  "universal",
+  "--copy",
+  "--full-depth",
+  "--yes",
+];
+
 function runSkillsAdd(
   source: string,
   opts: { cwd?: string; extraArgs?: string[] } = {},
 ): Promise<void> {
-  // Targeting: an explicit `extraArgs` wins (callers/tests that know exactly
-  // what they want); otherwise resolve which agents to install to. We must NOT
-  // use the upstream `--all` (= `--skill '*' --agent '*' -y`), which sprays the
-  // skills into every one of ~70 agent conventions on the machine. Instead we
-  // install every skill (`--skill '*'`) to a scoped agent set: the project's
-  // existing skill folders, else the agent running us / installed agent CLIs,
-  // else a Claude-Code + `.agents` floor. See resolveAgentTargets.
-  let extraArgs = opts.extraArgs;
-  if (!extraArgs) {
-    const targets = resolveAgentTargets({
-      cwd: opts.cwd ?? process.cwd(),
-      env: process.env,
-      pathStr: process.env["PATH"] ?? "",
-      platform: process.platform,
-    });
-    console.log(c.dim(`Installing to: ${targets.agents.join(", ")} — ${targets.reason}`));
-    extraArgs = buildSkillsAddArgs(targets.agents);
-  }
-
-  // `--copy` writes real files into each target agent's skills dir, instead of
-  // the upstream default (a canonical `.agents/skills` store + per-agent
-  // symlinks). That default re-serialises each SKILL.md's frontmatter, so an
-  // installed bundle no longer byte-matches the published manifest — `skills
-  // check` then reports a freshly-installed set as outdated, and the symlinked
-  // layout doesn't reliably land where the agent actually reads. Real copies
-  // keep the install faithful to the manifest and detectable by `skills check`.
-  return spawnNpx(["skills", "add", source, ...extraArgs, "--copy"], opts);
+  return spawnNpx(["skills", "add", source, ...(opts.extraArgs ?? GLOBAL_INSTALL_ARGS)], opts);
 }
 
 // Skill names are kebab-case directory names. Refuse anything that isn't one
@@ -108,11 +119,33 @@ function runSkillsRemove(names: string[], opts: { global: boolean }): Promise<vo
   return spawnNpx(["skills", "remove", ...safe, ...(opts.global ? ["-g"] : []), "--yes"]);
 }
 
-// Use the full GitHub URL (not the `owner/repo` slug) so `skills add` git-clones
-// the repo directly at latest `main`, bypassing the skills.sh registry — which
-// can lag behind the repo. Our freshness check already resolves "latest"
-// straight from GitHub, so this keeps install/update consistent with check.
+// Use the full GitHub URL (not the `owner/repo` slug) as the clone source. The
+// freshness comes from --full-depth (see GLOBAL_INSTALL_ARGS), which clones the
+// repo at latest `main`; the URL just names what to clone. Our freshness check
+// resolves "latest" straight from GitHub too, so install and check agree.
 const SOURCES = [{ name: "HyperFrames", url: "https://github.com/heygen-com/hyperframes" }];
+
+// Fan HyperFrames' own skills out to every other installed agent. Scope by the
+// lock's source attribution (the same definition prune uses) — NOT by listing
+// ~/.claude/skills, which is shared with the user's other Claude skills (gstack,
+// personal, company). No-op when nothing is attributed or the global store is
+// absent, so it's safe to run unconditionally after any install. Best-effort: a
+// mirror failure must not fail the install.
+function mirrorToInstalledAgents(): void {
+  try {
+    const names = hyperframesSkillNames({ scope: "global" });
+    if (names.length === 0) return;
+    const { mirrored } = mirrorGlobalSkills({ skills: names });
+    const n = mirrored.length;
+    if (n > 0) {
+      console.log(
+        c.dim(`Linked skills into ${n} other agent ${n === 1 ? "directory" : "directories"}.`),
+      );
+    }
+  } catch {
+    // best-effort
+  }
+}
 
 export async function installAllSkills(
   opts: { cwd?: string; extraArgs?: string[]; strict?: boolean } = {},
@@ -138,6 +171,8 @@ export async function installAllSkills(
       console.log(c.dim(`${source.name} skills skipped`));
     }
   }
+
+  mirrorToInstalledAgents();
 }
 
 // ── check ────────────────────────────────────────────────────────────────────
