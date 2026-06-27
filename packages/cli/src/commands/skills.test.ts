@@ -54,18 +54,30 @@ vi.mock("@clack/prompts", () => ({
 // default returns nothing removed, and the prune test overrides per-call.
 vi.mock("../utils/skillsManifest.js", () => ({
   checkSkills: vi.fn(async () => ({ skills: [] })),
+  // installAllSkills resolves the HyperFrames skill names (lock-attributed) to
+  // scope the mirror; pin it so these arg-shape tests don't read a real lock.
+  hyperframesSkillNames: vi.fn(() => ["hyperframes"]),
 }));
 
-// Agent-target resolution probes the real cwd / PATH / env, which would make
-// the spawned-args assertions environment-dependent. Pin it to a fixed result
-// so these tests verify how the command BUILDS the spawn, not what's installed
-// on the test host. The resolver's own decision tree is covered in
-// skillsTargets.test.ts. buildSkillsAddArgs is reproduced (it's trivial) so the
-// arg shape under test stays real.
-vi.mock("../utils/skillsTargets.js", () => ({
-  resolveAgentTargets: vi.fn(() => ({ agents: ["claude-code", "universal"], reason: "test" })),
-  buildSkillsAddArgs: (agents: string[]) => ["--skill", "*", "--agent", ...agents, "--yes"],
+// The install fans out to other agents via mirrorGlobalSkills, which touches
+// the real $HOME. Stub it so these arg-shape tests never create symlinks in the
+// dev machine's agent dirs — the mirror has its own isolated-HOME unit tests.
+vi.mock("../utils/skillsMirror.js", () => ({
+  mirrorGlobalSkills: vi.fn(() => ({ source: null, mirrored: [] })),
 }));
+
+// The global install command this CLI runs (after `skills add <url>`).
+const GLOBAL_ARGS = [
+  "--skill",
+  "*",
+  "--global",
+  "--agent",
+  "claude-code",
+  "universal",
+  "--copy",
+  "--full-depth",
+  "--yes",
+] as const;
 
 function setPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, "platform", {
@@ -101,7 +113,7 @@ describe("hyperframes skills", () => {
     process.exitCode = prevExitCode;
   });
 
-  it("sets GIT_CLONE_PROTECTION_ACTIVE=0 on the spawned skills CLI child (GH #316)", async () => {
+  it("sets clone-safe env on the spawned skills CLI child (GH #316 + LFS skip)", async () => {
     setPlatform("linux");
 
     const { default: skillsCmd } = await import("./skills.js");
@@ -113,6 +125,8 @@ describe("hyperframes skills", () => {
     expect(first!.args).toContain("skills");
     expect(first!.args).toContain("add");
     expect(first!.env?.GIT_CLONE_PROTECTION_ACTIVE).toBe("0");
+    // --full-depth clones the repo; skip LFS so we don't drag in unrelated blobs.
+    expect(first!.env?.GIT_LFS_SKIP_SMUDGE).toBe("1");
   });
 
   it.each([
@@ -120,35 +134,13 @@ describe("hyperframes skills", () => {
       "linux",
       "npx",
       ["--version"],
-      [
-        "skills",
-        "add",
-        "https://github.com/heygen-com/hyperframes",
-        "--skill",
-        "*",
-        "--agent",
-        "claude-code",
-        "universal",
-        "--yes",
-        "--copy",
-      ],
+      ["skills", "add", "https://github.com/heygen-com/hyperframes", ...GLOBAL_ARGS],
     ],
     [
       "darwin",
       "npx",
       ["--version"],
-      [
-        "skills",
-        "add",
-        "https://github.com/heygen-com/hyperframes",
-        "--skill",
-        "*",
-        "--agent",
-        "claude-code",
-        "universal",
-        "--yes",
-        "--copy",
-      ],
+      ["skills", "add", "https://github.com/heygen-com/hyperframes", ...GLOBAL_ARGS],
     ],
     [
       "win32",
@@ -162,13 +154,7 @@ describe("hyperframes skills", () => {
         "skills",
         "add",
         "https://github.com/heygen-com/hyperframes",
-        "--skill",
-        "*",
-        "--agent",
-        "claude-code",
-        "universal",
-        "--yes",
-        "--copy",
+        ...GLOBAL_ARGS,
       ],
     ],
   ] as const)(
@@ -201,11 +187,12 @@ describe("hyperframes skills", () => {
     await runSkillsUpdate();
     expect(process.exitCode).toBe(0);
     const args = state.spawnCalls[0]?.args ?? [];
-    // pulls the full set straight from GitHub
+    // pulls the full set straight from GitHub, globally, as a faithful clone
     expect(args).toContain("https://github.com/heygen-com/hyperframes");
-    // every skill, but to a scoped agent set — never the `--all` (= `--agent '*'`) spray
-    expect(args).toContain("--skill");
-    expect(args).toContain("--agent");
+    expect(args).toContain("--global");
+    expect(args).toContain("--copy");
+    expect(args).toContain("--full-depth");
+    // never the `--all` (= `--agent '*'`) spray
     expect(args).not.toContain("--all");
     // `--agent` must be followed by a concrete key, never the `'*'` wildcard
     const agentValue = args[args.indexOf("--agent") + 1];
