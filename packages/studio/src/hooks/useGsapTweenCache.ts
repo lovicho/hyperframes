@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { GsapAnimation, GsapKeyframesData, ParsedGsap } from "@hyperframes/core/gsap-parser";
-import type { GsapPercentageKeyframe } from "@hyperframes/core/gsap-parser";
 import { isStudioHoldSet } from "@hyperframes/core/gsap-parser";
 import { usePlayerStore } from "../player/store/playerStore";
 import { readRuntimeKeyframes, scanAllRuntimeKeyframes } from "./gsapRuntimeBridge";
@@ -8,63 +7,8 @@ import {
   clearKeyframeCacheForElement,
   clearKeyframeCacheForFile,
 } from "./gsapKeyframeCacheHelpers";
-import { PROPERTY_DEFAULTS, toAbsoluteTime } from "./gsapShared";
-
-function deduplicateKeyframes(keyframes: GsapPercentageKeyframe[]): GsapPercentageKeyframe[] {
-  const byPct = new Map<number, GsapPercentageKeyframe>();
-  for (const kf of keyframes) {
-    const existing = byPct.get(kf.percentage);
-    if (existing) {
-      existing.properties = { ...existing.properties, ...kf.properties };
-      if (kf.ease) existing.ease = kf.ease;
-    } else {
-      byPct.set(kf.percentage, { ...kf, properties: { ...kf.properties } });
-    }
-  }
-  return Array.from(byPct.values()).sort((a, b) => a.percentage - b.percentage);
-}
-
-// fallow-ignore-next-line complexity
-function synthesizeFlatTweenKeyframes(anim: GsapAnimation): GsapKeyframesData | null {
-  if (anim.method === "set") {
-    // A `set` is a STATIC HOLD — a value applied at one point, not an animated
-    // keyframe. It must NOT synthesize a keyframe, or the timeline + panel show a
-    // phantom diamond for a value that doesn't animate. This holds for a base
-    // `gsap.set` (off-timeline) AND an on-timeline `tl.set`, and aligns the AST
-    // path with the runtime scan, which already skips every zero-duration set.
-    return null;
-  }
-  const toProps = anim.properties;
-  const fromProps = anim.fromProperties;
-  if (!toProps || Object.keys(toProps).length === 0) return null;
-
-  const startProps: Record<string, number | string> = {};
-  const endProps: Record<string, number | string> = {};
-
-  if (anim.method === "from") {
-    for (const [k, v] of Object.entries(toProps)) {
-      startProps[k] = v;
-      endProps[k] = PROPERTY_DEFAULTS[k] ?? 0;
-    }
-  } else if (anim.method === "fromTo" && fromProps) {
-    Object.assign(startProps, fromProps);
-    Object.assign(endProps, toProps);
-  } else {
-    for (const [k, v] of Object.entries(toProps)) {
-      startProps[k] = PROPERTY_DEFAULTS[k] ?? 0;
-      endProps[k] = v;
-    }
-  }
-
-  return {
-    format: "percentage",
-    keyframes: [
-      { percentage: 0, properties: startProps },
-      { percentage: 100, properties: endProps },
-    ],
-    ...(anim.ease ? { ease: anim.ease } : {}),
-  };
-}
+import { toAbsoluteTime } from "./gsapShared";
+import { deduplicateKeyframes, synthesizeFlatTweenKeyframes } from "./gsapTweenSynth";
 
 function extractIdFromSelector(selector: string): string | null {
   const match = selector.match(/^#([\w-]+)/);
@@ -176,6 +120,37 @@ export async function fetchParsedAnimations(
   }
 }
 
+/**
+ * Clip-relative timing basis for an element. Sub-composition internals (e.g. pills
+ * inside a scene) aren't timeline clips themselves — they're derived at expand time
+ * — so they're absent from `elements`. Without a basis, elDuration defaulted to 1
+ * and clip-relative keyframe percentages blew past 100% (rendering off the clip).
+ * Fall back to the sub-comp HOST's bounds, resolved via domClipChildren (the host's
+ * data-composition-src is stripped in the rendered DOM, so we can't query it).
+ */
+function resolveClipTimingBasis(
+  elementId: string,
+  sourceFile: string,
+  elements: ReadonlyArray<{
+    domId?: string;
+    key?: string;
+    id: string;
+    start: number;
+    duration: number;
+  }>,
+  domClipChildren: ReadonlyArray<{ id: string; hostId: string }>,
+): { elStart: number; elDuration: number } {
+  const direct = elements.find(
+    (el) => el.domId === elementId || (el.key ?? el.id) === `${sourceFile}#${elementId}`,
+  );
+  if (direct) return { elStart: direct.start, elDuration: direct.duration };
+  const hostId = domClipChildren.find((c) => c.id === elementId)?.hostId;
+  const host = hostId
+    ? elements.find((el) => el.domId === hostId || (el.key ?? el.id) === `index.html#${hostId}`)
+    : undefined;
+  return { elStart: host?.start ?? 0, elDuration: host?.duration ?? 1 };
+}
+
 export function useGsapAnimationsForElement(
   projectId: string | null,
   sourceFile: string,
@@ -192,6 +167,11 @@ export function useGsapAnimationsForElement(
   const [unsupportedTimelinePattern, setUnsupportedTimelinePattern] = useState(false);
   const lastFetchKeyRef = useRef("");
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Re-run the per-element cache populate when sub-comp DOM children appear, so a
+  // sub-comp element gets its host-relative keyframe percentages (not elDuration=1).
+  const domClipChildrenKey = usePlayerStore((s) =>
+    s.domClipChildren.map((c) => `${c.id}<${c.hostId}`).join("|"),
+  );
 
   useEffect(() => {
     const targetKey = target?.id ?? target?.selector ?? "";
@@ -351,12 +331,13 @@ export function useGsapAnimationsForElement(
 
     // Resolve the element's time range from the player store so we can
     // convert tween-relative keyframe percentages to clip-relative ones.
-    const { elements } = usePlayerStore.getState();
-    const timelineEl = elements.find(
-      (el) => el.domId === elementId || (el.key ?? el.id) === `${sourceFile}#${elementId}`,
+    const { elements, domClipChildren } = usePlayerStore.getState();
+    const { elStart, elDuration } = resolveClipTimingBasis(
+      elementId,
+      sourceFile,
+      elements,
+      domClipChildren,
     );
-    const elStart = timelineEl?.start ?? 0;
-    const elDuration = timelineEl?.duration ?? 1;
 
     const allKeyframes: Array<
       GsapKeyframesData["keyframes"][0] & { tweenPercentage?: number; propertyGroup?: string }
@@ -419,7 +400,8 @@ export function useGsapAnimationsForElement(
     // PropertyPanel reads the cache by bare elementId (without sourceFile prefix),
     // so write a duplicate entry under the bare key for cross-component lookups.
     setKeyframeCache(elementId, merged);
-  }, [elementId, sourceFile, animations]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elementId, sourceFile, animations, domClipChildrenKey]);
 
   return { animations, multipleTimelines, unsupportedTimelinePattern };
 }
@@ -442,13 +424,19 @@ export function usePopulateKeyframeCacheForFile(
   iframeRef?: React.RefObject<HTMLIFrameElement | null>,
 ): void {
   const elementCount = usePlayerStore((s) => s.elements.length);
+  // Re-run when sub-comp DOM children appear (they supply the host bounds the
+  // clip-relative keyframe percentages are computed against; without this the
+  // cache is computed once before they exist and the percentages stay wrong).
+  const domClipChildrenKey = usePlayerStore((s) =>
+    s.domClipChildren.map((c) => `${c.id}<${c.hostId}`).join("|"),
+  );
   const lastFetchKeyRef = useRef("");
 
   const runtimeScanDoneRef = useRef("");
   const astFetchDoneRef = useRef("");
 
   useEffect(() => {
-    const fetchKey = `kf-cache:${projectId}:${sourceFile}:${version}:${elementCount}`;
+    const fetchKey = `kf-cache:${projectId}:${sourceFile}:${version}:${elementCount}:${domClipChildrenKey}`;
     if (fetchKey === lastFetchKeyRef.current) return;
     lastFetchKeyRef.current = fetchKey;
     runtimeScanDoneRef.current = "";
@@ -461,7 +449,7 @@ export function usePopulateKeyframeCacheForFile(
       if (!parsed) return;
       const { setKeyframeCache } = usePlayerStore.getState();
       clearKeyframeCacheForFile(sf);
-      const { elements } = usePlayerStore.getState();
+      const { elements, domClipChildren } = usePlayerStore.getState();
       const doc = iframeRef?.current?.contentDocument;
       const mergedByElement = new Map<string, GsapKeyframesData>();
       for (const anim of parsed.animations) {
@@ -482,11 +470,7 @@ export function usePopulateKeyframeCacheForFile(
         // Attribute the tween to every element it animates (handles class /
         // group / descendant selectors, not just `#id`).
         for (const id of resolveSelectorElementIds(anim.targetSelector, doc)) {
-          const timelineEl = elements.find(
-            (el) => el.domId === id || (el.key ?? el.id) === `${sf}#${id}`,
-          );
-          const elStart = timelineEl?.start ?? 0;
-          const elDuration = timelineEl?.duration ?? 1;
+          const { elStart, elDuration } = resolveClipTimingBasis(id, sf, elements, domClipChildren);
           const clipKeyframes = kfData.keyframes.map((kf) => {
             const absTime = toAbsoluteTime(tweenPos, tweenDur, kf.percentage);
             // 0.001% precision (matching useGsapAnimationsForElement above) so a
@@ -524,7 +508,7 @@ export function usePopulateKeyframeCacheForFile(
     // iframeRef is read for DOM selector resolution but intentionally not a dep
     // (it's a stable ref; the separate runtime-scan effect owns iframe timing).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, sourceFile, version, elementCount]);
+  }, [projectId, sourceFile, version, elementCount, domClipChildrenKey]);
 
   // Separate effect for runtime keyframe discovery — polls until the iframe
   // has loaded GSAP timelines, independent of the AST fetch lifecycle.

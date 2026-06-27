@@ -10,7 +10,10 @@ export const examples: Example[] = [
   ["Start from an audio file", "hyperframes init my-video --audio track.mp3"],
   ["Scaffold with Tailwind CSS", "hyperframes init my-video --example blank --tailwind"],
   ["Non-interactive mode (for CI or AI agents)", "hyperframes init my-video --non-interactive"],
-  ["Skip AI coding skills installation", "hyperframes init my-video --skip-skills"],
+  [
+    "Opt out of the GitHub skills check (CI/tests only)",
+    "HYPERFRAMES_SKIP_SKILLS=1 hyperframes init my-video --non-interactive",
+  ],
 ];
 import {
   existsSync,
@@ -601,7 +604,19 @@ async function ensureSkillsCurrent(destDir: string): Promise<void> {
     // installAllSkills installs the full set once globally and mirrors it into
     // every installed agent's global dir — project-independent, so a freshly
     // scaffolded project doesn't need any agent folders yet.
-    await installAllSkills({ cwd: destDir });
+    //
+    // Best-effort: installAllSkills (non-strict here) already swallows its own
+    // failures, but now that --skip-skills no longer escapes this path every
+    // init runs it — including offline ones, where checkSkills throws and we
+    // fall through to "install anyway". Wrap defensively so a skills-install
+    // failure can never break `init` itself; it only warns and proceeds.
+    try {
+      await installAllSkills({ cwd: destDir });
+    } catch (err) {
+      console.log(
+        c.dim(`AI coding skills install skipped: ${err instanceof Error ? err.message : err}`),
+      );
+    }
   } else {
     console.log(c.success("AI coding skills are already up to date."));
   }
@@ -670,7 +685,8 @@ export default defineCommand({
     },
     "skip-skills": {
       type: "boolean",
-      description: "Skip AI coding skills installation",
+      description:
+        "[temporarily ignored] init always checks AI skills against GitHub while the skills.sh registry catches up; set HYPERFRAMES_SKIP_SKILLS=1 to opt out (CI/tests)",
     },
     tailwind: {
       type: "boolean",
@@ -705,12 +721,31 @@ export default defineCommand({
     const videoFlag = args.video;
     const audioFlag = args.audio;
     const skipTranscribe = args["skip-transcribe"] === true;
-    const skipSkills = args["skip-skills"] === true;
+    // Temporary measure while the skills.sh registry sync lags GitHub main: the
+    // `--skip-skills` FLAG is neutered so an agent (or user) that passes it can
+    // NOT dodge the GitHub skills freshness check. The "don't pass --skip-skills"
+    // guidance lives in SKILL.md, which ships through the same laggy skills.sh
+    // channel and can't be relied on to reach the agent — so the guarantee has to
+    // live in the CLI, the one channel that updates promptly (`npx
+    // hyperframes@latest`). CI and unit tests still opt out via the
+    // HYPERFRAMES_SKIP_SKILLS=1 env var, which the agent/user CLI path never sets.
+    // Revert to `args["skip-skills"] === true` once skills.sh catches up.
+    const skipSkills = process.env.HYPERFRAMES_SKIP_SKILLS === "1";
+    const skipSkillsFlagIgnored = args["skip-skills"] === true && !skipSkills;
     const tailwind = args.tailwind === true;
     const nonInteractive = args["non-interactive"] === true;
     const modelFlag = args.model;
     const languageFlag = args.language;
     const interactive = !nonInteractive && process.stdout.isTTY === true;
+
+    if (skipSkillsFlagIgnored) {
+      console.log(
+        c.dim(
+          "Note: --skip-skills is temporarily ignored — init always checks AI skills " +
+            "against GitHub while the skills.sh registry catches up.",
+        ),
+      );
+    }
 
     let resolutionPreset: CanvasResolution | undefined;
     if (args.resolution !== undefined) {
@@ -1053,7 +1088,8 @@ export default defineCommand({
     clack.note(files.map((f) => c.accent(f)).join("\n"), c.success(`Created ${name}/`));
 
     // Check skills against GitHub and (re)install only if outdated or missing —
-    // init is the one place the full set is pulled. Opt out with --skip-skills.
+    // init is the one place the full set is pulled. The --skip-skills flag is
+    // temporarily neutered (see above); CI/tests opt out via HYPERFRAMES_SKIP_SKILLS=1.
     if (!skipSkills) {
       await ensureSkillsCurrent(destDir);
     }
