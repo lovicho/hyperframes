@@ -37,6 +37,8 @@ import {
   removeAnimationFromScript,
   addKeyframeToScript,
   removeKeyframeFromScript,
+  moveKeyframeInScript,
+  resizeKeyframedTweenInScript,
   updateKeyframeInScript,
   convertToKeyframesFromScript,
   removeAllKeyframesFromScript,
@@ -625,6 +627,22 @@ type GsapMutationRequest =
     }
   | { type: "remove-keyframe"; animationId: string; percentage: number }
   | {
+      type: "move-keyframe";
+      animationId: string;
+      fromPercentage: number;
+      toPercentage: number;
+    }
+  | {
+      // Boundary drag-to-retime: grow/shift a keyframed tween's window and re-key
+      // its existing keyframes in place (preserves _auto / per-keyframe ease /
+      // easeEach / outer ease, unlike the array-rebuild replace-with-keyframes).
+      type: "resize-keyframed-tween";
+      animationId: string;
+      position: number;
+      duration: number;
+      pctRemap: Array<{ from: number; to: number }>;
+    }
+  | {
       type: "update-keyframe";
       animationId: string;
       percentage: number;
@@ -778,6 +796,8 @@ const HOLD_SYNC_MUTATION_TYPES = new Set<string>([
   "add-keyframe",
   "update-keyframe",
   "remove-keyframe",
+  "move-keyframe",
+  "resize-keyframed-tween",
   "remove-all-keyframes",
   "add-with-keyframes",
   "replace-with-keyframes",
@@ -945,6 +965,23 @@ function executeGsapMutationAcorn(
     case "remove-keyframe": {
       return removeKeyframeFromScript(block.scriptText, body.animationId, body.percentage);
     }
+    case "move-keyframe": {
+      return moveKeyframeInScript(
+        block.scriptText,
+        body.animationId,
+        body.fromPercentage,
+        body.toPercentage,
+      );
+    }
+    case "resize-keyframed-tween": {
+      return resizeKeyframedTweenInScript(
+        block.scriptText,
+        body.animationId,
+        body.position,
+        body.duration,
+        body.pctRemap,
+      );
+    }
     case "update-keyframe": {
       return updateKeyframeInScript(
         block.scriptText,
@@ -1103,6 +1140,8 @@ async function executeGsapMutationRecast(
     removeAnimationFromScript,
     addKeyframeToScript,
     removeKeyframeFromScript,
+    moveKeyframeInScript,
+    resizeKeyframedTweenInScript,
     updateKeyframeInScript,
     convertToKeyframesInScript,
     removeAllKeyframesFromScript,
@@ -1255,6 +1294,23 @@ async function executeGsapMutationRecast(
     }
     case "remove-keyframe": {
       return removeKeyframeFromScript(block.scriptText, body.animationId, body.percentage);
+    }
+    case "move-keyframe": {
+      return moveKeyframeInScript(
+        block.scriptText,
+        body.animationId,
+        body.fromPercentage,
+        body.toPercentage,
+      );
+    }
+    case "resize-keyframed-tween": {
+      return resizeKeyframedTweenInScript(
+        block.scriptText,
+        body.animationId,
+        body.position,
+        body.duration,
+        body.pctRemap,
+      );
     }
     case "update-keyframe": {
       return updateKeyframeInScript(

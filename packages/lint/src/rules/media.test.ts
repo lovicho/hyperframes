@@ -48,6 +48,25 @@ describe("media rules", () => {
     expect(finding?.message).toContain("FROZEN");
   });
 
+  it("flags media that has data-hf-id but no real id", async () => {
+    // Regression: readAttr(tag, "id") used a \b boundary that matched the
+    // trailing `id="…"` inside `data-hf-id="…"`, so media carrying only a
+    // Studio-stamped data-hf-id passed the check and then rendered as a blank
+    // wash (video) / silent (audio). data-hf-id is NOT a render id.
+    const html = `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <video data-hf-id="hf-v1a2b3" data-start="0" data-duration="10" src="clip.mp4" muted playsinline></video>
+    <audio data-hf-id="hf-a4c5d6" data-start="0" data-duration="10" src="narration.wav"></audio>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const findings = result.findings.filter((f) => f.code === "media_missing_id");
+    expect(findings).toHaveLength(2);
+    expect(findings.every((f) => f.severity === "error")).toBe(true);
+  });
+
   it("does not flag media elements that have id", async () => {
     const html = `
 <html><body>
@@ -246,6 +265,34 @@ describe("media rules", () => {
 </body></html>`;
     const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "media_in_subcomposition");
+    expect(finding).toBeUndefined();
+  });
+
+  it("reports error for media with crossorigin (breaks preview when host omits CORS)", async () => {
+    const html = `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <video id="v1" crossorigin="anonymous" src="https://cdn.example.com/clip.mp4" data-start="0" data-duration="5" muted playsinline></video>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "media_crossorigin_breaks_preview");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("error");
+    expect(finding?.elementId).toBe("v1");
+  });
+
+  it("does not flag media without crossorigin", async () => {
+    const html = `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <video id="v1" src="https://cdn.example.com/clip.mp4" data-start="0" data-duration="5" muted playsinline></video>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "media_crossorigin_breaks_preview");
     expect(finding).toBeUndefined();
   });
 });

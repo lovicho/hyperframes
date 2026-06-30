@@ -1969,6 +1969,10 @@ function percentageFromKey(key: string): number {
 
 const PCT_TOLERANCE = 2;
 
+// Below this (tween-%) a retime resolves onto its own source keyframe → skip the
+// write. Mirrors the drag layer's NOOP_EPSILON so a deliberate 1% retime commits.
+const MOVE_NOOP_EPSILON_PCT = 0.05;
+
 function findKeyframePropByPct(
   kfNode: AstNode,
   percentage: number,
@@ -2312,6 +2316,96 @@ export function removeKeyframeFromScript(
     collapseKeyframesToFlat(loc.target.call.varsArg, record);
   }
 
+  return recast.print(loc.parsed.ast).code;
+}
+
+/**
+ * Retime a keyframe: move the keyframe at `fromPercentage` to `toPercentage`,
+ * PRESERVING its properties and per-keyframe ease (the Studio "Move to Playhead"
+ * gesture). Re-sorts keyframes by percentage. If a keyframe already exists at
+ * `toPercentage`, it is overwritten by the moved one (no duplicate). No-op when
+ * the animation/keyframe isn't found, the tween has no object-form keyframes, or
+ * the move resolves onto the same keyframe. Acorn twin: moveKeyframeInScript.
+ */
+export function moveKeyframeInScript(
+  script: string,
+  animationId: string,
+  fromPercentage: number,
+  toPercentage: number,
+): string {
+  const loc = locateAnimationWithFallback(script, animationId);
+  if (!loc) return script;
+  const kfNode = findKeyframesObjectNode(loc.target.call.varsArg);
+  if (!kfNode) return script;
+
+  const match = findKeyframePropByPct(kfNode, fromPercentage);
+  if (!match) return script;
+  // No-op ONLY for a negligible move (matches the drag's NOOP_EPSILON). The old
+  // `collision.prop === match.prop` guard dropped EVERY sub-PCT_TOLERANCE (2%)
+  // retime, because findKeyframePropByPct resolves the destination back onto the
+  // from-keyframe — so a deliberate 1% drag committed nothing. Acorn twin too.
+  if (Math.abs(fromPercentage - toPercentage) < MOVE_NOOP_EPSILON_PCT) return script;
+  // A destination keyframe is only a real collision (overwrite) when it's a
+  // DIFFERENT keyframe; resolving back onto the from-keyframe is not.
+  const dest = findKeyframePropByPct(kfNode, toPercentage);
+  const collision = dest && dest.prop !== match.prop ? dest : null;
+
+  // Reuse each keyframe's value node verbatim (preserves properties +
+  // per-keyframe ease + _auto). Drop the moved keyframe (and any destination
+  // keyframe it overwrites), re-key the moved value to toPercentage, then re-sort.
+  const movedValue = match.prop.value;
+  const entries: Array<{ pct: number; value: AstNode }> = [];
+  for (const prop of filterPercentageProps(kfNode)) {
+    if (prop === match.prop) continue;
+    if (collision && prop === collision.prop) continue;
+    const pct = percentageFromKey(propKeyName(prop) ?? "");
+    if (Number.isNaN(pct)) continue;
+    entries.push({ pct, value: prop.value });
+  }
+  entries.push({ pct: toPercentage, value: movedValue });
+  entries.sort((a, b) => a.pct - b.pct);
+
+  kfNode.properties = entries.map((e) => {
+    const p = parseExpr(`{ ${JSON.stringify(`${e.pct}%`)}: {} }`).properties[0];
+    p.value = e.value;
+    return p;
+  });
+  return recast.print(loc.parsed.ast).code;
+}
+
+/**
+ * Resize a keyframed tween's window (boundary drag-to-retime): set the tween's
+ * `position` + `duration` and RE-KEY each existing keyframe to its new percentage
+ * via `pctRemap` (each `{ from, to }` matches an existing keyframe by its current
+ * tween-% and re-keys it to `to`).
+ *
+ * Re-keys the percentage KEY in place, leaving every value node (so `_auto` +
+ * per-keyframe `ease` survive), the keyframes-object `easeEach`, and the OUTER
+ * tween `ease` untouched. Acorn twin: resizeKeyframedTweenInScript.
+ */
+export function resizeKeyframedTweenInScript(
+  script: string,
+  animationId: string,
+  newPosition: number,
+  newDuration: number,
+  pctRemap: ReadonlyArray<{ from: number; to: number }>,
+): string {
+  const loc = locateAnimationWithFallback(script, animationId);
+  if (!loc) return script;
+  const kfNode = findKeyframesObjectNode(loc.target.call.varsArg);
+  if (!kfNode) return script;
+
+  const seen = new Set<AstNode>();
+  for (const { from, to } of pctRemap) {
+    const match = findKeyframePropByPct(kfNode, from);
+    if (!match || seen.has(match.prop)) continue;
+    seen.add(match.prop);
+    // Replace only the key node; the value node (incl. _auto + per-keyframe ease)
+    // stays verbatim. easeEach is a sibling non-percentage prop, left untouched.
+    match.prop.key = parseExpr(`{ ${JSON.stringify(`${to}%`)}: 0 }`).properties[0].key;
+  }
+
+  applyUpdatesToCall(loc.target.call, { position: newPosition, duration: newDuration });
   return recast.print(loc.parsed.ast).code;
 }
 

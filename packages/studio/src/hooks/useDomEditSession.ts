@@ -201,6 +201,8 @@ export function useDomEditSession({
     addKeyframe,
     addKeyframeBatch,
     removeKeyframe,
+    moveKeyframe,
+    resizeKeyframedTween,
     convertToKeyframes,
     removeAllKeyframes,
     setArcPath,
@@ -258,7 +260,9 @@ export function useDomEditSession({
     onTrySdkPersist: sdkSession
       ? (selection, operations, originalContent, targetPath, options) => {
           // Resolver shadow runs regardless of the cutover flag — decoupled tripwire.
-          runResolverShadow(sdkSession, selection.hfId, operations);
+          // Pass originalContent so the runtime-node filter can suppress hf-ids
+          // absent from source (script-created nodes the SDK can't model).
+          runResolverShadow(sdkSession, selection.hfId, operations, originalContent);
           return sdkCutoverPersist(
             selection,
             operations,
@@ -356,6 +360,9 @@ export function useDomEditSession({
     handleGsapAddKeyframe,
     handleGsapAddKeyframeBatch,
     handleGsapRemoveKeyframe,
+    handleGsapMoveKeyframeToPlayhead,
+    handleGsapMoveKeyframe,
+    handleGsapResizeKeyframedTween,
     handleGsapConvertToKeyframes,
     handleGsapRemoveAllKeyframes,
     handleResetSelectedElementKeyframes,
@@ -393,6 +400,8 @@ export function useDomEditSession({
     addKeyframe,
     addKeyframeBatch,
     removeKeyframe,
+    moveKeyframe,
+    resizeKeyframedTween,
     convertToKeyframes,
     removeAllKeyframes,
     handleDomManualEditsReset,
@@ -553,6 +562,9 @@ export function useDomEditSession({
     handleGsapAddKeyframe,
     handleGsapAddKeyframeBatch,
     handleGsapRemoveKeyframe,
+    handleGsapMoveKeyframeToPlayhead,
+    handleGsapMoveKeyframe,
+    handleGsapResizeKeyframedTween,
     handleGsapConvertToKeyframes,
     handleGsapRemoveAllKeyframes,
     handleResetSelectedElementKeyframes,
