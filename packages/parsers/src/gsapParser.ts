@@ -1994,8 +1994,11 @@ function buildKeyframeValueNode(
   properties: Record<string, number | string>,
   ease?: string,
 ): AstNode {
-  const entries = Object.entries(properties).map(([k, v]) => `${safeKey(k)}: ${valueToCode(v)}`);
-  if (ease) entries.push(`ease: ${JSON.stringify(ease)}`);
+  const effectiveEase = ease ?? (typeof properties.ease === "string" ? properties.ease : undefined);
+  const entries = Object.entries(properties)
+    .filter(([k]) => k !== "ease")
+    .map(([k, v]) => `${safeKey(k)}: ${valueToCode(v)}`);
+  if (effectiveEase) entries.push(`ease: ${JSON.stringify(effectiveEase)}`);
   return parseExpr(`{ ${entries.join(", ")} }`);
 }
 

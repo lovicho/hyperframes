@@ -178,6 +178,7 @@ export const TimelineClipDiamonds = memo(function TimelineClipDiamonds({
           const d = dragRef.current;
           // No drag armed (canDrag false / non-primary press) → treat as a click.
           if (!d || d.kfKey !== kfKey) {
+            if (e.button !== 0) return;
             if (e.shiftKey) onShiftClickKeyframe?.(elementId, kf.percentage);
             else onClickKeyframe?.(kf.percentage);
             return;
