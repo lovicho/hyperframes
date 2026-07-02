@@ -62,19 +62,16 @@ vi.mock("../browser/preflight.js", () => ({
 describe("renderLocal browser GPU config", () => {
   const savedEnv = new Map<string, string | undefined>();
   // Pre-resolve once. The first dynamic `import("./render.js")` in this file
-  // cold-loads a heavy module graph (core + engine + producer, incl. linkedom)
-  // and takes >5 s on Windows runners — and materially longer under the full
-  // parallel monorepo test run, where it can exceed the default 10 s hook
-  // timeout on a contended CI runner. Importing once in `beforeAll` keeps every
-  // test fast and isolated; the explicit 30 s hook timeout absorbs cold-import
-  // contention so this doesn't flake (the failure was a pre-existing
-  // `Hook timed out in 10000ms`, reproducible on `main` under load).
+  // cold-loads a heavy module graph (core + engine + producer, incl. linkedom),
+  // slow under the parallel monorepo run — the generous hook timeout that
+  // absorbs that contention now lives in vitest.config.ts (shared by all CLI
+  // suites). Importing once in `beforeAll` keeps every test fast and isolated.
   let renderLocal: typeof import("./render.js").renderLocal;
   let resolveBrowserGpuForCli: typeof import("./render.js").resolveBrowserGpuForCli;
 
   beforeAll(async () => {
     ({ renderLocal, resolveBrowserGpuForCli } = await import("./render.js"));
-  }, 30_000);
+  });
 
   function setEnv(key: string, value: string) {
     if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
@@ -420,12 +417,11 @@ describe("renderLocal browser GPU config", () => {
 describe("checkRenderResolutionPreflight", () => {
   let checkRenderResolutionPreflight: typeof import("./render.js").checkRenderResolutionPreflight;
 
-  // 30 s hook timeout: cold-importing render.js (heavy graph) can exceed the
-  // default 10 s under parallel CI contention. See the note on the
-  // "renderLocal browser GPU config" beforeAll above.
+  // Cold-imports render.js (heavy graph); the generous hook timeout for parallel
+  // CI contention lives in vitest.config.ts. See the note above.
   beforeAll(async () => {
     ({ checkRenderResolutionPreflight } = await import("./render.js"));
-  }, 30_000);
+  });
 
   // Dims must be read the same way the producer's compiler reads them:
   // `data-width` / `data-height` on the `[data-composition-id]` root.
@@ -443,22 +439,22 @@ describe("checkRenderResolutionPreflight", () => {
     expect(await checkRenderResolutionPreflight(portraitHtml, "portrait", noModes)).toBeUndefined();
   });
 
-  it("returns a suggestion when a landscape preset is used on a portrait composition", async () => {
-    const message = await checkRenderResolutionPreflight(portraitHtml, "landscape", noModes);
-    expect(message).toBeDefined();
-    expect(message).toContain("--resolution portrait");
+  it("returns a suggestion + aspect-mismatch kind when a landscape preset is used on a portrait composition", async () => {
+    const result = await checkRenderResolutionPreflight(portraitHtml, "landscape", noModes);
+    expect(result?.message).toContain("--resolution portrait");
+    expect(result?.kind).toBe("aspect-mismatch");
   });
 
   it("suggests landscape for a landscape composition rendered with a portrait preset", async () => {
-    const message = await checkRenderResolutionPreflight(landscapeHtml, "portrait", noModes);
-    expect(message).toContain("--resolution landscape");
+    const result = await checkRenderResolutionPreflight(landscapeHtml, "portrait", noModes);
+    expect(result?.message).toContain("--resolution landscape");
   });
 
   it("preserves the 4K tier when suggesting a matching preset (square comp + landscape-4k → square-4k)", async () => {
     // Tier-aware suggestion is the load-bearing new behavior; square-4k is the
     // preset that only surfaces via a same-tier swap, so guard it explicitly.
-    const message = await checkRenderResolutionPreflight(comp(2160, 2160), "landscape-4k", noModes);
-    expect(message).toContain("--resolution square-4k");
+    const result = await checkRenderResolutionPreflight(comp(2160, 2160), "landscape-4k", noModes);
+    expect(result?.message).toContain("--resolution square-4k");
   });
 
   it("does not false-abort a landscape registry-block composition (data-width/height, no data-resolution)", async () => {
@@ -471,11 +467,34 @@ describe("checkRenderResolutionPreflight", () => {
   });
 
   it("flags alpha output combined with outputResolution", async () => {
-    const message = await checkRenderResolutionPreflight(landscapeHtml, "landscape-4k", {
+    const result = await checkRenderResolutionPreflight(landscapeHtml, "landscape-4k", {
       alphaRequested: true,
       hdrRequested: false,
     });
-    expect(message).toContain("alpha output");
+    expect(result?.message).toContain("alpha output");
+    expect(result?.kind).toBe("alpha-incompatible");
+  });
+
+  // The three remaining kinds share the same rejection sink (→ one emit each);
+  // guard their classification so the telemetry dimension stays accurate.
+  it("classifies an HDR + outputResolution combination as hdr-incompatible", async () => {
+    const result = await checkRenderResolutionPreflight(landscapeHtml, "landscape", {
+      alphaRequested: false,
+      hdrRequested: true,
+    });
+    expect(result?.kind).toBe("hdr-incompatible");
+  });
+
+  it("classifies a preset smaller than the composition as downsampling", async () => {
+    // 3840×2160 comp + landscape (1920×1080): same 16:9 aspect, target smaller.
+    const result = await checkRenderResolutionPreflight(comp(3840, 2160), "landscape", noModes);
+    expect(result?.kind).toBe("downsampling");
+  });
+
+  it("classifies a non-integer upscale as non-integer-scale", async () => {
+    // 1280×720 comp + landscape (1920×1080): same 16:9 aspect, 1.5× scale.
+    const result = await checkRenderResolutionPreflight(comp(1280, 720), "landscape", noModes);
+    expect(result?.kind).toBe("non-integer-scale");
   });
 
   it("returns undefined when composition dimensions can't be determined (defers to the pipeline)", async () => {
