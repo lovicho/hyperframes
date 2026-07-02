@@ -71,6 +71,7 @@ import { isDevMode } from "../utils/env.js";
 import { buildDockerRunArgs, resolveDockerPlatform } from "../utils/dockerRunArgs.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runEnvironmentChecks } from "../browser/preflight.js";
+import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import type { ProducerLogger, RenderJob } from "@hyperframes/producer";
 import {
   MAX_VP9_CPU_USED,
@@ -80,6 +81,7 @@ import {
 } from "@hyperframes/engine";
 import {
   normalizeResolutionFlag,
+  checkOutputResolutionCompatibility,
   parseFps,
   fpsToNumber,
   fpsToFfmpegArg,
@@ -785,6 +787,36 @@ export default defineCommand({
       }
     }
 
+    // ── Pre-flight: output-resolution vs composition compatibility ────────
+    // Catch a preset whose orientation/aspect ratio (or alpha/HDR mode)
+    // conflicts with the composition BEFORE the browser and ffmpeg spin up —
+    // otherwise this surfaces cryptically deep inside the render compiler
+    // (resolveDeviceScaleFactor). Best-effort: a composition we can't read or
+    // whose dimensions aren't a known preset falls through to the pipeline's
+    // own defense-in-depth check rather than blocking a render we can't reason
+    // about. See render-reliability workstream P1-3.
+    if (outputResolution) {
+      let resolutionIssue: string | undefined;
+      try {
+        const renderTarget = entryFile ? resolve(project.dir, entryFile) : project.indexPath;
+        resolutionIssue = await checkRenderResolutionPreflight(
+          readFileSync(renderTarget, "utf8"),
+          outputResolution,
+          {
+            alphaRequested: format === "webm" || format === "mov" || format === "png-sequence",
+            hdrRequested: args.hdr ?? false,
+          },
+        );
+      } catch {
+        // Unreadable file is non-fatal here — the render pipeline will surface
+        // the real problem with full context.
+      }
+      if (resolutionIssue) {
+        errorBox("Output resolution incompatible", resolutionIssue);
+        process.exit(1);
+      }
+    }
+
     // ── Validate HDR/SDR mutual exclusion ────────────────────────────────
     if (args.hdr && args.sdr) {
       console.error("Error: --hdr and --sdr are mutually exclusive.");
@@ -990,6 +1022,71 @@ export function resolveBrowserGpuForCli(
   if (browserGpuArg === false) return "software";
   if (envMode === "hardware" || envMode === "software" || envMode === "auto") return envMode;
   return "auto";
+}
+
+/**
+ * Read a composition's dimensions from the SAME source the producer's compiler
+ * uses — `data-width` / `data-height` on the `[data-composition-id]` root (see
+ * htmlCompiler.ts). Returns `undefined` when they can't be determined (no root,
+ * missing/invalid attrs, unparseable HTML). Note the producer *defaults* a
+ * missing attr to 1080; this pre-flight deliberately defers instead (returns
+ * `undefined`) rather than guess a dimension the author didn't declare, so it
+ * never false-aborts — the producer's defense-in-depth still catches that case.
+ *
+ * Deriving dims any other way (e.g. `data-resolution` or a `#stage` heuristic)
+ * risks disagreeing with the actual render: most compositions (all registry
+ * blocks) carry `data-width/height` and no `data-resolution`, so a parallel
+ * heuristic could false-abort a valid render. `DOMParser` isn't shipped by
+ * Node — the CLI polyfills it via linkedom, imported lazily so the heavy DOM
+ * library stays out of `render.js`'s module-load graph (it cold-imports at
+ * >5 s already; a static linkedom import tips the render test suite's import
+ * hook over its timeout — see the note on `renderLocal browser GPU config`).
+ */
+async function readCompositionDimensions(
+  compositionHtml: string,
+): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const { ensureDOMParser } = await import("../utils/dom.js");
+    ensureDOMParser();
+    const doc = new DOMParser().parseFromString(compositionHtml, "text/html");
+    const rootEl = doc.querySelector("[data-composition-id]");
+    const width = parseInt(rootEl?.getAttribute("data-width") ?? "", 10);
+    const height = parseInt(rootEl?.getAttribute("data-height") ?? "", 10);
+    if (width > 0 && height > 0) return { width, height };
+  } catch {
+    // Unreadable / unparseable composition — fall through to `undefined`.
+  }
+  return undefined;
+}
+
+/**
+ * Render pre-flight: return an actionable message when the chosen
+ * `outputResolution` preset is incompatible with the composition's
+ * orientation/aspect ratio, or with the alpha/HDR mode — or `undefined` when
+ * the combination is fine (or can't be determined statically).
+ *
+ * Extracted (and exported) so the CLI wiring around `process.exit` stays a
+ * thin adapter and the branch logic is unit-testable. See render-reliability
+ * workstream P1-3.
+ */
+export async function checkRenderResolutionPreflight(
+  compositionHtml: string,
+  outputResolution: CanvasResolution | undefined,
+  modes: { alphaRequested: boolean; hdrRequested: boolean },
+): Promise<string | undefined> {
+  if (!outputResolution) return undefined;
+  const dims = await readCompositionDimensions(compositionHtml);
+  // Couldn't determine the composition's actual dimensions — defer to the
+  // pipeline's own defense-in-depth check rather than guess.
+  if (!dims) return undefined;
+  const compat = checkOutputResolutionCompatibility({
+    compositionWidth: dims.width,
+    compositionHeight: dims.height,
+    outputResolution,
+    alphaRequested: modes.alphaRequested,
+    hdrRequested: modes.hdrRequested,
+  });
+  return compat.ok ? undefined : compat.message;
 }
 
 const DOCKER_IMAGE_PREFIX = "hyperframes-renderer";
@@ -1481,6 +1578,15 @@ function handleRenderError(
   });
   if (options.throwOnError) {
     throw new Error(message);
+  }
+  // A `Failed to launch the browser process` / `libnss3.so cannot open ...`
+  // failure on Linux/WSL is an environment problem, not a composition bug.
+  // Replace the generic "Try --docker" hint with the exact per-distro
+  // remediation and a pointer at `doctor`.
+  const remediation = chromeLaunchRemediation(message);
+  if (remediation) {
+    errorBox("Render failed — Chrome could not launch", message, remediation);
+    process.exit(1);
   }
   errorBox("Render failed", message, hint);
   process.exit(1);
