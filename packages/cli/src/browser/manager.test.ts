@@ -54,20 +54,45 @@ interface FsMockOptions {
 }
 
 function installFsMocks({ existing, dirs }: FsMockOptions) {
+  // Mutable, and returned, so tests can pre-seed a "lock already held" path or
+  // assert the lock dir doesn't leak after ensureBrowser resolves.
+  const paths = new Set(existing);
+  const mtimes = new Map([...existing].map((p) => [p, 0]));
   vi.doMock("node:fs", () => ({
-    existsSync: (p: string) => existing.has(p),
+    existsSync: (p: string) => paths.has(p),
     readdirSync: (p: string) => {
       const entries = dirs?.[p];
       if (!entries) throw new Error(`ENOENT: readdirSync mock had no entry for ${p}`);
       return entries;
     },
-    rmSync: () => {},
+    mkdirSync: (p: string, opts?: { recursive?: boolean }) => {
+      if (!opts?.recursive && paths.has(p)) {
+        const err = new Error(`EEXIST: file already exists, mkdir '${p}'`);
+        (err as NodeJS.ErrnoException).code = "EEXIST";
+        throw err;
+      }
+      paths.add(p);
+      mtimes.set(p, Date.now());
+    },
+    rmSync: (p: string) => {
+      paths.delete(p);
+      mtimes.delete(p);
+    },
+    statSync: (p: string) => {
+      if (!paths.has(p)) {
+        const err = new Error(`ENOENT: no such file or directory, stat '${p}'`);
+        (err as NodeJS.ErrnoException).code = "ENOENT";
+        throw err;
+      }
+      return { mtimeMs: mtimes.get(p) ?? 0 };
+    },
   }));
   vi.doMock("node:os", () => ({
     homedir: () => FAKE_HOME,
     platform: () => "linux",
     arch: () => "x64",
   }));
+  return paths;
 }
 
 function installPuppeteerBrowsersMock(
@@ -87,6 +112,15 @@ function installPuppeteerBrowsersMock(
   }));
 }
 
+function installChildProcessMocks() {
+  vi.doMock("node:child_process", () => ({
+    execSync: vi.fn(() => {
+      throw new Error("not found");
+    }),
+    spawnSync: vi.fn(),
+  }));
+}
+
 describe("findBrowser — cache resolution", () => {
   const origPlatform = process.platform;
   const origArch = process.arch;
@@ -99,6 +133,7 @@ describe("findBrowser — cache resolution", () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     Object.defineProperty(process, "arch", { value: "x64", configurable: true });
     delete process.env["HYPERFRAMES_BROWSER_PATH"];
+    installChildProcessMocks();
   });
 
   afterEach(() => {
@@ -107,6 +142,7 @@ describe("findBrowser — cache resolution", () => {
     vi.restoreAllMocks();
     vi.doUnmock("node:fs");
     vi.doUnmock("node:os");
+    vi.doUnmock("node:child_process");
     vi.doUnmock("@puppeteer/browsers");
   });
 
@@ -145,6 +181,74 @@ describe("findBrowser — cache resolution", () => {
 
     expect(result).toEqual({ executablePath: redownloadedBinary, source: "download" });
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Cached binary missing"));
+  });
+
+  it("ensureBrowser does not leak the install lock directory after a successful download", async () => {
+    // Regression: @puppeteer/browsers' install() has no concurrency guard —
+    // two CLI invocations that both miss the cache AND system Chrome (the
+    // reported scenario: two `hyperframes browser ensure` runs racing) hit
+    // ensureBrowser's final download-of-last-resort at once, racing on the
+    // same extract target. mkdirSync as an atomic mutex closes that race;
+    // this asserts the lock is actually released afterward (a leaked lock
+    // would permanently wedge every future render on this machine).
+    const HF_LOCK = join(HF_CACHE, ".install.lock");
+    const downloadedBinary = join(HF_CACHE, "chrome-headless-shell", "downloaded");
+    // Cache dir exists but is empty (no manifest entries) — distinct from the
+    // ENOTDIR "cache unreadable" case, which falls back to system instead.
+    const paths = installFsMocks({ existing: new Set([HF_CACHE]) });
+    installPuppeteerBrowsersMock({
+      installedInHfCache: [],
+      installResult: { executablePath: downloadedBinary },
+    });
+
+    const { ensureBrowser } = await import("./manager.js");
+    const result = await ensureBrowser();
+
+    expect(result).toEqual({ executablePath: downloadedBinary, source: "download" });
+    expect(paths.has(HF_LOCK)).toBe(false);
+  });
+
+  it("withInstallLock reclaims a lock held past the timeout instead of hanging forever", async () => {
+    // A crashed/killed process could leave the lock directory behind
+    // permanently. Reclaiming after a timeout (rather than hanging or
+    // refusing forever) is the behavior that makes the lock safe to add at
+    // all — otherwise one bad exit wedges every future render. Exercises
+    // withInstallLock directly with tiny real timeouts (it takes an
+    // injectable timeoutMs/pollMs for exactly this) rather than mocking
+    // Date.now()/setTimeout through the full ensureBrowser call graph.
+    const HF_LOCK = join(HF_CACHE, ".install.lock");
+    const paths = installFsMocks({ existing: new Set([HF_CACHE, HF_LOCK]) });
+
+    const { withInstallLock } = await import("./manager.js");
+    const result = await withInstallLock(async () => "done", 10, 5);
+
+    expect(result).toBe("done");
+    expect(paths.has(HF_LOCK)).toBe(false);
+  });
+
+  it("withInstallLock does not reclaim another waiter's fresh lock after this waiter timed out", async () => {
+    // Regression guard for the timeout-reclaim race: if multiple waiters cross
+    // the stale-lock deadline together, waiter A can reclaim the stale lock and
+    // acquire a fresh one. Waiter B's old deadline is still expired, but it must
+    // not delete A's fresh lock.
+    const HF_LOCK = join(HF_CACHE, ".install.lock");
+    const RECLAIM_LOCK = join(HF_CACHE, ".install.reclaim.lock");
+    const paths = installFsMocks({ existing: new Set([HF_CACHE, HF_LOCK]) });
+
+    const { withInstallLock } = await import("./manager.js");
+    const first = withInstallLock(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return "first";
+      },
+      10,
+      5,
+    );
+    const second = withInstallLock(async () => "second", 10, 5);
+
+    await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
+    expect(paths.has(HF_LOCK)).toBe(false);
+    expect(paths.has(RECLAIM_LOCK)).toBe(false);
   });
 
   it("warns and falls through when the hyperframes cache cannot be read", async () => {

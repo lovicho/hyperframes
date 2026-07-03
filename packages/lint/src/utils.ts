@@ -28,8 +28,16 @@ export const TIMELINE_REGISTRY_OBJECT_LITERAL_PATTERN =
   /window\.__timelines\s*=\s*\{\s*(?:["'][^"']+["']|[A-Za-z_$][\w$]*)\s*:/i;
 export const TIMELINE_REGISTRY_ASSIGN_PATTERN =
   /window\.__timelines(?:\[[^\]]+\]|\.[A-Za-z_$][\w$]*)\s*=/i;
+// The bracket branch accepts either a quoted string key (`["root"]`) or a
+// computed key (`[spec.id]`, `[id]`) — a bare-identifier-only bracket branch
+// missed `window.__timelines[spec.id] = tl`, a pattern the shipped
+// code-particle-assemble/code-3d-extrude registry blocks actually use,
+// making gsap_timeline_not_registered false-fire on correctly registered
+// timelines. The computed-key alternative is deliberately non-capturing:
+// its text isn't a literal composition id, so callers reading group 1/2
+// (readRegisteredTimelineCompositionId) must keep falling back to null for it.
 export const WINDOW_TIMELINE_ASSIGN_PATTERN =
-  /window\.__timelines(?:\[\s*["']([^"']+)["']\s*\]|\.\s*([A-Za-z_$][\w$]*))\s*=\s*([A-Za-z_$][\w$]*)/i;
+  /window\.__timelines(?:\[\s*(?:["']([^"']+)["']|[A-Za-z_$][\w$.]*)\s*\]|\.\s*([A-Za-z_$][\w$]*))\s*=\s*([A-Za-z_$][\w$]*)/i;
 export const INVALID_SCRIPT_CLOSE_PATTERN = /<script[^>]*>[\s\S]*?<\s*\/\s*script(?!>)/i;
 
 const TIMELINE_REGISTRY_KEY_PATTERN =
@@ -92,6 +100,7 @@ export function findHtmlTag(source: string): OpenTag | null {
   };
 }
 
+// fallow-ignore-next-line complexity
 export function findRootTag(source: string): OpenTag | null {
   const bodyOpenMatch = /<body\b([^>]*)>/i.exec(source);
   const bodyCloseMatch = /<\/body>/i.exec(source);
@@ -115,8 +124,34 @@ export function findRootTag(source: string): OpenTag | null {
       : source.length;
   const bodyContent = bodyOpenMatch ? source.slice(bodyStart, bodyEnd) : source;
   const bodyTags = extractOpenTags(bodyContent);
+  // Set when a leading <svg> defs block is skipped (see below) — extractOpenTags
+  // is a flat, nesting-unaware scan, so without this the very next tag it
+  // returns is the svg's own nested child (<defs>, <filter>, ...), not the
+  // sibling that follows the closed </svg>.
+  let skipBefore = -1;
   for (const tag of bodyTags) {
+    if (tag.index < skipBefore) continue;
     if (["script", "style", "meta", "link", "title"].includes(tag.name)) continue;
+    // A leading <svg> block (icon/gradient/filter <defs>, referenced by url(#id)
+    // from elsewhere in the document) is shared visual plumbing, not the
+    // composition root — two independent reports of this being mistaken for
+    // the root, manufacturing root_missing_composition_id/root_missing_dimensions
+    // on an otherwise-correct composition. Only skip it when it carries none of
+    // the composition markers itself, so an intentionally SVG-rooted composition
+    // (data-composition-id/data-width/data-height directly on the <svg>) is
+    // still eligible as the root.
+    if (
+      tag.name === "svg" &&
+      !readAttr(tag.raw, "data-composition-id") &&
+      !readAttr(tag.raw, "data-width") &&
+      !readAttr(tag.raw, "data-height")
+    ) {
+      const closeMatch = /<\/svg\s*>/i.exec(bodyContent.slice(tag.index));
+      // No closing tag found (malformed HTML) — skip everything rather than
+      // risk returning one of the svg's own children as the root.
+      skipBefore = closeMatch ? tag.index + closeMatch.index + closeMatch[0].length : Infinity;
+      continue;
+    }
     return { ...tag, index: tag.index + bodyStart };
   }
   return null;
