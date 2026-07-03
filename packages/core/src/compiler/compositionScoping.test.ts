@@ -609,6 +609,71 @@ window.__afterTimeline = window.__timelines.scene;
     expect(scoped).not.toMatch(/#intro\b/);
   });
 
+  it("rewrites a bare root [data-composition-id] box selector to target exactly one of host or wrapper", () => {
+    // A composition styling its own box (e.g. `display:flex` to center its
+    // children, or `padding` to offset it) via the bare composition-id
+    // selector. After flattenInnerRoot preserves the authored root as a
+    // wrapper below the host, that wrapper (marked data-hf-inner-root) is
+    // what actually parents the real children, so the box styling must land
+    // there instead of the host. It must land on exactly one of the two:
+    // targeting both would apply an additive property like `padding` twice,
+    // since the wrapper is nested inside the host.
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] { display: flex; justify-content: center; }',
+      "captions",
+    );
+
+    expect(scoped).toContain(
+      '[data-composition-id="captions"]:not(:has([data-hf-inner-root])), ' +
+        '[data-composition-id="captions"] > [data-hf-inner-root]',
+    );
+  });
+
+  it("matches exactly the wrapper (not the host too) when both exist in the flattened DOM shape", () => {
+    // Regression test: an earlier version of this fix targeted both the host
+    // and the wrapper (a plain OR), which doubles any additive property
+    // (e.g. padding-top) since the wrapper is nested inside the host.
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] { padding-top: 200px; }',
+      "captions",
+    );
+    const ruleMatch = scoped.match(/([^{]+)\{/);
+    const selectorText = ruleMatch?.[1]?.trim();
+    if (!selectorText) throw new Error("expected a CSS rule to be produced");
+
+    const { document } = parseHTML(
+      '<div id="host" data-composition-id="captions">' +
+        '<div id="wrapper" data-hf-inner-root="true"></div>' +
+        "</div>",
+    );
+    const matches = [...document.querySelectorAll(selectorText)];
+    expect(matches.map((el) => el.id)).toEqual(["wrapper"]);
+  });
+
+  it("matches the host when no wrapper is present (non-flattened fallback)", () => {
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] { padding-top: 200px; }',
+      "captions",
+    );
+    const ruleMatch = scoped.match(/([^{]+)\{/);
+    const selectorText = ruleMatch?.[1]?.trim();
+    if (!selectorText) throw new Error("expected a CSS rule to be produced");
+
+    const { document } = parseHTML('<div id="host" data-composition-id="captions"></div>');
+    const matches = [...document.querySelectorAll(selectorText)];
+    expect(matches.map((el) => el.id)).toEqual(["host"]);
+  });
+
+  it("leaves root-plus-descendant [data-composition-id] selectors as a plain scope prefix", () => {
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] .title { color: red; }',
+      "captions",
+    );
+
+    expect(scoped).toContain('[data-composition-id="captions"] .title');
+    expect(scoped).not.toContain("data-hf-inner-root");
+  });
+
   it('does not rewrite [id="intro"] attribute selectors', () => {
     // The function only targets #intro hash selectors, not [id="intro"] attribute selectors
     const result = scopeCssToComposition(

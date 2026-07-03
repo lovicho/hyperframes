@@ -175,6 +175,52 @@ describe("inlineSubCompositions – #ID selector scoping divergence", () => {
     expect(scopedCss).toContain('[data-hf-authored-id="intro"]');
   });
 
+  it("with flattenInnerRoot: restores data-composition-id on the wrapper for an anonymous host", () => {
+    // Regression test: a host mounted via data-composition-src with no
+    // data-composition-id of its own (an "anonymous" host). The composition
+    // styles its own root box via the bare composition-id selector and a
+    // script self-references it too — both need something in the render DOM
+    // to actually carry that id once flattenInnerRoot strips it from the
+    // wrapper by default.
+    const { document } = parseHTML(`<!DOCTYPE html>
+<html><body>
+  <div data-composition-id="main">
+    <div data-composition-src="scoped-text.html" data-start="0" data-duration="3"></div>
+  </div>
+</body></html>`);
+    const host = document.querySelector('[data-composition-src="scoped-text.html"]')!;
+
+    const scopedTextHtml = `<template id="scoped-text-template">
+  <div data-composition-id="scoped-text" data-width="1080" data-height="1920" data-duration="3">
+    <div class="label">Scoped Text Should Stay Styled</div>
+    <style>
+      [data-composition-id="scoped-text"] { display: flex; background: rgb(12, 12, 12); }
+    </style>
+  </div>
+</template>`;
+
+    function flattenInnerRoot(innerRoot: Element): Element {
+      const clone = innerRoot.cloneNode(true) as Element;
+      clone.removeAttribute("data-composition-id");
+      clone.removeAttribute("data-start");
+      clone.removeAttribute("data-duration");
+      clone.setAttribute("data-hf-inner-root", "true");
+      return clone;
+    }
+
+    const result = inlineSubCompositions(document, [host], {
+      resolveHtml: () => scopedTextHtml,
+      parseHtml: (html) => parseHTML(html).document,
+      flattenInnerRoot,
+    });
+
+    const wrapper = host.querySelector("[data-hf-inner-root]");
+    expect(wrapper?.getAttribute("data-composition-id")).toBe("scoped-text");
+
+    const scopedCss = result.styles.join("\n");
+    expect(scopedCss).toContain("display: flex");
+  });
+
   it("extracts <link> elements from sub-composition <head> with original rel and crossorigin", () => {
     const subCompWithLinks = `<!doctype html>
 <html><head>

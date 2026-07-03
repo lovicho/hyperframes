@@ -1,6 +1,7 @@
 import postcss, { type AtRule, type Node, type Rule } from "postcss";
 
 const AUTHORED_ROOT_ID_ATTR = "data-hf-authored-id";
+const INNER_ROOT_ATTR = "data-hf-inner-root";
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -117,6 +118,18 @@ function scopeSelector(
     "g",
   );
   if (compositionIdPattern.test(trimmed)) {
+    const isRootBoxSelector = trimmed.replace(compositionIdPattern, "").trim() === "";
+    if (isRootBoxSelector) {
+      // A bare root selector styles the composition's own box (flex/grid/
+      // position/padding). When flattenInnerRoot preserves the authored root
+      // as a wrapper below `scope` (see prepareFlattenedInnerRoot), that
+      // wrapper is the element real children are laid out in, not `scope`
+      // itself, so the box styling must land there instead. It must land on
+      // exactly one of the two: applying it to both compounds any additive
+      // property (padding, margin, non-zero transform) since the wrapper
+      // sits nested inside the host and would inherit the effect twice.
+      return `${scope}:not(:has([${INNER_ROOT_ATTR}])), ${scope} > [${INNER_ROOT_ATTR}]`;
+    }
     return selectorWithoutRootTiming.replace(compositionIdPattern, scope);
   }
   const leading = selectorWithoutRootTiming.match(/^\s*/)?.[0] ?? "";

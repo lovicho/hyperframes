@@ -920,6 +920,68 @@ describe("template-wrapped sub-composition media offsets", () => {
     expect(compiled.html).toContain("__hfNormalizeSelector");
   });
 
+  it("resolves a class selector on the authored root wrapper itself (issue #1847 repro)", async () => {
+    // The original bug report: a sub-composition root authored as
+    // `<div id="scene-root" class="scene-wrapper">` styled via
+    // `.scene-wrapper .title { color: red }`. Class-based descendant
+    // selectors anchored on the authored root's own class only resolve if
+    // the root survives as a real element in the render DOM, not just via
+    // id-selector rewriting to [data-hf-authored-id].
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-class-wrapper-"));
+    const compositionsDir = join(projectDir, "compositions");
+    mkdirSync(compositionsDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!DOCTYPE html>
+<html>
+  <head></head>
+  <body>
+    <div id="root" data-composition-id="root" data-start="0" data-width="1920" data-height="1080" data-duration="3">
+      <div
+        id="scene-host"
+        data-composition-id="scene"
+        data-composition-src="compositions/scene.html"
+        data-start="0"
+        data-duration="3"
+      ></div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["root"] = { duration: () => 3 };
+    </script>
+  </body>
+</html>`,
+    );
+    writeFileSync(
+      join(compositionsDir, "scene.html"),
+      `<template id="scene-template">
+  <div id="scene-root" class="scene-wrapper" data-composition-id="scene" data-width="1920" data-height="1080" data-duration="3">
+    <div class="title">ISSUE 1847 REPRO</div>
+    <style>
+      .scene-wrapper { background: #111; }
+      .scene-wrapper .title { color: red; }
+    </style>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["scene"] = { duration: () => 3 };
+    </script>
+  </div>
+</template>`,
+    );
+
+    const compiled = await compileForRender(projectDir, join(projectDir, "index.html"), projectDir);
+    const { document } = parseHTML(compiled.html);
+    const host = document.querySelector("#scene-host");
+
+    const wrapper = host?.querySelector(".scene-wrapper");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.getAttribute("data-hf-authored-id")).toBe("scene-root");
+    expect(wrapper?.querySelector(".title")?.textContent).toBe("ISSUE 1847 REPRO");
+    // The authored class selector round-trips unmodified: no id rewriting
+    // is needed for a class selector, only the wrapper element surviving.
+    expect(compiled.html).toContain(".scene-wrapper .title");
+  });
+
   it("preserves the inferred composition boundary when the host has no composition id", async () => {
     const projectDir = mkdtempSync(join(tmpdir(), "hf-anonymous-host-"));
     const compositionsDir = join(projectDir, "compositions");
@@ -954,7 +1016,12 @@ describe("template-wrapped sub-composition media offsets", () => {
     const host = document.querySelector("#scene-host");
 
     expect(host?.getAttribute("data-composition-id")).toBeNull();
-    expect(host?.querySelector('[data-composition-id="scene"] .title')?.textContent).toBe("Scene");
+    // The host has no data-composition-id of its own, but the composition's
+    // own id is restored onto the flattened wrapper, so root-scoped
+    // selectors and self-referencing scripts still resolve.
+    const wrapper = host?.querySelector("[data-hf-inner-root]");
+    expect(wrapper?.getAttribute("data-composition-id")).toBe("scene");
+    expect(wrapper?.querySelector(".title")?.textContent).toBe("Scene");
     expect(compiled.html).toContain('var __hfCompId = "scene";');
   });
 });

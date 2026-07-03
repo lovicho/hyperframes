@@ -372,6 +372,16 @@ export function inlineSubCompositions(
       for (const child of [...innerRoot.querySelectorAll("style, script")]) child.remove();
       if (flattenInnerRoot) {
         const prepared = flattenInnerRoot(innerRoot);
+        if (!compId && inferredCompId) {
+          // Anonymous host: flattenInnerRoot strips data-composition-id,
+          // assuming the host already carries the composition's identity.
+          // When the host has none, nothing in the render DOM matches the
+          // composition's own root-styling CSS or self-referencing scripts
+          // (e.g. document.querySelector('[data-composition-id="X"]')).
+          // Restore it on the wrapper so both keep resolving, same as
+          // before flattening preserved it via outerHTML.
+          prepared.setAttribute("data-composition-id", inferredCompId);
+        }
         hostEl.innerHTML = prepared.outerHTML || "";
       } else {
         hostEl.innerHTML = compId ? innerRoot.innerHTML || "" : innerRoot.outerHTML || "";

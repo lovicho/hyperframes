@@ -161,15 +161,20 @@ export function createRuntimeStartTimeResolver(params: {
         // If this element is a loaded composition inner root (has data-composition-id
         // but no data-start), walk up to the host parent which carries the actual
         // timing. This happens when the host uses a different data-composition-id
-        // than the loaded file — e.g. host="montage" but file has "scene-10".
-        // Check both data-composition-src (runtime) and data-composition-id (bundled,
-        // where data-composition-src is stripped after inlining).
+        // than the loaded file — e.g. host="montage" but file has "scene-10", or
+        // when the host itself has no data-composition-id at all (an "anonymous"
+        // host) and the composition's own id was restored onto the inlined wrapper.
+        // Check data-composition-src (runtime, not yet inlined), data-composition-id
+        // (bundled/compiled host with its own id), and data-composition-file (the
+        // marker every inlined host gets, compiled or bundled, once
+        // data-composition-src is stripped — covers the anonymous-host case).
         if (element.hasAttribute("data-composition-id")) {
           const parent = element.parentElement;
           if (
             parent &&
             (parent.hasAttribute("data-composition-src") ||
-              parent.hasAttribute("data-composition-id"))
+              parent.hasAttribute("data-composition-id") ||
+              parent.hasAttribute("data-composition-file"))
           ) {
             const parentStart = resolveStartForElementInternal(parent, fallback);
             startCache.set(element, parentStart);
