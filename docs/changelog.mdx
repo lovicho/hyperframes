@@ -9,6 +9,38 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.7.31"
+  description="Released - 2026-07-04"
+  tags={["Release", "Core,cli"]}
+>
+This release makes Figma imports first-class citizens of the shared media inventory: every `hyperframes figma asset` import now regenerates `.media/index.md` (byte-identical with media-use's format), carries `--description`/`--entity` metadata into the manifest, index, and alt text, and the reuse path correctly upserts metadata and dedupes against any prior format/scale/version tuple. media-use's entity lookups now match figma-imported brand marks across the icon/image boundary.
+
+## Features
+
+- **Core,cli:** Media-use interop — shared index.md regen + description/entity on figma imports ([3900caaaa](https://github.com/heygen-com/hyperframes/commit/3900caaaa94443efb01597dac26df1533f8add35), [#1927](https://github.com/heygen-com/hyperframes/pull/1927))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.30...v0.7.31).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.30"
+  description="Released - 2026-07-04"
+  tags={["Release", "Studio", "Sdk"]}
+>
+This release adds a low-volume attempt counter to the resolver-shadow tripwire, giving the SDK-cutover soak gate a real `divergences / attempts` denominator instead of a bare divergence count. It also fixes `moveElement` losing its offset when the target element is under a running GSAP animation.
+
+## Features
+
+- **Studio:** Add resolver-shadow attempt counter for soak-gate denominator ([fe821ff8b](https://github.com/heygen-com/hyperframes/commit/fe821ff8bc9acbb840b4a42153db66790b9419a1), [#1926](https://github.com/heygen-com/hyperframes/pull/1926))
+
+## Fixes
+
+- **Sdk:** MoveElement survives GSAP animation per-axis via runtime delta translate ([74faa4b2a](https://github.com/heygen-com/hyperframes/commit/74faa4b2a42c60c77d1550e7288bf3333c15e25d), [#1875](https://github.com/heygen-com/hyperframes/pull/1875))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.29...v0.7.30).
+</Update>
+
+<Update
   label="HyperFrames v0.7.29"
   description="Released - 2026-07-04"
   tags={["Release", "Skills", "Studio", "Core,cli"]}
