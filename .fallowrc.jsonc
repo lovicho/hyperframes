@@ -36,6 +36,9 @@
     "packages/producer/src/services/__fixtures__/crashOnMessageWorker.mjs",
     "scripts/*.{ts,mjs,js}",
     "scripts/*/run.mjs",
+    // Standalone agent-browser e2e smoke, run by hand per its header — no
+    // import-graph referrer.
+    "packages/studio/tests/e2e/design-panel.mjs",
     // Keyframe UI components — wired dynamically via EaseCurveSection/MotionPanel.
     "packages/studio/src/components/editor/KeyframeDiamond.tsx",
     "packages/studio/src/components/editor/SpringEaseEditor.tsx",
@@ -202,6 +205,20 @@
       "file": "packages/studio/src/utils/timelineElementSplit.ts",
       "exports": ["buildPatchTarget", "readFileContent"],
     },
+    // freezeUrl and freezeLocalFile are public API re-exported from the figma
+    // barrel (index.ts) for Task 4 manifest flow and the /figma skill integration;
+    // not yet imported by current code outside the module.
+    {
+      "file": "packages/core/src/figma/freeze.ts",
+      "exports": ["freezeUrl", "freezeLocalFile"],
+    },
+    // mediaDir, typeDirPath, isFigmaManifestRecord: re-exported from the figma
+    // barrel (index.ts) via manifest.ts per Task 8 wiring. Consumed only by the
+    // /figma skill integration, not by code in the current codebase.
+    {
+      "file": "packages/core/src/figma/manifest.ts",
+      "exports": ["mediaDir", "typeDirPath", "isFigmaManifestRecord"],
+    },
   ],
   "ignoreDependencies": [
     // Runtime/dynamic deps not visible to static analysis: tsup `external`,
@@ -250,6 +267,10 @@
     // require intrusive middleware changes beyond this PR's scope.
     "minLines": 6,
     "ignore": [
+      // sourcePatcher.ts: pre-existing internal clones between the inline-style
+      // and attribute tag-patchers; only the PatchOperation type gained two
+      // optional fields here, but the line shift makes fallow re-flag them.
+      "packages/studio/src/utils/sourcePatcher.ts",
       // gsapParser.ts: recast/babel GSAP writer — intentional duplication between
       // recast and acorn parallel implementations (pre-existing, moved from core).
       "packages/parsers/src/gsapParser.ts",
@@ -325,6 +346,12 @@
       // → assert-remove-spawn shape; each verifies a distinct prune behavior, so
       // extracting the shared scaffold would obscure what each case asserts.
       "packages/cli/src/commands/skills.test.ts",
+      // figma test files: freeze.test.ts and manifest.test.ts share a common
+      // arrange/act/assert setup preamble (file creation + test dir handling) that
+      // is minimal boilerplate; collapsing it into a shared fixture would reduce
+      // readability of each test's independent setup.
+      "packages/core/src/figma/freeze.test.ts",
+      "packages/core/src/figma/manifest.test.ts",
       // layout-audit.browser.test.ts: parallel arrange/act/assert cases per audit
       // rule (overflow / overlap / occlusion) that each install their own mocked
       // geometry + computed-style before asserting. The clone groups are this
@@ -344,6 +371,11 @@
     // complexity pre-dates the computed-timeline work. Exempted at file level
     // rather than refactored as scope creep.
     "ignore": [
+      // sourcePatcher.ts: resolveSourceFile / splitInlineStyleDeclarations /
+      // patch*InTag pre-date this PR; only the PatchOperation type gained two
+      // optional fields, but the line-shift fingerprint re-flags the inherited
+      // complexity.
+      "packages/studio/src/utils/sourcePatcher.ts",
       // timeline.ts: collectRuntimeTimelinePayload (CRITICAL) pre-dates this PR;
       // only an import line changed here (slideshow/sceneId → slideshow/index),
       // but the line-shift fingerprint makes fallow re-flag inherited complexity.
@@ -447,6 +479,11 @@
       // label-position code added earlier in the file shifted its line number,
       // so the line-shift fingerprint re-flags this inherited finding.
       "packages/parsers/src/gsapParserAcorn.ts",
+      // isFigmaManifestRecord: type guard with 19 cyclomatic due to chained
+      // field validation (id/type/path/source types + value shape guards).
+      // This is the correct shape for a discriminating type guard; refactoring
+      // into smaller guards would obscure the unified validation contract.
+      "packages/core/src/figma/manifest.ts",
     ],
   },
 }

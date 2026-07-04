@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.7.27",
+  "version": "0.7.29",
   "description": "",
   "repository": {
     "type": "git",
@@ -94,6 +94,12 @@
       "node": "./dist/runtime/clipTree.js",
       "import": "./src/runtime/clipTree.ts",
       "types": "./src/runtime/clipTree.ts"
+    },
+    "./runtime/position-edits": {
+      "bun": "./src/runtime/positionEdits.ts",
+      "node": "./dist/runtime/positionEdits.js",
+      "import": "./src/runtime/positionEdits.ts",
+      "types": "./src/runtime/positionEdits.ts"
     },
     "./runtime/lottie-readiness": {
       "bun": "./src/lottieReadiness.ts",
@@ -203,6 +209,12 @@
       "import": "./src/fonts/systemFontLocator.ts",
       "types": "./src/fonts/systemFontLocator.ts"
     },
+    "./figma": {
+      "bun": "./src/figma/index.ts",
+      "node": "./dist/figma/index.js",
+      "import": "./src/figma/index.ts",
+      "types": "./src/figma/index.ts"
+    },
     "./schemas/registry.json": "./schemas/registry.json",
     "./schemas/registry-item.json": "./schemas/registry-item.json"
   },
@@ -225,6 +237,10 @@
       "./editing": {
         "import": "./dist/editing/affordances.js",
         "types": "./dist/editing/affordances.d.ts"
+      },
+      "./figma": {
+        "import": "./dist/figma/index.js",
+        "types": "./dist/figma/index.d.ts"
       },
       "./generators": {
         "import": "./dist/generators/hyperframes.js",
@@ -258,6 +274,10 @@
       "./runtime/clipTree": {
         "import": "./dist/runtime/clipTree.js",
         "types": "./dist/runtime/clipTree.d.ts"
+      },
+      "./runtime/position-edits": {
+        "import": "./dist/runtime/positionEdits.js",
+        "types": "./dist/runtime/positionEdits.d.ts"
       },
       "./runtime/lottie-readiness": {
         "import": "./dist/lottieReadiness.js",
