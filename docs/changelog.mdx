@@ -9,6 +9,56 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.7.36"
+  description="Released - 2026-07-05"
+  tags={["Release", "CLI"]}
+>
+This release closes the remaining Windows FFmpeg path gap by making CLI preflight
+choose real `ffmpeg.exe`/`ffprobe.exe` binaries over shell shims. `hyperframes
+render` now avoids exporting `ffmpeg.cmd` as `HYPERFRAMES_FFMPEG_PATH`, keeping
+the engine on the hardened executable-resolution path.
+
+## Fixes
+
+- **CLI:** Prefer real ffmpeg exe over cmd shim ([98b539df](https://github.com/heygen-com/hyperframes/commit/98b539df728f221de677e7ede3e9e3eb4cad2bca), [#1958](https://github.com/heygen-com/hyperframes/pull/1958))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.35...v0.7.36).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.35"
+  description="Released - 2026-07-05"
+  tags={["Release", "Lambda", "Engine", "Hyperframes Media"]}
+>
+This release fixes three feedback-driven reliability issues: Lambda render bundles now provide CommonJS path globals for inlined dependencies, Windows FFmpeg lookup prefers real executables over command shims, and offline SFX resolution no longer records missing bundled files as usable audio.
+
+## Fixes
+
+- **Lambda:** Define `__dirname` and `__filename` in handler bundles ([f999b40d](https://github.com/heygen-com/hyperframes/commit/f999b40d73aa8e0cbe082c199a566f544fbf6f96))
+- **Engine:** Prefer real FFmpeg executables over Windows command shims ([b7dcb9e2](https://github.com/heygen-com/hyperframes/commit/b7dcb9e2a3bd220c889be0ac8ff31b0ea5c62a36))
+- **Hyperframes Media:** Skip and report offline SFX entries whose bundled file is missing ([b34e623b](https://github.com/heygen-com/hyperframes/commit/b34e623bf8c5fb2ae9608edf1908c466584d627e))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.34...v0.7.35).
+</Update>
+
+<Update
+  label="HyperFrames v0.7.34"
+  description="Released - 2026-07-05"
+  tags={["Release", "Engine"]}
+>
+This release hardens DOM layer masking in the engine so temporary screenshot
+visibility changes restore the exact prior inline state. It adds another guard
+around layered HDR captures, reducing the chance that masking one frame affects
+later captures.
+
+## Fixes
+
+- **Engine:** Preserve DOM mask visibility state ([56d4a7032](https://github.com/heygen-com/hyperframes/commit/56d4a7032b64ecc3f46eeb7ed17e62a11af1c07b), [#1953](https://github.com/heygen-com/hyperframes/pull/1953))
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.7.33...v0.7.34).
+</Update>
+
+<Update
   label="HyperFrames v0.7.33"
   description="Released - 2026-07-04"
   tags={["Release", "Producer"]}
