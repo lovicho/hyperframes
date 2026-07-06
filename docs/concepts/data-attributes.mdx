@@ -10,8 +10,8 @@ Hyperframes uses HTML data attributes to control timing, media playback, and [co
 | Attribute | Example | Description |
 |-----------|---------|-------------|
 | `data-start` | `"0"` or `"intro"` | Start time in seconds, or a clip ID reference for [relative timing](#relative-timing) |
-| `data-duration` | `"5"` | Duration in seconds. Required for images. Optional for video/audio (defaults to source duration). On the **root** composition it sets the total render length (see [Composition Attributes](#composition-attributes)); on nested sub-compositions it is ignored (their length comes from their child timeline). |
-| `data-track-index` | `"0"` | Timeline track number. Controls z-ordering (higher = in front) and groups clips into rows. Clips on the same track cannot overlap. |
+| `data-duration` | `"5"` | Duration in seconds. Required for images and sub-compositions. Optional for video/audio (defaults to source duration). On the **root** composition it sets the total render length (see [Composition Attributes](#composition-attributes)). |
+| `data-track-index` | `"0"` | Timeline track number. Temporal ordering — groups clips into rows on the timeline. Clips on the same track cannot overlap. Does **not** control z-ordering (use CSS `z-index` for that). |
 
 ## Media Attributes
 
