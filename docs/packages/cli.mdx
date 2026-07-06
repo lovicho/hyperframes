@@ -667,8 +667,10 @@ Word-level transcripts (whisper output) are grouped into readable caption cues o
     | Flag | Values | Default | Description |
     |------|--------|---------|-------------|
     | `--output` | path | `renders/<name>.mp4` | Output file path |
-    | `--format` | mp4, webm, mov, png-sequence | mp4 | Output format (WebM/MOV render with transparency; png-sequence writes a directory of RGBA PNGs) |
-    | `--fps` | 24, 30, 60 | 30 | Frames per second |
+    | `--composition, -c` | path | `index.html` | Render a specific composition file instead of `index.html` |
+    | `--format` | mp4, webm, mov, gif, png-sequence | mp4 | Output format (WebM/MOV render with transparency; gif for inline embeds; png-sequence writes a directory of RGBA PNGs) |
+    | `--fps` | 1-240 or rational (e.g. `30000/1001`) | 30 | Frames per second |
+    | `--gif-loop` | 0-65535 | 0 | GIF loop count (`0` = loop forever). Only applies with `--format gif` |
     | `--quality` | draft, standard, high | standard | Encoding quality preset (drives CRF/bitrate) |
     | `--crf` | 0-51 | — | Override encoder CRF (lower = higher quality). Mutually exclusive with `--video-bitrate` |
     | `--video-bitrate` | e.g. `10M`, `5000k` | — | Target video bitrate. Mutually exclusive with `--crf` |
@@ -676,7 +678,7 @@ Word-level transcripts (whisper output) are grouped into readable caption cues o
     | `--resolution` | landscape, portrait, landscape-4k, portrait-4k, square, square-4k (aliases: `1080p`, `4k`, `uhd`, `1080p-square`, `square-1080p`, `4k-square`) | — | Output resolution preset. Supersamples a smaller composition via Chrome `deviceScaleFactor` so the screenshot lands at the requested dimensions. Aspect ratio must match the composition; the scale must be an integer multiple. Not supported with `--hdr`. See [4K Rendering](/guides/4k-rendering) |
     | `--hdr` | — | off | Force HDR output even if no HDR sources are detected. MP4 only. See [HDR Rendering](/guides/hdr) |
     | `--sdr` | — | off | Force SDR output even if HDR sources are detected |
-    | `--workers` | 1-8 | 4 | Parallel render workers |
+    | `--workers` | 1-24 or `auto` | auto | Parallel render workers (auto = CPU cores minus 2) |
     | `--low-memory-mode` / `--no-low-memory-mode` | — | auto (≤ 8 GB RAM) | Force the low-memory safe render profile on or off. Safe mode pins to 1 worker, uses screenshot capture, and skips auto-worker calibration so the pipeline doesn't launch multiple concurrent Chrome instances on constrained machines. Auto-detection reads **host** RAM (`os.totalmem()`), not cgroup/container limits — containerised or serverless callers (incl. `--docker`) should set `PRODUCER_LOW_MEMORY_MODE` explicitly. Env fallback `PRODUCER_LOW_MEMORY_MODE`. |
     | `--gpu` | — | off | GPU encoding (NVENC, VideoToolbox, AMF, VAAPI, QSV) |
     | `--browser-gpu` / `--no-browser-gpu` | — | on locally, off in Docker | Use or opt out of host GPU acceleration for local Chrome/WebGL capture |
