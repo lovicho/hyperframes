@@ -102,6 +102,35 @@ export function mintHfId(el: Element, assigned: Set<string>): string {
   return id;
 }
 
+/**
+ * True for a `<template data-composition-id>` — the sub-composition authoring
+ * pattern whose content the studio preview unwraps into the served body. Only
+ * these templates are treated as transparent containers for hf-id purposes.
+ * A plain `<template>` (runtime clone-source: list item, particle, etc.) must
+ * NOT get inner ids: its content is cloned N times into the live DOM, so a
+ * persisted inner id would be duplicated across every clone.
+ */
+export function isCompositionTemplate(el: Element): boolean {
+  return el.tagName.toLowerCase() === "template" && el.getAttribute("data-composition-id") !== null;
+}
+
+/**
+ * Document-order walk of every element under `root`, descending into
+ * composition `<template>` subtrees — linkedom's querySelectorAll does not, so
+ * template-based sub-comps would otherwise never get inner ids (the preview
+ * unwraps the template and stamps the SAME content, so skipping here splits
+ * the id space between the served DOM and the raw file). Plain templates are
+ * skipped entirely (see isCompositionTemplate).
+ */
+function walkElements(root: Element, visit: (el: Element) => void): void {
+  for (const child of Array.from(root.children)) {
+    const isTemplate = child.tagName.toLowerCase() === "template";
+    if (isTemplate && !isCompositionTemplate(child)) continue;
+    visit(child);
+    walkElements(child, visit);
+  }
+}
+
 export function ensureHfIds(html: string): string {
   // Mirror parseSourceDocument's fragment-wrapping so bare fragments don't land
   // outside <body> in linkedom, which would cause body.querySelectorAll to return [].
@@ -117,16 +146,16 @@ export function ensureHfIds(html: string): string {
   // Seed with already-present ids (pin) so fresh mints never collide with them.
   // Scope to <body> to match the mint walk below — a stray data-hf-id in <head>
   // must not pin an id into the set that a body element would then be bumped off.
-  for (const el of Array.from(body.querySelectorAll("[data-hf-id]"))) {
+  walkElements(body, (el) => {
     const existing = el.getAttribute("data-hf-id");
     if (existing) assigned.add(existing);
-  }
+  });
 
-  for (const el of Array.from(body.querySelectorAll("*"))) {
-    if (EXCLUDED_TAGS.has(el.tagName.toLowerCase())) continue;
-    if (el.getAttribute("data-hf-id")) continue; // pinned
+  walkElements(body, (el) => {
+    if (EXCLUDED_TAGS.has(el.tagName.toLowerCase())) return;
+    if (el.getAttribute("data-hf-id")) return; // pinned
     el.setAttribute("data-hf-id", mintHfId(el, assigned));
-  }
+  });
 
   return wrapped ? document.body.innerHTML || "" : document.toString();
 }

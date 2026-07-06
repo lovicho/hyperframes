@@ -42,6 +42,42 @@ export function escapeHfId(id: string): string {
 }
 
 /**
+ * querySelectorAll that also descends into COMPOSITION `<template>` subtrees
+ * (`data-composition-id` — the pattern the studio preview unwraps) — linkedom's
+ * querySelectorAll does not, so template-based sub-comp content would be
+ * unreachable for resolution/dispatch even though buildRoots models it.
+ *
+ * Implemented as a document-order DOM walk (not qsa + append) so duplicate-id
+ * tiebreaks resolve in TRUE document order — appending template matches after
+ * all top-level matches would make resolveScoped pick a different duplicate
+ * than the preview's unwrapped DOM does. Plain templates (runtime clone
+ * sources) are skipped, matching buildChildren and ensureHfIds.
+ *
+ * Throws like querySelectorAll on an invalid selector (Element.matches).
+ */
+export function querySelectorAllDeep(root: Document | Element, selector: string): Element[] {
+  const out: Element[] = [];
+  const start: Element | null =
+    "body" in root ? ((root as Document).body ?? null) : (root as Element);
+  const walk = (parent: Element): void => {
+    for (const child of Array.from(parent.children)) {
+      if (child.tagName.toLowerCase() === "template") {
+        if (child.getAttribute("data-composition-id") !== null) walk(child);
+        continue;
+      }
+      if (child.matches(selector)) out.push(child);
+      walk(child);
+    }
+  };
+  if (start) {
+    // When rooted at an Element (scoped-path step), the root itself is the
+    // context, not a candidate — only descendants match, like querySelectorAll.
+    walk(start);
+  }
+  return out;
+}
+
+/**
  * True when an element lives at the top-level (canonical) scope — i.e. its
  * scopedId equals its bare id because no ancestor opens a sub-composition
  * boundary. This mirrors document.ts's scopedId construction (childPrefix only
@@ -75,7 +111,7 @@ export function resolveScoped(document: Document, id: string): Element | null {
   // resolution agrees with getElement (scopedId === id wins over document order).
   if (parts.length === 1) {
     const escaped = escapeHfId(id);
-    const matches = Array.from(document.querySelectorAll(`[data-hf-id="${escaped}"]`));
+    const matches = querySelectorAllDeep(document, `[data-hf-id="${escaped}"]`);
     if (matches.length > 0) {
       return matches.find((el) => isCanonicalScope(el)) ?? matches[0] ?? null;
     }
@@ -84,16 +120,14 @@ export function resolveScoped(document: Document, id: string): Element | null {
     // (the id studio passes when targeting the sub-comp root). data-hf-id takes
     // precedence above; only when no hf-id matches do we treat the bare id as a
     // composition id, making comp-ids first-class resolvable addresses.
-    return document.querySelector(`[data-composition-id="${escaped}"]`);
+    return querySelectorAllDeep(document, `[data-composition-id="${escaped}"]`)[0] ?? null;
   }
 
   let context: Element | Document = document;
   for (const part of parts) {
     const escaped = escapeHfId(part);
     const found: Element | null =
-      context === document
-        ? (context as Document).querySelector(`[data-hf-id="${escaped}"]`)
-        : (context as Element).querySelector(`[data-hf-id="${escaped}"]`);
+      querySelectorAllDeep(context, `[data-hf-id="${escaped}"]`)[0] ?? null;
     if (!found) return null;
     context = found;
   }
