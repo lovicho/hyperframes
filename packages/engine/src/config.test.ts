@@ -221,6 +221,81 @@ describe("resolveConfig", () => {
     });
   });
 
+  describe("useDrawElement (PRODUCER_EXPERIMENTAL_FAST_CAPTURE)", () => {
+    it("default is clamped off on software-GPU hosts (page-side compositing preserved)", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "software");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      unsetEnv("HF_DE_WORKER_ENCODE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(false);
+      expect(config.enablePageSideCompositing).toBe(true);
+    });
+
+    it("default engages on macOS with a hardware-GPU browser", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      unsetEnv("HF_DE_WORKER_ENCODE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(process.platform === "darwin");
+    });
+
+    it("default engages on macOS with auto GPU mode (the stock CLI path)", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "auto");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      unsetEnv("HF_DE_WORKER_ENCODE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(process.platform === "darwin");
+    });
+
+    it("default requires worker-encode (the verified drain)", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
+      setEnv("HF_DE_WORKER_ENCODE", "false");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(false);
+    });
+
+    it("explicit env opt-in skips the platform clamp", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "software");
+      setEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", "true");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(true);
+    });
+
+    it("env kill switch wins over the default", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
+      setEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", "false");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(false);
+    });
+
+    it("explicit override wins over the env var", () => {
+      setEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", "true");
+      const config = resolveConfig({ useDrawElement: false });
+      expect(config.useDrawElement).toBe(false);
+    });
+
+    it("forces page-side compositing off when enabled (incompatible strategies)", () => {
+      const config = resolveConfig({ useDrawElement: true, enablePageSideCompositing: true });
+      expect(config.useDrawElement).toBe(true);
+      expect(config.enablePageSideCompositing).toBe(false);
+      // The auto-disable is recorded so compile-time gates can restore it.
+      expect(config.pageSideCompositingAutoDisabled).toBe(true);
+    });
+
+    it("does NOT mark auto-disabled when the caller explicitly opted out of page-side compositing", () => {
+      const config = resolveConfig({ useDrawElement: true, enablePageSideCompositing: false });
+      expect(config.enablePageSideCompositing).toBe(false);
+      // Explicit caller intent — a compile-time drawElement gate must not restore it.
+      expect(config.pageSideCompositingAutoDisabled).not.toBe(true);
+    });
+
+    it("leaves page-side compositing on when fast capture is off", () => {
+      const config = resolveConfig({ useDrawElement: false });
+      expect(config.enablePageSideCompositing).toBe(true);
+    });
+  });
+
   describe("lowMemoryMode", () => {
     it("forces on for truthy PRODUCER_LOW_MEMORY_MODE values", () => {
       setEnv("PRODUCER_LOW_MEMORY_MODE", "true");

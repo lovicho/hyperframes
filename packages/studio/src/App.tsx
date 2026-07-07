@@ -27,6 +27,7 @@ import { useFrameCapture } from "./hooks/useFrameCapture";
 import { useLintModal } from "./hooks/useLintModal";
 import { useCompositionDimensions } from "./hooks/useCompositionDimensions";
 import { useToast } from "./hooks/useToast";
+import { useCompositionContentLoader } from "./hooks/useCompositionContentLoader";
 import { useStudioUrlState } from "./hooks/useStudioUrlState";
 import {
   buildStudioContextValue,
@@ -36,6 +37,7 @@ import {
 import type { DomEditSelection } from "./components/editor/domEditing";
 import { StudioHeader } from "./components/StudioHeader";
 import { useGestureCommit } from "./hooks/useGestureCommit";
+import { useCropModeProps } from "./hooks/useCropMode";
 import { STUDIO_KEYFRAMES_ENABLED } from "./components/editor/manualEditingAvailability";
 import { GestureTrailOverlay } from "./components/editor/GestureTrailOverlay";
 import { StudioLeftSidebar } from "./components/StudioLeftSidebar";
@@ -64,7 +66,6 @@ export function StudioApp() {
   const initialUrlStateRef = useRef(readStudioUrlStateFromWindow());
   const viewModeValue = useViewModeState();
 
-  // sessionStorage-backed: fires once per tab, survives HMR remounts
   useEffect(() => {
     if (resolving || waitingForServer) return;
     if (hasFiredSessionStart()) return;
@@ -82,6 +83,7 @@ export function StudioApp() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [previewDocumentVersion, setPreviewDocumentVersion] = useState(0);
   const [blockPreview, setBlockPreview] = useState<BlockPreviewInfo | null>(null);
+  const cropModeProps = useCropModeProps();
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
   const activeCompPathRef = useRef(activeCompPath);
   activeCompPathRef.current = activeCompPath;
@@ -133,7 +135,7 @@ export function StudioApp() {
       return !v;
     });
   }, []);
-  const { appToast, showToast, dismissToast } = useToast();
+  const { toasts, showToast, dismissToast } = useToast();
   const panelLayout = usePanelLayout({
     rightCollapsed: initialUrlStateRef.current.rightCollapsed,
     rightPanelTab: initialUrlStateRef.current.rightPanelTab,
@@ -358,7 +360,6 @@ export function StudioApp() {
     resetErrors: resetConsoleErrors,
   } = useConsoleErrorCapture(previewIframe);
   const dragOverlay = useDragOverlay(fileManager.handleImportFiles);
-  // Gesture recording
   const handleToggleRecordingRef = useRef<() => void>(() => {});
   const domEditSessionRef = useRef(domEditSession);
   domEditSessionRef.current = domEditSession;
@@ -369,6 +370,7 @@ export function StudioApp() {
     isGestureRecordingRef,
   });
   handleToggleRecordingRef.current = handleToggleRecording;
+  const recordingToggle = STUDIO_KEYFRAMES_ENABLED ? handleToggleRecording : undefined;
   const canvasRectRef = useRef<CanvasRect | null>(null);
   useLayoutEffect(() => {
     if (gestureState !== "recording" || !previewIframe) {
@@ -390,17 +392,13 @@ export function StudioApp() {
     },
     [appHotkeys, resetConsoleErrors, refreshPreviewDocumentVersion],
   );
-  const handleSelectComposition = useCallback(
-    (comp: string) => {
-      setActiveCompPath(comp.endsWith(".html") ? comp : null);
-      fileManager.setEditingFile({ path: comp, content: null });
-      fetch(`/api/projects/${projectId}/files/${comp}`)
-        .then((r) => r.json())
-        .then((data) => fileManager.setEditingFile({ path: comp, content: data.content }))
-        .catch(() => {});
-    },
-    [projectId, fileManager],
-  );
+  const { setEditingFile } = fileManager;
+  const handleSelectComposition = useCompositionContentLoader({
+    projectId,
+    setEditingFile,
+    setActiveCompPath,
+    showToast,
+  });
   const {
     designPanelActive,
     inspectorPanelActive,
@@ -485,14 +483,20 @@ export function StudioApp() {
                     captureFrameFilename={frameCapture.captureFrameFilename}
                     handleCaptureFrameClick={frameCapture.handleCaptureFrameClick}
                     refreshCaptureFrameTime={frameCapture.refreshCaptureFrameTime}
+                    capturing={frameCapture.capturing}
                     inspectorButtonActive={inspectorButtonActive}
                     inspectorPanelActive={inspectorPanelActive}
-                    onExport={() => void renderQueue.startRender(undefined)}
+                    onExport={() => {
+                      void (async () => {
+                        await previewPersistence.waitForPendingDomEditSaves();
+                        await renderQueue.startRender(undefined);
+                      })();
+                    }}
                   />
                   {previewPersistence.domEditSaveQueuePaused && (
                     <SaveQueuePausedBanner
                       message={previewPersistence.domEditSaveQueuePaused}
-                      onDismiss={previewPersistence.resetDomEditSaveQueueBreaker}
+                      onRetry={previewPersistence.resetDomEditSaveQueueBreaker}
                     />
                   )}
                   {viewModeValue.viewMode === "storyboard" && (
@@ -501,8 +505,6 @@ export function StudioApp() {
                       onSelectComposition={handleSelectComposition}
                     />
                   )}
-                  {/* Timeline stage stays mounted (just hidden) in storyboard mode,
-                      so preview/player/gesture/render state survives the toggle. */}
                   <div
                     className={`flex flex-1 min-h-0${
                       viewModeValue.viewMode === "storyboard" ? " hidden" : ""
@@ -528,6 +530,7 @@ export function StudioApp() {
                       handleTimelineFileDrop={timelineEditing.handleTimelineFileDrop}
                       handleTimelineElementMove={timelineEditing.handleTimelineElementMove}
                       handleTimelineElementResize={timelineEditing.handleTimelineElementResize}
+                      handleToggleTrackHidden={timelineEditing.handleToggleTrackHidden}
                       handleBlockedTimelineEdit={timelineEditing.handleBlockedTimelineEdit}
                       handleTimelineElementSplit={timelineEditing.handleTimelineElementSplit}
                       handleRazorSplit={timelineEditing.handleRazorSplit}
@@ -537,10 +540,9 @@ export function StudioApp() {
                       shouldShowSelectedDomBounds={shouldShowSelectedDomBounds}
                       isGestureRecording={gestureState === "recording"}
                       recordingState={gestureState}
-                      onToggleRecording={
-                        STUDIO_KEYFRAMES_ENABLED ? handleToggleRecording : undefined
-                      }
+                      onToggleRecording={recordingToggle}
                       blockPreview={blockPreview}
+                      {...cropModeProps}
                       gestureOverlay={
                         gestureState === "recording" && previewIframe ? (
                           <GestureTrailOverlay
@@ -564,18 +566,19 @@ export function StudioApp() {
                         }}
                         recordingState={gestureState}
                         recordingDuration={gestureRecording.recordingDuration}
-                        onToggleRecording={
-                          STUDIO_KEYFRAMES_ENABLED ? handleToggleRecording : undefined
-                        }
+                        onToggleRecording={recordingToggle}
                         sdkSession={sdkHandle.session}
                         reloadPreview={reloadPreview}
                         domEditSaveTimestampRef={domEditSaveTimestampRef}
                         recordEdit={editHistory.recordEdit}
+                        {...cropModeProps}
+                        onToggleElementHidden={timelineEditing.handleToggleElementHidden}
                       />
                     )}
                   </div>
                   <StudioOverlays
                     projectId={projectId}
+                    projectDir={fileManager.projectDir}
                     lintModal={lintModal}
                     closeLintModal={closeLintModal}
                     consoleErrors={consoleErrors}
@@ -583,7 +586,7 @@ export function StudioApp() {
                     domEditSession={domEditSession}
                     activeCompPath={activeCompPath}
                     dragOverlayActive={dragOverlay.active}
-                    appToast={appToast}
+                    toasts={toasts}
                     dismissToast={dismissToast}
                   />
                 </div>

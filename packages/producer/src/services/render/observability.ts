@@ -40,6 +40,8 @@ export interface RenderCaptureObservability {
   usePageSideCompositing?: boolean;
   hasHdrContent?: boolean;
   browserGpuMode?: string;
+  /** drawElement per-render self-verification tripped → whole render re-ran via screenshot. */
+  deSelfVerifyFallback?: boolean;
   protocolTimeoutMs?: number;
   pageNavigationTimeoutMs?: number;
   playerReadyTimeoutMs?: number;
@@ -304,6 +306,13 @@ export class RenderObservabilityRecorder {
 
   hasFailure(): boolean {
     return this.failedPhase !== undefined;
+  }
+
+  /** A phase failure that was subsequently recovered (e.g. the drawElement
+   * self-verify fallback re-rendering via screenshot) should not brand the
+   * whole render as failed in the summary. */
+  clearFailure(phase: string): void {
+    if (this.failedPhase === phase) this.failedPhase = undefined;
   }
 
   private record(event: RenderObservationEvent): RenderObservationEvent {

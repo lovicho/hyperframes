@@ -358,6 +358,19 @@ export default defineCommand({
         "memory thrash on constrained machines. Default: auto-detected from " +
         "total RAM (<= 8 GB). Env: PRODUCER_LOW_MEMORY_MODE.",
     },
+    "experimental-fast-capture": {
+      type: "boolean",
+      description:
+        "Capture frames via Chrome's drawElementImage API instead of " +
+        "Page.captureScreenshot — reads DOM paint records directly, ~2x faster. " +
+        "Default: on where it can engage (macOS + hardware-GPU browser); " +
+        "incompatible compositions and self-verification failures fall back to " +
+        "screenshot capture automatically. Pass =false to disable. " +
+        "Env: PRODUCER_EXPERIMENTAL_FAST_CAPTURE.",
+      // No `default` — an omitted flag must stay `undefined` so the `!= null`
+      // guard below leaves PRODUCER_EXPERIMENTAL_FAST_CAPTURE untouched and the
+      // env fallback survives (matches the --low-memory-mode idiom).
+    },
   },
   // `run` is the citty handler for `hyperframes render` — sequential flag
   // validation + render dispatch. Inherited CRITICAL on main (CRAP 1290);
@@ -511,6 +524,13 @@ export default defineCommand({
     // var the producer's resolveConfig reads.
     if (args["low-memory-mode"] != null) {
       process.env.PRODUCER_LOW_MEMORY_MODE = args["low-memory-mode"] ? "true" : "false";
+    }
+
+    // ── Override: experimental fast capture (drawElementImage) ───────────
+    if (args["experimental-fast-capture"] != null) {
+      process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE = args["experimental-fast-capture"]
+        ? "true"
+        : "false";
     }
 
     // ── Validate max-concurrent-renders ─────────────────────────────────
@@ -915,6 +935,7 @@ export default defineCommand({
         entryFile,
         outputResolution,
         pageSideCompositing: args["page-side-compositing"] !== false,
+        experimentalFastCapture: args["experimental-fast-capture"] === true,
         pageNavigationTimeoutMs,
         protocolTimeout,
         playerReadyTimeout,
@@ -984,6 +1005,8 @@ interface RenderOptions {
   /** Output resolution preset; see `resolveDeviceScaleFactor` for constraints. */
   outputResolution?: CanvasResolution;
   pageSideCompositing?: boolean;
+  /** EXPERIMENTAL. drawElementImage frame capture (--experimental-fast-capture). */
+  experimentalFastCapture?: boolean;
   /**
    * Puppeteer `page.goto()` timeout for the entry HTML, in milliseconds.
    * When omitted, the engine default (60s) applies. Surfaced as
@@ -1293,6 +1316,7 @@ async function renderDocker(
       outputResolution: options.outputResolution,
       pageSideCompositing: options.pageSideCompositing,
       debug: options.debug,
+      experimentalFastCapture: options.experimentalFastCapture,
       pageNavigationTimeoutMs: options.pageNavigationTimeoutMs,
     },
   });
@@ -1638,12 +1662,30 @@ function trackRenderMetrics(
     staticDedupSkipReason: perf?.staticDedup?.skipReason,
     staticDedupPredictedFrames: perf?.staticDedup?.predictedFrames,
     staticDedupReusedFrames: perf?.staticDedup?.reusedFrames,
+    deCaptureMode: perf?.drawElement?.mode,
+    deCompileGate: perf?.drawElement?.compileGate,
+    deClampReason: perf?.drawElement?.clampReason,
+    deGateReason: perf?.drawElement?.gateReason,
+    deWorkerEncode: perf?.drawElement?.workerEncode,
+    deVerifyArmed: perf?.drawElement?.verifyArmed,
+    deVerifyChecked: perf?.drawElement?.verifyChecked,
+    deVerifyMinDb: perf?.drawElement?.verifyMinDb,
+    deVerifyInitMs: perf?.drawElement?.verifyInitMs,
+    deSelfVerifyFallback: perf?.drawElement?.selfVerifyFallback,
+    deFallbackReason: perf?.drawElement?.fallbackReason,
+    deBlankSuspects: perf?.drawElement?.blankSuspects,
+    deBlankDeterministicAccepts: perf?.drawElement?.blankDeterministicAccepts,
+    deBlankRecaptures: perf?.drawElement?.blankRecaptures,
+    deBoundaryFrames: perf?.drawElement?.boundaryFrames,
+    deNcprFallbacks: perf?.drawElement?.ncprFallbacks,
     compositionDurationMs,
     compositionWidth: perf?.resolution.width,
     compositionHeight: perf?.resolution.height,
     totalFrames: perf?.totalFrames,
     speedRatio,
     captureAvgMs: perf?.captureAvgMs,
+    captureP50Ms: perf?.captureP50Ms,
+    videoCount: perf?.videoCount,
     capturePeakMs: perf?.capturePeakMs,
     tmpPeakBytes: perf?.tmpPeakBytes,
     stageCompileMs: stages.compileMs,

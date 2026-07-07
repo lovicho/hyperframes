@@ -495,6 +495,42 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
     return findings;
   },
 
+  // missing_data_no_timeline
+  // The producer polls window.__timelines[id] with a 45-second timeout waiting
+  // for GSAP timeline registration. Compositions that never call
+  // window.__timelines[id] = tl stall for 45 s every render. Adding
+  // data-no-timeline to the root element tells the producer to skip the poll.
+  ({ rootTag, rootCompositionId, scripts, rawSource, options }) => {
+    if (options.isSubComposition) return [];
+    if (!rootCompositionId || !rootTag) return [];
+    // readAttr only matches valued attrs (attr="..."); data-no-timeline is
+    // typically boolean (no value). Strip quoted attribute values first to
+    // avoid matching attr names that appear inside other values
+    // (e.g. title="add data-no-timeline here"), then check with a boundary
+    // that rejects hyphenated variants (data-no-timeline-start has '-' next,
+    // not a word-break char).
+    const tagNoValues = rootTag.raw.replace(/"[^"]*"|'[^']*'/g, '""');
+    if (/(?:^|\s)data-no-timeline(?=[\s>=/]|$)/i.test(tagNoValues)) return [];
+    // Can't scan external script files for timeline registration; skip to avoid
+    // false positives on compositions that register via a bundled JS file.
+    if (/<script\b[^>]*\bsrc\s*=/i.test(rawSource)) return [];
+    const registersTimeline = scripts.some((s) => s.content.includes("window.__timelines["));
+    if (registersTimeline) return [];
+    return [
+      {
+        code: "missing_data_no_timeline",
+        severity: "warning",
+        message:
+          "This composition has no `window.__timelines` registration but is missing `data-no-timeline`. " +
+          "The producer polls for timeline registration for up to 45 seconds before timing out, " +
+          "adding 45 s to every render.",
+        fixHint:
+          'Add `data-no-timeline` to the root element to skip the poll: `<div data-composition-id="..." data-no-timeline ...>`.',
+        snippet: truncateSnippet(rootTag.raw),
+      },
+    ];
+  },
+
   // requestanimationframe_in_composition
   ({ scripts, rawSource, options }) => {
     if (isRegistrySourceFile(options.filePath) || isRegistryInstalledFile(rawSource)) return [];
@@ -632,6 +668,38 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       }
     }
     return findings;
+  },
+
+  // html_dir_attribute_breaks_render — valid non-LTR dir values on
+  // <html> renders correctly in preview/snapshot but produces a fully
+  // blank/black video from render, with no other lint/validate/inspect
+  // check catching it (output file size, far smaller than expected, is the
+  // only tell). Confirmed independently by two separate reports, both
+  // diagnosing the same exact trigger and the same fix: drop dir from
+  // <html>, keep lang, and scope `direction: rtl` to individual
+  // text-containing elements via CSS instead (text still bidi-shapes
+  // correctly). Advisory-only — this does not attempt to fix the render
+  // pipeline's own root cause (suspected to be a capture step that clips a
+  // fixed top-left-origin screenshot region, which RTL layout can shift the
+  // actual content away from), only surfaces the already-confirmed footgun
+  // before someone hits it blind.
+  ({ source }) => {
+    const htmlTag = findHtmlTag(source);
+    if (!htmlTag) return [];
+    const dir = readAttr(htmlTag.raw, "dir");
+    if (!dir) return [];
+    const normalizedDir = dir.toLowerCase();
+    if (normalizedDir !== "rtl" && normalizedDir !== "auto") return [];
+    const scopedDirection = normalizedDir === "auto" ? 'dir="auto"' : `direction: ${normalizedDir}`;
+    return [
+      {
+        code: "html_dir_attribute_breaks_render",
+        severity: "error",
+        message: `<html dir="${dir}"> renders correctly in preview/snapshot but produces a fully blank/black video from render — a confirmed, silent failure.`,
+        fixHint: `Remove dir="${dir}" from <html>. Keep lang, and scope ${scopedDirection} to individual text-containing elements instead — text still shapes correctly via the browser's own bidi algorithm.`,
+        snippet: truncateSnippet(htmlTag.raw),
+      },
+    ];
   },
 
   // subcomposition_blanks_before_host

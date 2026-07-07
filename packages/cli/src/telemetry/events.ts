@@ -1,5 +1,6 @@
 import { redactTelemetryString, type OutputResolutionIssueKind } from "@hyperframes/core";
 import { trackEvent } from "./client.js";
+import { readConfig } from "./config.js";
 
 export interface RenderObservabilityTelemetryPayload {
   observabilityRenderJobId?: string;
@@ -114,6 +115,24 @@ export function trackRenderComplete(
     staticDedupSkipReason?: string;
     staticDedupPredictedFrames?: number;
     staticDedupReusedFrames?: number;
+    // drawElement fast-capture outcome (default-on release visibility).
+    // Undefined on render paths with no capture session.
+    deCaptureMode?: string;
+    deCompileGate?: string;
+    deClampReason?: string;
+    deGateReason?: string;
+    deWorkerEncode?: boolean;
+    deVerifyArmed?: number;
+    deVerifyChecked?: number;
+    deVerifyMinDb?: number;
+    deVerifyInitMs?: number;
+    deSelfVerifyFallback?: boolean;
+    deFallbackReason?: string;
+    deBlankSuspects?: number;
+    deBlankDeterministicAccepts?: number;
+    deBlankRecaptures?: number;
+    deBoundaryFrames?: number;
+    deNcprFallbacks?: number;
     // "cli" when triggered by `hyperframes render` (default), "studio" when
     // triggered by a studio preview-server render (POST /api/projects/:id/render).
     source?: "cli" | "studio";
@@ -125,6 +144,10 @@ export function trackRenderComplete(
     // Processing efficiency
     speedRatio?: number;
     captureAvgMs?: number;
+    /** Warmup-robust per-frame capture median (basis for speedup estimates). */
+    captureP50Ms?: number;
+    /** <video> element count (speedup segmentation: injection comps read lower). */
+    videoCount?: number;
     capturePeakMs?: number;
     // Resource usage
     peakMemoryMb?: number;
@@ -170,6 +193,22 @@ export function trackRenderComplete(
       static_dedup_skip_reason: props.staticDedupSkipReason,
       static_dedup_predicted_frames: props.staticDedupPredictedFrames,
       static_dedup_reused_frames: props.staticDedupReusedFrames,
+      de_capture_mode: props.deCaptureMode,
+      de_compile_gate: props.deCompileGate,
+      de_clamp_reason: props.deClampReason,
+      de_gate_reason: props.deGateReason,
+      de_worker_encode: props.deWorkerEncode,
+      de_verify_armed: props.deVerifyArmed,
+      de_verify_checked: props.deVerifyChecked,
+      de_verify_min_db: props.deVerifyMinDb,
+      de_verify_init_ms: props.deVerifyInitMs,
+      de_self_verify_fallback: props.deSelfVerifyFallback,
+      de_fallback_reason: props.deFallbackReason,
+      de_blank_suspects: props.deBlankSuspects,
+      de_blank_deterministic_accepts: props.deBlankDeterministicAccepts,
+      de_blank_recaptures: props.deBlankRecaptures,
+      de_boundary_frames: props.deBoundaryFrames,
+      de_ncpr_fallbacks: props.deNcprFallbacks,
       source: props.source ?? "cli",
       composition_duration_ms: props.compositionDurationMs,
       composition_width: props.compositionWidth,
@@ -177,6 +216,8 @@ export function trackRenderComplete(
       total_frames: props.totalFrames,
       speed_ratio: props.speedRatio,
       capture_avg_ms: props.captureAvgMs,
+      capture_p50_ms: props.captureP50Ms,
+      video_count: props.videoCount,
       capture_peak_ms: props.capturePeakMs,
       peak_memory_mb: props.peakMemoryMb,
       memory_free_mb: props.memoryFreeMb,
@@ -308,6 +349,57 @@ export function trackBrowserInstall(): void {
   trackEvent("browser_install", {});
 }
 
+// Sign-in lifecycle. The CLI tracks command and render lifecycles but never
+// authentication, so `auth login` outcomes are invisible on the observability
+// dashboards — a completed sign-in, a browser flow the user abandoned, and a
+// rejected key all look identical (i.e. absent). These three events close that
+// gap so the sign-in funnel is measurable like the render funnel already is.
+// `method` is "oauth" (the default browser PKCE flow) or "api_key". No token,
+// key, identity, email, or free text is ever attached — only the method and a
+// low-cardinality outcome/reason.
+//
+// The three trackers accept an optional `distinctId`, forwarded to trackEvent
+// exactly like trackRenderComplete/trackRenderError already do. It is unused
+// today (events attribute to the install's anonymousId), but pre-plumbing it
+// makes attributing a completed sign-in to a resolved identity later a one-line
+// change at the callsite rather than a signature sweep.
+export type AuthLoginMethod = "oauth" | "api_key";
+export type AuthLoginFailureReason =
+  | "flow_error" // OAuth authorization/exchange threw a real error
+  | "flow_timeout" // OAuth callback wait elapsed (user closed the tab / walked away)
+  | "no_credential" // flow reported success but nothing was persisted
+  | "rejected" // backend rejected the supplied API key (401)
+  | "invalid_input" // key was empty, header-unsafe, or too short
+  | "aborted"; // prompt cancelled, or no key arrived on stdin before timeout
+
+export function trackAuthLoginStarted(method: AuthLoginMethod, distinctId?: string): void {
+  trackEvent("auth_login_started", { method }, distinctId);
+}
+
+export function trackAuthLoginCompleted(method: AuthLoginMethod, distinctId?: string): void {
+  trackEvent("auth_login_completed", { method }, distinctId);
+}
+
+export function trackAuthLoginFailed(
+  method: AuthLoginMethod,
+  reason: AuthLoginFailureReason,
+  distinctId?: string,
+): void {
+  trackEvent("auth_login_failed", { method, reason }, distinctId);
+}
+
+// Associate this install with the signed-in HeyGen account after a completed
+// sign-in. Emits a PostHog `$identify` alias whose `$anon_distinct_id` is the
+// install's anonymousId, so events recorded before sign-in stitch to the same
+// person instead of stranding as a separate anonymous profile. Routed through
+// trackEvent so it shares the opt-out gate and flush path — a no-op when
+// telemetry is disabled. `distinctId` is the account email (else username);
+// see the privacy notice in showTelemetryNotice and docs/packages/cli.mdx.
+export function identifyUser(distinctId: string): void {
+  if (!distinctId) return;
+  trackEvent("$identify", { $anon_distinct_id: readConfig().anonymousId }, distinctId);
+}
+
 // A render was rejected by the output-resolution/alpha/HDR pre-flight (P1-3)
 // before any browser/ffmpeg work. Counts the "caught early" saves on dashboard
 // 1783183, distinct from deep render failures. `kind` is the low-cardinality
@@ -351,6 +443,7 @@ export function trackFigmaImport(props: {
   entryCount?: number;
   unresolvedBindings?: number;
   rasterizedNodes?: number;
+  rasterizeFailures?: number;
 }): void {
   trackEvent("figma_import", {
     phase: props.phase,
@@ -362,6 +455,9 @@ export function trackFigmaImport(props: {
       ? { unresolved_bindings: props.unresolvedBindings }
       : {}),
     ...(props.rasterizedNodes !== undefined ? { rasterized_nodes: props.rasterizedNodes } : {}),
+    ...(props.rasterizeFailures !== undefined
+      ? { rasterize_failures: props.rasterizeFailures }
+      : {}),
   });
 }
 

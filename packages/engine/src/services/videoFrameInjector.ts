@@ -13,6 +13,7 @@ import { type FrameLookupTable } from "./videoFrameExtractor.js";
 import { injectVideoFramesBatch, syncVideoFrameVisibility } from "./screenshotService.js";
 import { type BeforeCaptureHook } from "./frameCapture.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
+import { HF_COLOR_GRADING_CANVAS_ID_PREFIX } from "@hyperframes/core";
 
 export interface VideoFrameInjectorOptions extends Partial<
   Pick<EngineConfig, "frameDataUriCacheLimit" | "frameDataUriCacheBytesLimitMb">
@@ -79,6 +80,7 @@ function createFrameSourceCache(
     evictions++;
   }
 
+  // fallow-ignore-next-line complexity
   function remember(framePath: string, dataUri: string): string {
     // Skip caching entries that alone exceed the byte budget. Caching them
     // would trigger immediate self-eviction on insert and pollute LRU order
@@ -187,6 +189,7 @@ export function createVideoFrameInjector(
   const frameCache = createFrameSourceCache(entryLimit, bytesLimit, config?.frameSrcResolver);
   const lastInjectedFrameByVideo = new Map<string, number>();
 
+  // fallow-ignore-next-line complexity
   return async (page: Page, time: number) => {
     const activePayloads = frameLookup.getActiveFramePayloads(time);
 
@@ -274,34 +277,44 @@ export interface VideoElementBounds {
  * holes where the HDR videos go.
  */
 export async function hideVideoElements(page: Page, videoIds: string[]): Promise<void> {
-  if (videoIds.length === 0) return;
-  await page.evaluate((ids: string[]) => {
-    for (const id of ids) {
-      const el = document.getElementById(id) as HTMLVideoElement | null;
-      if (el) {
-        el.style.setProperty("visibility", "hidden", "important");
-        const img = document.getElementById(`__render_frame_${id}__`);
-        if (img) img.style.setProperty("visibility", "hidden", "important");
-      }
-    }
-  }, videoIds);
+  await setVideoElementsVisibility(page, videoIds, false);
 }
 
 /**
  * Restore visibility of video elements after a DOM screenshot.
  */
 export async function showVideoElements(page: Page, videoIds: string[]): Promise<void> {
+  await setVideoElementsVisibility(page, videoIds, true);
+}
+
+async function setVideoElementsVisibility(
+  page: Page,
+  videoIds: string[],
+  visible: boolean,
+): Promise<void> {
   if (videoIds.length === 0) return;
-  await page.evaluate((ids: string[]) => {
-    for (const id of ids) {
-      const el = document.getElementById(id) as HTMLVideoElement | null;
-      if (el) {
-        el.style.removeProperty("visibility");
-        const img = document.getElementById(`__render_frame_${id}__`);
-        if (img) img.style.removeProperty("visibility");
+  await page.evaluate(
+    (ids: string[], canvasIdPrefix: string, shouldShow: boolean) => {
+      const apply = (node: Element | null) => {
+        if (!(node instanceof HTMLElement)) return;
+        if (shouldShow) {
+          node.style.removeProperty("visibility");
+        } else {
+          node.style.setProperty("visibility", "hidden", "important");
+        }
+      };
+      for (const id of ids) {
+        const video = document.getElementById(id);
+        if (!video) continue;
+        apply(video);
+        apply(document.getElementById(`__render_frame_${id}__`));
+        apply(document.getElementById(`${canvasIdPrefix}${id}`));
       }
-    }
-  }, videoIds);
+    },
+    videoIds,
+    HF_COLOR_GRADING_CANVAS_ID_PREFIX,
+    visible,
+  );
 }
 
 /**
@@ -416,6 +429,7 @@ export async function queryElementStacking(
   nativeHdrIds: Set<string>,
 ): Promise<ElementStackingInfo[]> {
   const hdrIds = Array.from(nativeHdrIds);
+  // fallow-ignore-next-line complexity
   return page.evaluate((hdrIdList: string[]): ElementStackingInfo[] => {
     const hdrSet = new Set(hdrIdList);
     const elements = document.querySelectorAll("[data-start]");
@@ -455,6 +469,7 @@ export async function queryElementStacking(
 
     // Find border-radius that clips the element. Replaced elements like <video>
     // clip to their own border-radius; ancestors need overflow !== visible.
+    // fallow-ignore-next-line complexity
     function getEffectiveBorderRadius(node: Element): [number, number, number, number] {
       // Resolve a CSS border-radius value to pixels. Chrome's getComputedStyle
       // returns percentages as-is (e.g. "50%"), not resolved to px.
@@ -557,6 +572,7 @@ export async function queryElementStacking(
     // position offsets + CSS transforms. This correctly handles GSAP
     // animations on wrapper divs (rotation, scale) that getBoundingClientRect
     // conflates into an axis-aligned bounding box.
+    // fallow-ignore-next-line complexity
     function getViewportMatrix(node: Element): string {
       const chain: HTMLElement[] = [];
       let current: Element | null = node;
@@ -605,6 +621,7 @@ export async function queryElementStacking(
       return mat.toString();
     }
 
+    // fallow-ignore-next-line complexity
     function composeIndividualTransforms(cs: CSSStyleDeclaration): DOMMatrix | null {
       const translate = cs.getPropertyValue("translate").trim();
       const rotate = cs.getPropertyValue("rotate").trim();

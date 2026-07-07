@@ -64,6 +64,31 @@ export interface EngineConfig {
    */
   staticFrameDedup: boolean;
   /**
+   * Use drawElementImage for frame capture (requires the CanvasDrawElement
+   * Chrome flag, added globally in buildChromeArgs). Default ON, clamped in
+   * `resolveConfig` to hosts where it can actually engage (macOS + hardware-GPU
+   * browser); compile/init gates and the runtime self-verification net route
+   * incompatible or damaged renders back to screenshot capture.
+   * Kill switch: `PRODUCER_EXPERIMENTAL_FAST_CAPTURE=false` (or the CLI
+   * `--experimental-fast-capture=false`).
+   */
+  useDrawElement: boolean;
+  /**
+   * Pipeline JPEG encode into an in-page OffscreenCanvas Worker for the
+   * drawElement fast-capture path (macOS hardware GPU only). The worker
+   * encodes frame N while the main thread seeks+paints frame N+1
+   * (~1.65–1.96× wall-time speedup). No-op unless `useDrawElement` is also
+   * true. Kill switch: `HF_DE_WORKER_ENCODE=false`.
+   */
+  enableDrawElementWorkerEncode: boolean;
+  /**
+   * INTERNAL. Set by resolveConfig when it disabled enablePageSideCompositing
+   * solely because drawElement was on. Lets the producer's compile-time gates
+   * restore page-side compositing without overriding an explicit caller/env
+   * opt-out. Not intended to be set by callers.
+   */
+  pageSideCompositingAutoDisabled?: boolean;
+  /**
    * Low-memory render profile. When `true`, the orchestrator collapses the
    * pipeline to its cheapest shape on memory-constrained hosts: it skips the
    * throwaway auto-worker calibration browser, pins capture to a single
@@ -235,6 +260,8 @@ export const DEFAULT_CONFIG: EngineConfig = {
   protocolTimeout: 300_000,
   forceScreenshot: false,
   staticFrameDedup: true,
+  useDrawElement: true,
+  enableDrawElementWorkerEncode: true,
   // Auto-detected per host in `resolveConfig`; defaults off for the raw
   // DEFAULT_CONFIG (used directly by tests and worker-sizing fallbacks).
   lowMemoryMode: false,
@@ -412,6 +439,11 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
 
     forceScreenshot: envBool("PRODUCER_FORCE_SCREENSHOT", DEFAULT_CONFIG.forceScreenshot),
     staticFrameDedup: resolveStaticFrameDedup(),
+    useDrawElement: envBool("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", DEFAULT_CONFIG.useDrawElement),
+    enableDrawElementWorkerEncode: envBool(
+      "HF_DE_WORKER_ENCODE",
+      DEFAULT_CONFIG.enableDrawElementWorkerEncode,
+    ),
     lowMemoryMode: resolveLowMemoryMode(),
     enablePageSideCompositing: envBool(
       "HF_PAGE_SIDE_COMPOSITING",
@@ -493,6 +525,51 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
     ...cleanEnv,
     ...overrides,
   };
+
+  // Default-on drawElement is clamped to hosts where it can actually engage
+  // (macOS with a non-software-GPU browser; SwiftShader drops transparent
+  // sub-layers — crbug 521434899). "auto" passes the clamp: the stock CLI
+  // resolves GPU mode to auto, which probes to hardware on real Macs — and if
+  // it resolves to software after all, the SwiftShader init-time gate still
+  // routes the session to the screenshot baseline. Without the clamp, the
+  // default would needlessly disable page-side shader compositing (below) on
+  // Linux/Docker hosts where DE never runs. An EXPLICIT opt-in (env or caller override)
+  // skips the clamp and keeps the old semantics — attempt DE, let the
+  // init-time gates route away — which debugging relies on.
+  const explicitDrawElementOptIn =
+    env("PRODUCER_EXPERIMENTAL_FAST_CAPTURE") === "true" || overrides?.useDrawElement === true;
+  if (
+    merged.useDrawElement &&
+    !explicitDrawElementOptIn &&
+    !(process.platform === "darwin" && merged.browserGpuMode !== "software")
+  ) {
+    merged.useDrawElement = false;
+  }
+  // The runtime self-verification net lives in the worker-encode drain — the
+  // serial drawElement path has only the blank guard. Default-on drawElement
+  // therefore requires worker-encode; disabling HF_DE_WORKER_ENCODE without an
+  // explicit drawElement opt-in falls back to the screenshot baseline rather
+  // than shipping unverified drawElement frames.
+  if (merged.useDrawElement && !explicitDrawElementOptIn && !merged.enableDrawElementWorkerEncode) {
+    merged.useDrawElement = false;
+  }
+
+  // drawElement capture and page-side shader compositing are mutually
+  // incompatible capture strategies (drawElement reads paint records directly
+  // and bypasses the page-side prepare→composite→resolve protocol). When
+  // fast capture is on, force page-side compositing off so shader
+  // transitions fall back to the Node-side layered blend rather than silently
+  // dropping. This keeps the flag self-consistent and avoids a per-session
+  // incompatibility warning on every fast-capture render.
+  if (merged.useDrawElement && merged.enablePageSideCompositing) {
+    merged.enablePageSideCompositing = false;
+    // Record that THIS resolution (not the caller) turned page-side
+    // compositing off, so a later compile-time drawElement gate can restore
+    // it without clobbering an explicit enablePageSideCompositing:false from
+    // the programmatic API or HF_PAGE_SIDE_COMPOSITING=false.
+    merged.pageSideCompositingAutoDisabled = true;
+  }
+
   return {
     ...merged,
     vp9CpuUsed: normalizeVp9CpuUsed(merged.vp9CpuUsed),

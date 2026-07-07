@@ -72,6 +72,7 @@ import {
   scaleProtocolTimeoutForComposition,
   isMemoryExhaustionError,
   isTransientBrowserError,
+  isDrawElementVerificationError,
 } from "@hyperframes/engine";
 import { join, dirname, resolve } from "path";
 import { randomUUID } from "crypto";
@@ -308,6 +309,13 @@ export interface RenderPerfSummary {
    * without the split fall back to `stages.captureMs`.
    */
   captureAvgMs?: number;
+  /**
+   * Median per-frame capture time from the engine's per-frame samples —
+   * warmup-robust (first frames pay font/image decode) and free of stage
+   * setup amortization, unlike `captureAvgMs`. From the session that
+   * captured the most frames when parallel workers report separately.
+   */
+  captureP50Ms?: number;
   capturePeakMs?: number;
   captureCalibration?: {
     sampledFrames: number[];
@@ -350,6 +358,42 @@ export interface RenderPerfSummary {
     predictedFrames: number;
     reusedFrames: number;
     skipReason?: string;
+  };
+  /**
+   * drawElement fast-capture outcome for this render (default-on release
+   * visibility). Undefined when no capture session ran.
+   */
+  drawElement?: {
+    /** Final capture mode: "drawelement" | "screenshot" | "beginframe" (|-joined if workers diverge). */
+    mode: string;
+    /** Compile-time gate that disabled default DE: 3d | mix_blend_mode | shader_transitions. */
+    compileGate?: string;
+    /** Producer clamp that disabled default DE: parallel | disk_path. */
+    clampReason?: string;
+    /** Engine init-time gate: swiftshader | css_effect:* | at_risk_timeline | 3d_init_failed | supersampling | render_mode_hint. */
+    gateReason?: string;
+    /** Worker-encode drain (the verified path) was active. */
+    workerEncode: boolean;
+    /** Self-verification ground-truth samples armed at init. */
+    verifyArmed: number;
+    /** Samples actually compared at drain time. */
+    verifyChecked: number;
+    /** Minimum PSNR across checked samples (dB; margin above the 32dB threshold). */
+    verifyMinDb?: number;
+    /** Init cost of capturing ground truth (ms). */
+    verifyInitMs: number;
+    /** Self-verification tripped and the render re-ran via screenshot. */
+    selfVerifyFallback: boolean;
+    /** What tripped it: psnr | blank. */
+    fallbackReason?: string;
+    /** Blank-guard counters. */
+    blankSuspects: number;
+    blankDeterministicAccepts: number;
+    blankRecaptures: number;
+    /** Clip-cut boundary frames captured via per-frame screenshot. */
+    boundaryFrames: number;
+    /** Per-frame "No cached paint record" screenshot fallbacks. */
+    ncprFallbacks: number;
   };
 }
 
@@ -1166,6 +1210,13 @@ export async function executeRenderJob(
     // via the explicit `forceScreenshot` parameter rather than reading
     // `cfg.forceScreenshot` directly.
     let captureForceScreenshot = compileResult.forceScreenshot;
+    // drawElement release telemetry: why default DE disengaged (if it did),
+    // whether self-verify fell back, and the drain-side counters.
+    const deCompileGate = compileResult.deCompileGate;
+    let deClampReason: string | undefined;
+    let deSelfVerifyFallback = false;
+    let deFallbackReason: string | undefined;
+    let deDrainStats: import("./render/stages/captureStreamingStage.js").DeDrainStats | undefined;
     updateCaptureObservability({ forceScreenshot: captureForceScreenshot });
     observability.checkpoint("compile", "composition metadata resolved", {
       width,
@@ -1266,10 +1317,19 @@ export async function executeRenderJob(
 
     perfStages.browserProbeMs = probeResult.browserProbeMs;
     perfStages.compileMs = Date.now() - stage1Start;
+    // BeginFrame liveness: the probe stage already relaunched its session in
+    // screenshot mode when the first BeginFrame stalled (SwiftShader
+    // heavy-layer comps) — flip the sequencer's capture routing to match so
+    // calibration and capture stages never issue another BeginFrame.
+    if (probeResult.beginFrameStalled && !captureForceScreenshot) {
+      captureForceScreenshot = true;
+      updateCaptureObservability({ forceScreenshot: captureForceScreenshot });
+    }
     observability.checkpoint("browser_probe", "duration resolved", {
       durationSeconds: probeResult.duration,
       totalFrames,
       compositionHash,
+      beginFrameStalled: probeResult.beginFrameStalled,
     });
 
     // ── Stage 2: Video frame extraction ─────────────────────────────────
@@ -1434,6 +1494,9 @@ export async function executeRenderJob(
       ...captureOptions,
       videoMetadataHints,
       skipReadinessVideoIds: videoReadinessSkipIds,
+      // Probe-resolved duration: drawElement self-verification derives its
+      // sample frame indices from this so they land inside the drained range.
+      compositionDurationSeconds: job.duration,
     });
     // The URL-served frame path (PR #596) hands each injected `<img>` a
     // fileServer URL instead of a base64 data URI, on the theory that
@@ -1560,6 +1623,30 @@ export async function executeRenderJob(
       durationSeconds: job.duration,
       maxDurationSeconds: cfg.streamingEncodeMaxDurationSeconds,
     });
+    // Default-on drawElement is only safe where the runtime self-verification
+    // net actually runs: the single-worker streaming worker-encode drain. The
+    // disk path (png-sequence / over the streaming duration cap) and parallel
+    // capture ship frames no drain verifies — route those renders to the
+    // screenshot baseline unless drawElement was explicitly opted into.
+    if (
+      cfg.useDrawElement &&
+      process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE !== "true" &&
+      (!useStreamingEncode || workerCount > 1)
+    ) {
+      cfg.useDrawElement = false;
+      deClampReason = workerCount > 1 ? "parallel" : "disk_path";
+      log.info(
+        "[Render] Fast capture: default-on drawElement disabled for this render — " +
+          (workerCount > 1 ? "parallel capture" : "the disk capture path") +
+          " has no runtime self-verification. Set PRODUCER_EXPERIMENTAL_FAST_CAPTURE=true to override.",
+      );
+      // The probe session already initialized in drawElement mode (canvas
+      // injected); it must not be reused by the unverified path.
+      if (probeSession && probeSession.captureMode === "drawelement") {
+        await closeCaptureSession(probeSession);
+        probeSession = null;
+      }
+    }
 
     // `captureAttempts` is declared at function scope above (shared with the
     // catch block). Static-dedup perf, appended per sequential session / per
@@ -1750,49 +1837,83 @@ export async function executeRenderJob(
       let streamingHandled = false;
       if (useStreamingEncode) {
         const captureFrameStart = Date.now();
-        const streamingRes = await observeRenderStage(
-          observability,
-          "capture_streaming",
-          { workerCount, forceScreenshot: captureForceScreenshot },
-          () =>
-            runCaptureStreamingStage({
-              fileServer: activeFileServer,
-              workDir,
-              framesDir,
-              videoOnlyPath,
-              job,
-              totalFrames,
-              cfg,
-              forceScreenshot: captureForceScreenshot,
-              log,
-              workerCount,
-              probeSession,
-              outputFormat,
-              streamingEncoderOptions: {
-                fps: job.config.fps,
-                width,
-                height,
-                codec: preset.codec,
-                preset: preset.preset,
-                quality: effectiveQuality,
-                bitrate: effectiveBitrate,
-                pixelFormat: preset.pixelFormat,
-                vp9CpuUsed: cfg.vp9CpuUsed,
-                useGpu: job.config.useGpu,
-                imageFormat: captureOptions.format || "jpeg",
-                hdr: preset.hdr,
-              },
-              buildCaptureOptions,
-              createRenderVideoFrameInjector,
-              abortSignal,
-              assertNotAborted,
-              onProgress,
-              dedupPerfs,
-            }),
-        );
+        const invokeStreaming = () =>
+          observeRenderStage(
+            observability,
+            "capture_streaming",
+            { workerCount, forceScreenshot: captureForceScreenshot },
+            () =>
+              runCaptureStreamingStage({
+                fileServer: activeFileServer,
+                workDir,
+                framesDir,
+                videoOnlyPath,
+                job,
+                totalFrames,
+                cfg,
+                forceScreenshot: captureForceScreenshot,
+                log,
+                workerCount,
+                probeSession,
+                outputFormat,
+                streamingEncoderOptions: {
+                  fps: job.config.fps,
+                  width,
+                  height,
+                  codec: preset.codec,
+                  preset: preset.preset,
+                  quality: effectiveQuality,
+                  bitrate: effectiveBitrate,
+                  pixelFormat: preset.pixelFormat,
+                  vp9CpuUsed: cfg.vp9CpuUsed,
+                  useGpu: job.config.useGpu,
+                  imageFormat: captureOptions.format || "jpeg",
+                  hdr: preset.hdr,
+                },
+                buildCaptureOptions,
+                createRenderVideoFrameInjector,
+                abortSignal,
+                assertNotAborted,
+                onProgress,
+                dedupPerfs,
+              }),
+          );
+        let streamingRes;
+        try {
+          streamingRes = await invokeStreaming();
+        } catch (err) {
+          // drawElement self-verification tripped (blank frame or PSNR breach
+          // vs the pre-injection ground truth). The whole render restarts on
+          // the screenshot path — slower, never wrong. The failed attempt's
+          // session was closed by the stage's finally; probeSession (if any)
+          // was consumed by it, so a fresh session spawns on retry.
+          if (!isDrawElementVerificationError(err)) throw err;
+          deSelfVerifyFallback = true;
+          deFallbackReason = /blank/i.test(err instanceof Error ? err.message : "")
+            ? "blank"
+            : "psnr";
+          log.warn("[Render] drawElement self-verification failed; re-rendering via screenshot", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          observability.checkpoint(
+            "capture_streaming",
+            "drawElement self-verify failed; retrying with forceScreenshot",
+          );
+          captureForceScreenshot = true;
+          updateCaptureObservability({
+            forceScreenshot: true,
+            deSelfVerifyFallback: true,
+          });
+          probeSession = null;
+          streamingRes = await invokeStreaming();
+          // The first attempt's error marked the phase failed; the retry
+          // recovered it — don't brand the render as failed in telemetry.
+          observability.clearFailure("capture_streaming");
+        }
         const captureFrameMs = Date.now() - captureFrameStart;
         if (streamingRes.success) {
           streamingHandled = true;
+          deDrainStats = streamingRes.deDrainStats;
           workerCount = streamingRes.workerCount;
           updateCaptureObservability({ workerCount });
           if (streamingRes.captureBeyondViewport !== undefined) {
@@ -1961,6 +2082,13 @@ export async function executeRenderJob(
       captureCalibration,
       captureAttempts,
       dedupPerfs,
+      drawElement: {
+        compileGate: deCompileGate,
+        clampReason: deClampReason,
+        selfVerifyFallback: deSelfVerifyFallback,
+        fallbackReason: deFallbackReason,
+        drainStats: deDrainStats,
+      },
       hdrDiagnostics,
       hdrPerf,
       observability: observabilitySummary,
