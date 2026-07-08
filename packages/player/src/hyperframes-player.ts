@@ -82,10 +82,14 @@ class HyperframesPlayer extends HTMLElement {
   private _currentTime = 0;
   private _duration = 0;
   private _paused = true;
+  /** True while the user is dragging the scrubber — makes seek() play audio at the
+   * playhead (audible scrub) instead of positioning it silently. */
+  private _scrubbing = false;
   private _lastUpdateMs = 0;
   private _volume = 1;
   private _compositionWidth = 1920;
   private _compositionHeight = 1080;
+  private _rescaleWarned = false;
   private _directTimelineAdapter: DirectTimelineAdapter | null = null;
   private _directTimelineClock: DirectTimelineClock;
   private _parentTickRaf: number | null = null;
@@ -324,13 +328,20 @@ class HyperframesPlayer extends HTMLElement {
     this._stopParentTickClock();
     this._currentTime = timeInSeconds;
     if (this._media.audioOwner === "parent") {
-      // Pause BEFORE seek: leaving the proxy playing turns the next
-      // `mirrorTime` drift-correction tick into a perpetual seek→play→drift→seek
-      // stutter loop, where ~80ms of audio plays past the (now frozen) timeline,
-      // then mirrorTime yanks `currentTime` back to match it. Symmetric with
-      // `pause()` below.
-      this._media.pauseAll();
-      this._media.seekAll(timeInSeconds);
+      if (this._scrubbing) {
+        // Audible scrub: play the proxy audio at the playhead so the viewer hears
+        // the track as they drag. Each move re-seeks, restarting playback from the
+        // new position. onScrubEnd settles back to silence via a normal seek.
+        this._media.scrubAll(timeInSeconds);
+      } else {
+        // Pause BEFORE seek: leaving the proxy playing turns the next
+        // `mirrorTime` drift-correction tick into a perpetual seek→play→drift→seek
+        // stutter loop, where ~80ms of audio plays past the (now frozen) timeline,
+        // then mirrorTime yanks `currentTime` back to match it. Symmetric with
+        // `pause()` below.
+        this._media.pauseAll();
+        this._media.seekAll(timeInSeconds);
+      }
     }
     this._paused = true;
     this.controlsApi?.updatePlaying(false);
@@ -667,6 +678,10 @@ class HyperframesPlayer extends HTMLElement {
     this._ready = true;
     this.controlsApi?.updateTime(this._currentTime, duration);
     this.dispatchEvent(new CustomEvent("ready", { detail: { duration } }));
+    // stage-size may not have arrived yet (race in the runtime's postTimeline
+    // resolving the root's data-width/data-height on first paint) — rescale
+    // here too so cross-origin compositions never stay unscaled/untransformed.
+    this._rescale();
 
     const doc = this._getSameOriginIframeDocument();
     if (doc) this._media.setupFromIframe(doc);
@@ -698,7 +713,28 @@ class HyperframesPlayer extends HTMLElement {
   }
 
   private _rescale() {
-    scaleIframeToFit(this, this.iframe, this._compositionWidth, this._compositionHeight);
+    const applied = scaleIframeToFit(
+      this,
+      this.iframe,
+      this._compositionWidth,
+      this._compositionHeight,
+    );
+    // A no-op before "ready" is expected (element not painted yet). A no-op
+    // once ready means the composition is stuck unscaled/untransformed —
+    // pinned to the iframe's default top-left position — with no evidence of
+    // why in the field. Surface it once (not on every ResizeObserver tick —
+    // a legitimately hidden/zero-sized player, e.g. a collapsed tab or
+    // off-screen carousel card, would otherwise spam the console forever).
+    if (!applied && this._ready && !this._rescaleWarned) {
+      this._rescaleWarned = true;
+      console.warn("[hyperframes-player] rescale no-op after ready — zero-size player element", {
+        src: this.getAttribute("src"),
+        offsetWidth: this.offsetWidth,
+        offsetHeight: this.offsetHeight,
+        compositionWidth: this._compositionWidth,
+        compositionHeight: this._compositionHeight,
+      });
+    }
   }
 
   private _onIframeLoad() {
@@ -721,6 +757,15 @@ class HyperframesPlayer extends HTMLElement {
         onPlay: () => this.play(),
         onPause: () => this.pause(),
         onSeek: (f) => this.seek(f * this._duration),
+        onScrubStart: () => {
+          this._scrubbing = true;
+        },
+        onScrubEnd: () => {
+          this._scrubbing = false;
+          // Settle: a normal (silent) seek pauses the proxy audio at the final
+          // scrub position, matching the paused playhead.
+          this.seek(this._currentTime);
+        },
         onSpeedChange: (s) => void (this.playbackRate = s),
         onMuteToggle: () => void (this.muted = !this.muted),
         onVolumeChange: (v) => void (this.volume = v),

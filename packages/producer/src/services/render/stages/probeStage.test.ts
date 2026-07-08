@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
-import { hasScriptedAudioVolumeAutomation } from "./probeStage.js";
+import { hasAutoStartVideos, hasScriptedAudioVolumeAutomation } from "./probeStage.js";
 
 // ── Mocks for runProbeStage tests ────────────────────────────────────────────
 // Capture the cfg passed to createCaptureSession so we can assert it carries
@@ -69,6 +69,7 @@ mock.module("@hyperframes/engine", () => ({
   // live in frameCapture-transientErrors.test.ts — update both if patterns change.
   isTransientBrowserError: (error: unknown) => {
     const msg = error instanceof Error ? error.message : String(error);
+    if (/Composition has zero duration[\s\S]*Runtime ready: false/.test(msg)) return true;
     return /Navigating frame was detached|Target closed|Session closed|browser has disconnected|Page crashed|Execution context was destroyed|Cannot find context with specified id|Failed to launch the browser process|Navigation timeout of \d+ ms exceeded|ECONNREFUSED/i.test(
       msg,
     );
@@ -223,6 +224,26 @@ describe("hasScriptedAudioVolumeAutomation", () => {
   });
 });
 
+describe("hasAutoStartVideos", () => {
+  it("detects a real auto-start video element", () => {
+    expect(hasAutoStartVideos(`<video src="a.mp4" data-hf-auto-start="">`)).toBe(true);
+  });
+
+  it("ignores the attribute mentioned in a comment (issue #1938)", () => {
+    expect(hasAutoStartVideos(`<!-- videos get data-hf-auto-start injected --><p>hi</p>`)).toBe(
+      false,
+    );
+  });
+
+  it("ignores the attribute in prose text", () => {
+    expect(hasAutoStartVideos(`<p>the data-hf-auto-start sentinel</p>`)).toBe(false);
+  });
+
+  it("returns false when there is no media", () => {
+    expect(hasAutoStartVideos(`<div class="clip"></div>`)).toBe(false);
+  });
+});
+
 describe("runProbeStage — forceScreenshot threading", () => {
   it("passes forceScreenshot:true to createCaptureSession when stage input carries it but cfg does not (low-memory mode fix #1236)", async () => {
     capturedCfgs.length = 0;
@@ -335,6 +356,49 @@ describe("runProbeStage — transient browser error retry (#1687)", () => {
     expect((caught as Error).message).toContain("Target closed");
     expect(initializeSessionCallCount).toBe(2);
     expect(closeCaptureSessionCallCount).toBe(2);
+  });
+
+  it("retries once on a pollHfReady zero-duration timeout (renderReady: false) and succeeds", async () => {
+    resetRetryMocks();
+    capturedCfgs.length = 0;
+    initializeSessionError = new Error(
+      "[FrameCapture] Composition has zero duration.\n  Runtime ready: false, __player: true, __hf.seek: true, GSAP timeline: true, data-duration: 53.3s",
+    );
+    initializeSessionFailUntilAttempt = 1;
+
+    const { runProbeStage } = await import("./probeStage.js");
+    const input = makeProbeInput({ cfgForceScreenshot: false, stageForceScreenshot: false });
+
+    const result = await runProbeStage(input);
+
+    expect(initializeSessionCallCount).toBe(2);
+    expect(closeCaptureSessionCallCount).toBe(1);
+    expect(result.duration).toBe(5);
+    expect(result.probeSession).not.toBeNull();
+  });
+
+  it("throws immediately on a permanent zero-duration error (renderReady: true — genuine authoring bug)", async () => {
+    resetRetryMocks();
+    capturedCfgs.length = 0;
+    initializeSessionError = new Error(
+      "[FrameCapture] Composition has zero duration.\n  Runtime ready: true, __player: true, __hf.seek: true, GSAP timeline: false, data-duration: not set",
+    );
+    initializeSessionFailUntilAttempt = 999;
+
+    const { runProbeStage } = await import("./probeStage.js");
+    const input = makeProbeInput({ cfgForceScreenshot: false, stageForceScreenshot: false });
+
+    let caught: unknown;
+    try {
+      await runProbeStage(input);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("Runtime ready: true");
+    expect(initializeSessionCallCount).toBe(1);
+    expect(closeCaptureSessionCallCount).toBe(1);
   });
 
   it("retries on a transient browser LAUNCH failure (createCaptureSession throws)", async () => {

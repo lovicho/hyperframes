@@ -952,6 +952,32 @@ describe("GSAP rules", () => {
     expect(finding).toBeDefined();
   });
 
+  it("does NOT report overlapping_gsap_tweens for distinct unresolved-target tweens", async () => {
+    // Each tween targets a DIFFERENT element via a target the parser cannot resolve
+    // statically (a helper call). Both collapse to the `__unresolved__` sentinel, but
+    // they are not the same element, so an overlap must not be asserted between them.
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <div id="s0"><div class="hl"><span class="w">a</span></div></div>
+    <div id="s1"><div class="hl"><span class="w">b</span></div></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    const a = pickWord(0);
+    const b = pickWord(1);
+    tl.to(a, { x: 100, duration: 1 }, 0);
+    tl.to(b, { x: 100, duration: 1 }, 0);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "overlapping_gsap_tweens");
+    expect(finding).toBeUndefined();
+  });
+
   it("warns when an opacity exit ends at a clip start boundary without a hard kill", async () => {
     const html = `
 <html><body>
@@ -977,6 +1003,63 @@ describe("GSAP rules", () => {
     expect(finding?.severity).toBe("error");
     expect(finding?.selector).toBe("#headline");
     expect(finding?.message).toContain("3.00s");
+  });
+
+  it("gsap_exit_missing_hard_kill points at the inner-wrapper pattern when the exiting selector is a clip element", async () => {
+    // Regression: a tl.set hard kill on a clip-classed selector is exactly what
+    // gsap_animates_clip_element then errors on — the two rules must not give
+    // contradictory advice for a crossfading scene that is itself class="clip".
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080" data-start="0" data-duration="6">
+    <div id="scene-a" class="clip" data-start="0" data-duration="3" data-track-index="0"></div>
+    <div id="scene-b" class="clip" data-start="3" data-duration="3" data-track-index="0"></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#scene-a", { opacity: 0, duration: 0.3 }, 2.7);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "gsap_exit_missing_hard_kill");
+    expect(finding).toBeDefined();
+    expect(finding?.fixHint).toContain("clip element");
+    expect(finding?.fixHint).toContain("inner");
+    expect(finding?.fixHint).not.toContain('tl.set("#scene-a"');
+  });
+
+  it("does NOT report gsap_exit_missing_hard_kill for an unresolved-target boundary exit", async () => {
+    // The exit tween targets an element via a value the parser cannot resolve (a helper
+    // call), so it collapses to the `__unresolved__` sentinel. You cannot assert a missing
+    // hard kill on an unknown element, and a `tl.set("__unresolved__", ...)` hint is
+    // meaningless. The resolved-target exit in the same timeline is still flagged.
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080" data-start="0" data-duration="6">
+    <div id="scene-a" class="clip" data-start="0" data-duration="3" data-track-index="0">
+      <h1 id="headline">First beat</h1>
+    </div>
+    <div id="scene-b" class="clip" data-start="3" data-duration="3" data-track-index="0">
+      <h1>Second beat</h1>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    const el = pickWord(0);
+    tl.to(el, { opacity: 0, duration: 0.3 }, 2.7);
+    tl.to("#headline", { opacity: 0, duration: 0.3 }, 2.7);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const exitFindings = result.findings.filter((f) => f.code === "gsap_exit_missing_hard_kill");
+    expect(exitFindings).toHaveLength(1);
+    expect(exitFindings[0]?.selector).toBe("#headline");
   });
 
   it("does not warn when a boundary exit has a matching hard kill", async () => {
@@ -1239,6 +1322,26 @@ describe("GSAP rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it("does NOT warn when timeline is registered with a computed bracket key", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="root" data-width="1920" data-height="1080">
+    <div id="box">Hello</div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    var spec = { id: "root" };
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#box", { opacity: 0.5, duration: 2 });
+    window.__timelines[spec.id] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "gsap_timeline_not_registered");
+    expect(finding).toBeUndefined();
+  });
+
   it("does NOT warn for sub-compositions (template-based)", async () => {
     const html = `
 <template>
@@ -1274,6 +1377,32 @@ describe("GSAP rules", () => {
     expect(finding).toBeDefined();
     expect(finding?.severity).toBe("error");
     expect(finding?.elementId).toBe("scene1");
+  });
+
+  it("scene_layer_missing_visibility_kill points at the inner-wrapper pattern when the scene element is a clip", async () => {
+    // Same contradiction as gsap_exit_missing_hard_kill above, via the older
+    // id-pattern-based rule: `tl.set("#scene1", { visibility: "hidden" }, ...)`
+    // on a class="clip" scene element is exactly what gsap_animates_clip_element
+    // then errors on.
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <div id="scene1" class="clip"></div>
+    <div id="scene2" class="clip"></div>
+  </div>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#scene1", { opacity: 0, duration: 0.5 }, 2.0);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "scene_layer_missing_visibility_kill");
+    expect(finding).toBeDefined();
+    expect(finding?.fixHint).toContain("clip element");
+    expect(finding?.fixHint).toContain("inner");
+    expect(finding?.fixHint).not.toContain('tl.set("#scene1"');
   });
 
   it("scene_layer_missing_visibility_kill: DOES fire when kill is only in a comment (stripJsComments guard)", async () => {

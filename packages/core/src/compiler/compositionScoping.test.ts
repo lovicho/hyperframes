@@ -79,6 +79,59 @@ body { margin: 0; }
     expect(fakeWindow.__captured).toEqual({ title: "Pro", price: "$29" });
   });
 
+  it("routes the documented window.__hyperframes.getVariables() to the scoped variant too", () => {
+    // Regression: the docs (variables-and-media.md) show `window.__hyperframes.
+    // getVariables()`, but inside a sub-comp the scoped `window` proxy used to
+    // fall through to the HOST page's base __hyperframes, returning the wrong
+    // (or empty) variables — the bare `__hyperframes` param was the only form
+    // that worked. Both spellings must now resolve to this comp's variables.
+    const { document } = parseHTML(`<div data-composition-id="card-1"></div>`);
+    const fakeWindow: Record<string, unknown> = {
+      document,
+      __timelines: {},
+      __hfVariablesByComp: {
+        "card-1": { title: "Pro", price: "$29" },
+        "card-2": { title: "Enterprise", price: "Custom" },
+      },
+      __hyperframes: {
+        getVariables: () => ({ title: "TOP-LEVEL-LEAK" }),
+        fitTextFontSize: () => undefined,
+      },
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `window.__captured = window.__hyperframes.getVariables();`,
+      "card-1",
+    );
+
+    new Function("window", wrapped)(fakeWindow);
+
+    expect(fakeWindow.__captured).toEqual({ title: "Pro", price: "$29" });
+  });
+
+  it("preserves non-getVariables members on window.__hyperframes (only getVariables is rescoped)", () => {
+    const { document } = parseHTML(`<div data-composition-id="card-1"></div>`);
+    let fitCalled = false;
+    const fakeWindow: Record<string, unknown> = {
+      document,
+      __timelines: {},
+      __hfVariablesByComp: { "card-1": { title: "Pro" } },
+      __hyperframes: {
+        getVariables: () => ({ title: "TOP-LEVEL-LEAK" }),
+        fitTextFontSize: () => {
+          fitCalled = true;
+        },
+      },
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `window.__hyperframes.fitTextFontSize();`,
+      "card-1",
+    );
+
+    new Function("window", wrapped)(fakeWindow);
+
+    expect(fitCalled).toBe(true);
+  });
+
   it("scoped getVariables reads from the runtime composition id when it differs", () => {
     const { document } = parseHTML(`<div data-composition-id="scene"></div>`);
     const fakeWindow: Record<string, unknown> = {
@@ -607,6 +660,71 @@ window.__afterTimeline = window.__timelines.scene;
     expect(scoped).toContain('[data-hf-authored-id="intro"] .title');
     // Raw #intro selectors should be gone
     expect(scoped).not.toMatch(/#intro\b/);
+  });
+
+  it("rewrites a bare root [data-composition-id] box selector to target exactly one of host or wrapper", () => {
+    // A composition styling its own box (e.g. `display:flex` to center its
+    // children, or `padding` to offset it) via the bare composition-id
+    // selector. After flattenInnerRoot preserves the authored root as a
+    // wrapper below the host, that wrapper (marked data-hf-inner-root) is
+    // what actually parents the real children, so the box styling must land
+    // there instead of the host. It must land on exactly one of the two:
+    // targeting both would apply an additive property like `padding` twice,
+    // since the wrapper is nested inside the host.
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] { display: flex; justify-content: center; }',
+      "captions",
+    );
+
+    expect(scoped).toContain(
+      '[data-composition-id="captions"]:not(:has([data-hf-inner-root])), ' +
+        '[data-composition-id="captions"] > [data-hf-inner-root]',
+    );
+  });
+
+  it("matches exactly the wrapper (not the host too) when both exist in the flattened DOM shape", () => {
+    // Regression test: an earlier version of this fix targeted both the host
+    // and the wrapper (a plain OR), which doubles any additive property
+    // (e.g. padding-top) since the wrapper is nested inside the host.
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] { padding-top: 200px; }',
+      "captions",
+    );
+    const ruleMatch = scoped.match(/([^{]+)\{/);
+    const selectorText = ruleMatch?.[1]?.trim();
+    if (!selectorText) throw new Error("expected a CSS rule to be produced");
+
+    const { document } = parseHTML(
+      '<div id="host" data-composition-id="captions">' +
+        '<div id="wrapper" data-hf-inner-root="true"></div>' +
+        "</div>",
+    );
+    const matches = [...document.querySelectorAll(selectorText)];
+    expect(matches.map((el) => el.id)).toEqual(["wrapper"]);
+  });
+
+  it("matches the host when no wrapper is present (non-flattened fallback)", () => {
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] { padding-top: 200px; }',
+      "captions",
+    );
+    const ruleMatch = scoped.match(/([^{]+)\{/);
+    const selectorText = ruleMatch?.[1]?.trim();
+    if (!selectorText) throw new Error("expected a CSS rule to be produced");
+
+    const { document } = parseHTML('<div id="host" data-composition-id="captions"></div>');
+    const matches = [...document.querySelectorAll(selectorText)];
+    expect(matches.map((el) => el.id)).toEqual(["host"]);
+  });
+
+  it("leaves root-plus-descendant [data-composition-id] selectors as a plain scope prefix", () => {
+    const scoped = scopeCssToComposition(
+      '[data-composition-id="captions"] .title { color: red; }',
+      "captions",
+    );
+
+    expect(scoped).toContain('[data-composition-id="captions"] .title');
+    expect(scoped).not.toContain("data-hf-inner-root");
   });
 
   it('does not rewrite [id="intro"] attribute selectors', () => {

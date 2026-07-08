@@ -37,6 +37,8 @@ import {
   removeAnimationFromScript,
   addKeyframeToScript,
   removeKeyframeFromScript,
+  moveKeyframeInScript,
+  resizeKeyframedTweenInScript,
   updateKeyframeInScript,
   convertToKeyframesFromScript,
   removeAllKeyframesFromScript,
@@ -50,6 +52,7 @@ import {
   splitIntoPropertyGroupsFromScript,
   shiftPositionsInScript,
   scalePositionsInScript,
+  dedupePositionWritesInScript,
 } from "@hyperframes/parsers/gsap-writer-acorn";
 import {
   removeElementFromHtml,
@@ -624,6 +627,22 @@ type GsapMutationRequest =
     }
   | { type: "remove-keyframe"; animationId: string; percentage: number }
   | {
+      type: "move-keyframe";
+      animationId: string;
+      fromPercentage: number;
+      toPercentage: number;
+    }
+  | {
+      // Boundary drag-to-retime: grow/shift a keyframed tween's window and re-key
+      // its existing keyframes in place (preserves _auto / per-keyframe ease /
+      // easeEach / outer ease, unlike the array-rebuild replace-with-keyframes).
+      type: "resize-keyframed-tween";
+      animationId: string;
+      position: number;
+      duration: number;
+      pctRemap: Array<{ from: number; to: number }>;
+    }
+  | {
       type: "update-keyframe";
       animationId: string;
       percentage: number;
@@ -737,6 +756,14 @@ type GsapMutationRequest =
       targetSelector: string;
     }
   | {
+      // Enforce "exactly one position write per element": keep `keepAnimationId`
+      // (the write the commit is editing) and strip every other pure-position
+      // write for the selector. Self-heals files that already have duplicates.
+      type: "consolidate-position-writes";
+      targetSelector: string;
+      keepAnimationId?: string;
+    }
+  | {
       // Rewrite all top-level helper/loop constructs into literal tweens so
       // computed keyframes become directly editable (visual no-op).
       type: "unroll-timeline";
@@ -769,6 +796,8 @@ const HOLD_SYNC_MUTATION_TYPES = new Set<string>([
   "add-keyframe",
   "update-keyframe",
   "remove-keyframe",
+  "move-keyframe",
+  "resize-keyframed-tween",
   "remove-all-keyframes",
   "add-with-keyframes",
   "replace-with-keyframes",
@@ -897,6 +926,14 @@ function executeGsapMutationAcorn(
       }
       return script;
     }
+    case "consolidate-position-writes": {
+      if (!body.targetSelector) return block.scriptText;
+      return dedupePositionWritesInScript(
+        block.scriptText,
+        body.targetSelector,
+        body.keepAnimationId,
+      );
+    }
     case "remove-property": {
       const r = requireAnimation(block.scriptText, body.animationId);
       if ("err" in r) return r.err;
@@ -927,6 +964,23 @@ function executeGsapMutationAcorn(
     }
     case "remove-keyframe": {
       return removeKeyframeFromScript(block.scriptText, body.animationId, body.percentage);
+    }
+    case "move-keyframe": {
+      return moveKeyframeInScript(
+        block.scriptText,
+        body.animationId,
+        body.fromPercentage,
+        body.toPercentage,
+      );
+    }
+    case "resize-keyframed-tween": {
+      return resizeKeyframedTweenInScript(
+        block.scriptText,
+        body.animationId,
+        body.position,
+        body.duration,
+        body.pctRemap,
+      );
     }
     case "update-keyframe": {
       return updateKeyframeInScript(
@@ -1086,6 +1140,8 @@ async function executeGsapMutationRecast(
     removeAnimationFromScript,
     addKeyframeToScript,
     removeKeyframeFromScript,
+    moveKeyframeInScript,
+    resizeKeyframedTweenInScript,
     updateKeyframeInScript,
     convertToKeyframesInScript,
     removeAllKeyframesFromScript,
@@ -1101,6 +1157,7 @@ async function executeGsapMutationRecast(
     addAnimationWithKeyframesToScript,
     splitAnimationsInScript,
     splitIntoPropertyGroups,
+    dedupePositionWritesInScript,
   } = parser;
 
   function requireAnimation(
@@ -1199,6 +1256,14 @@ async function executeGsapMutationRecast(
       }
       return script;
     }
+    case "consolidate-position-writes": {
+      if (!body.targetSelector) return block.scriptText;
+      return dedupePositionWritesInScript(
+        block.scriptText,
+        body.targetSelector,
+        body.keepAnimationId,
+      );
+    }
     case "remove-property": {
       const r = requireAnimation(block.scriptText, body.animationId);
       if ("err" in r) return r.err;
@@ -1229,6 +1294,23 @@ async function executeGsapMutationRecast(
     }
     case "remove-keyframe": {
       return removeKeyframeFromScript(block.scriptText, body.animationId, body.percentage);
+    }
+    case "move-keyframe": {
+      return moveKeyframeInScript(
+        block.scriptText,
+        body.animationId,
+        body.fromPercentage,
+        body.toPercentage,
+      );
+    }
+    case "resize-keyframed-tween": {
+      return resizeKeyframedTweenInScript(
+        block.scriptText,
+        body.animationId,
+        body.position,
+        body.duration,
+        body.pctRemap,
+      );
     }
     case "update-keyframe": {
       return updateKeyframeInScript(

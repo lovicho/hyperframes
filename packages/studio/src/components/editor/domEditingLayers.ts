@@ -1,8 +1,9 @@
-/**
- * Layer items, text fields, capabilities, selection resolution, and patch operations
- * for dom editing.
- */
 import type { PatchOperation } from "../../utils/sourcePatcher";
+import {
+  resolveEditingAffordances,
+  resolveEditingSections,
+  type EditableElementFacts,
+} from "@hyperframes/core/editing";
 import { groupScopedLayerRoots, resolveGroupCapture } from "./domEditingGroups";
 import type {
   DomEditCapabilities,
@@ -21,9 +22,7 @@ import {
   getSelectorIndex,
   getSourceFileForElement,
   isHtmlElement,
-  isIdentityTransform,
   isTextBearingTag,
-  parsePx,
 } from "./domEditingDom";
 import {
   findElementForSelection,
@@ -33,10 +32,18 @@ import {
 } from "./domEditingElement";
 import { isCompositionRootLayer } from "./domEditingRootLayer";
 
-// ─── Text fields ────────────────────────────────────────────────────────────
-
 export function isEditableTextLeaf(el: HTMLElement): boolean {
   return isTextBearingTag(el.tagName.toLowerCase()) && el.children.length === 0;
+}
+
+function sameTagChildIndex(el: HTMLElement): number {
+  let index = 0;
+  let sibling = el.previousElementSibling;
+  while (sibling) {
+    if (sibling.tagName === el.tagName) index += 1;
+    sibling = sibling.previousElementSibling;
+  }
+  return index;
 }
 
 function getTextFieldLabel(
@@ -54,6 +61,7 @@ function buildTextField(
   index: number,
   total: number,
   source: "self" | "child",
+  sourceChildIndex?: number,
 ): DomEditTextField {
   const tagName = el.tagName.toLowerCase();
   const key = el.getAttribute("data-hf-text-key") ?? `${source}:${index}:${tagName}`;
@@ -71,6 +79,7 @@ function buildTextField(
     inlineStyles: getInlineStyles(el),
     computedStyles: getCuratedComputedStyles(el),
     source,
+    ...(sourceChildIndex == null ? {} : { sourceChildIndex }),
   };
 }
 
@@ -102,7 +111,9 @@ export function collectDomEditTextFields(el: HTMLElement): DomEditTextField[] {
           });
           childIdx++;
         } else if (isHtmlElement(node) && isEditableTextLeaf(node)) {
-          fields.push(buildTextField(node, childIdx, childElements.length, "child"));
+          fields.push(
+            buildTextField(node, childIdx, childElements.length, "child", sameTagChildIndex(node)),
+          );
           childIdx++;
         }
       }
@@ -110,7 +121,7 @@ export function collectDomEditTextFields(el: HTMLElement): DomEditTextField[] {
     }
 
     return childElements.map((child, index) =>
-      buildTextField(child, index, childElements.length, "child"),
+      buildTextField(child, index, childElements.length, "child", sameTagChildIndex(child)),
     );
   }
 
@@ -169,14 +180,84 @@ export function buildDefaultDomEditTextField(base?: Partial<DomEditTextField>): 
   };
 }
 
-// ─── Capabilities ────────────────────────────────────────────────────────────
+export interface DomEditChildLocator {
+  childSelector: string;
+  childIndex: number;
+}
 
-// fallow-ignore-next-line complexity
+export function buildTextFieldChildLocator(
+  fields: DomEditTextField[],
+  fieldKey: string,
+): DomEditChildLocator | null {
+  const field = fields.find((candidate) => candidate.key === fieldKey);
+  if (!field || field.source !== "child") return null;
+  // sourceChildIndex is only absent for a synthetic field that was never read
+  // back from the live DOM (e.g. one built by buildDefaultDomEditTextField).
+  // Guessing its position by counting same-tag "child" fields elsewhere in
+  // the array is unreliable and can silently locate the wrong element — fail
+  // closed instead so the caller falls back to the unsupported-structure path.
+  if (field.sourceChildIndex == null) return null;
+
+  return {
+    childSelector: `:scope > ${field.tagName}`,
+    childIndex: field.sourceChildIndex,
+  };
+}
+
+function capabilityFacts(geometry: {
+  hasStableTarget: boolean;
+  tag: string;
+  inlineStyles: Record<string, string>;
+  computedStyles: Record<string, string>;
+  isCompositionHost: boolean;
+  isCompositionRoot: boolean;
+  isInsideLockedComposition: boolean;
+  isMasterView: boolean;
+  existsInSource: boolean;
+}): EditableElementFacts {
+  return {
+    ...geometry,
+    hasEditableText: false,
+    hasTimingStart: false,
+    animationCount: 0,
+  };
+}
+
+/**
+ * Build core EditableElementFacts from a fully-resolved DomEditSelection.
+ * `animationCount` is supplied by the caller because live GSAP tweens arrive on
+ * a separate channel (the PropertyPanel `gsapAnimations` prop), not on the
+ * selection — `selection.gsapAnimations` is never populated.
+ */
+export function domEditSelectionToFacts(
+  selection: DomEditSelection,
+  animationCount = selection.gsapAnimations?.length ?? 0,
+): EditableElementFacts {
+  return {
+    hasStableTarget: Boolean(selection.selector || selection.hfId),
+    tag: selection.tagName,
+    inlineStyles: selection.inlineStyles,
+    computedStyles: selection.computedStyles,
+    isCompositionHost: selection.isCompositionHost,
+    isCompositionRoot: false,
+    isInsideLockedComposition: selection.isInsideLockedComposition,
+    isMasterView: false,
+    existsInSource: true,
+    hasEditableText: selection.textFields.length > 0,
+    hasTimingStart: selection.dataAttributes.start != null,
+    animationCount,
+  };
+}
+
+/**
+ * Resolve DOM edit capabilities for a given element.
+ * Thin wrapper over core resolveEditingAffordances — kept for backward
+ * compatibility (tests and the barrel import this signature directly).
+ */
 export function resolveDomEditCapabilities(args: {
   selector?: string;
   hfId?: string;
   tagName?: string;
-  className?: string;
   inlineStyles: Record<string, string>;
   computedStyles: Record<string, string>;
   isCompositionHost: boolean;
@@ -185,92 +266,19 @@ export function resolveDomEditCapabilities(args: {
   isMasterView: boolean;
   existsInSource?: boolean;
 }): DomEditCapabilities {
-  if ((!args.selector && !args.hfId) || args.isInsideLockedComposition) {
-    return {
-      canSelect: !args.isInsideLockedComposition,
-      canEditStyles: false,
-      canMove: false,
-      canResize: false,
-      canApplyManualOffset: false,
-      canApplyManualSize: false,
-      canApplyManualRotation: false,
-      reasonIfDisabled: args.isInsideLockedComposition
-        ? "This element belongs to a locked composition."
-        : "Studio could not resolve a stable patch target for this element.",
-    };
-  }
-
-  if (args.existsInSource === false) {
-    return {
-      canSelect: true,
-      canEditStyles: false,
-      canMove: false,
-      canResize: false,
-      canApplyManualOffset: false,
-      canApplyManualSize: false,
-      canApplyManualRotation: false,
-      reasonIfDisabled: "This element is generated by a script and cannot be edited visually.",
-    };
-  }
-
-  if (args.isCompositionRoot) {
-    return {
-      canSelect: true,
-      canEditStyles: true,
-      canMove: false,
-      canResize: false,
-      canApplyManualOffset: false,
-      canApplyManualSize: false,
-      canApplyManualRotation: false,
-      reasonIfDisabled: "The root composition defines the preview bounds.",
-    };
-  }
-
-  const position = args.computedStyles.position;
-  const left = parsePx(args.inlineStyles.left) ?? parsePx(args.computedStyles.left);
-  const top = parsePx(args.inlineStyles.top) ?? parsePx(args.computedStyles.top);
-  const width = parsePx(args.inlineStyles.width) ?? parsePx(args.computedStyles.width);
-  const height = parsePx(args.inlineStyles.height) ?? parsePx(args.computedStyles.height);
-  const hasTransformDrivenGeometry = !isIdentityTransform(args.computedStyles.transform);
-
-  const canMove =
-    (position === "absolute" || position === "fixed") &&
-    left != null &&
-    top != null &&
-    !hasTransformDrivenGeometry;
-
-  const canResize = canMove && (width != null || height != null);
-  const canApplyManualGeometry = !args.isCompositionHost;
-  const canApplyManualOffset = canApplyManualGeometry;
-  const canApplyManualSize = canApplyManualGeometry;
-  const canApplyManualRotation = canApplyManualGeometry;
-  const reasonIfDisabled = canApplyManualGeometry
-    ? undefined
-    : "Select an internal layer to transform it.";
-
-  if (args.isCompositionHost && args.isMasterView) {
-    return {
-      canSelect: true,
-      canEditStyles: false,
-      canMove,
-      canResize,
-      canApplyManualOffset,
-      canApplyManualSize,
-      canApplyManualRotation,
-      reasonIfDisabled,
-    };
-  }
-
-  return {
-    canSelect: true,
-    canEditStyles: true,
-    canMove,
-    canResize,
-    canApplyManualOffset,
-    canApplyManualSize,
-    canApplyManualRotation,
-    reasonIfDisabled,
-  };
+  return resolveEditingAffordances(
+    capabilityFacts({
+      hasStableTarget: Boolean(args.selector || args.hfId),
+      tag: (args.tagName ?? "div").toLowerCase(),
+      inlineStyles: args.inlineStyles,
+      computedStyles: args.computedStyles,
+      isCompositionHost: args.isCompositionHost,
+      isCompositionRoot: args.isCompositionRoot ?? false,
+      isInsideLockedComposition: args.isInsideLockedComposition ?? false,
+      isMasterView: args.isMasterView,
+      existsInSource: args.existsInSource ?? true,
+    }),
+  ).capabilities;
 }
 
 // ─── Element label ────────────────────────────────────────────────────────────
@@ -292,8 +300,11 @@ async function probeSourceElement(
       },
     );
     if (!response.ok) return true;
-    const data = (await response.json()) as { exists?: boolean };
-    return data.exists !== false;
+    const data = await response.json();
+    if (data && typeof data === "object" && "exists" in data && data.exists === false) {
+      return false;
+    }
+    return true;
   } catch {
     return true;
   }
@@ -354,19 +365,19 @@ export async function resolveDomEditSelection(
       if (selectorIndex != null) probeTarget.selectorIndex = selectorIndex;
       existsInSource = await probeSourceElement(options.projectId, sourceFile, probeTarget);
     }
-    const capabilities = resolveDomEditCapabilities({
-      selector,
-      hfId,
-      tagName: current.tagName.toLowerCase(),
-      className: current.className,
-      inlineStyles,
-      computedStyles,
-      isCompositionHost: Boolean(compositionSrc),
-      isCompositionRoot,
-      isInsideLockedComposition: isInsideLocked,
-      isMasterView: options.isMasterView,
-      existsInSource,
-    });
+    const capabilities = resolveEditingAffordances(
+      capabilityFacts({
+        hasStableTarget: Boolean(selector || hfId),
+        tag: current.tagName.toLowerCase(),
+        inlineStyles,
+        computedStyles,
+        isCompositionHost: Boolean(compositionSrc),
+        isCompositionRoot,
+        isInsideLockedComposition: isInsideLocked,
+        isMasterView: options.isMasterView,
+        existsInSource: existsInSource ?? true,
+      }),
+    ).capabilities;
     const rect = current.getBoundingClientRect();
 
     return {
@@ -491,19 +502,28 @@ export function collectDomEditLayerItems(
 
 // ─── Patch operations ────────────────────────────────────────────────────────
 
-export function buildDomEditStylePatchOperation(property: string, value: string): PatchOperation {
+export function buildDomEditStylePatchOperation(
+  property: string,
+  value: string | null,
+  childLocator?: DomEditChildLocator,
+): PatchOperation {
   return {
     type: "inline-style",
     property,
     value,
+    ...childLocator,
   };
 }
 
-export function buildDomEditTextPatchOperation(value: string): PatchOperation {
+export function buildDomEditTextPatchOperation(
+  value: string,
+  childLocator?: DomEditChildLocator,
+): PatchOperation {
   return {
     type: "text-content",
     property: "text",
     value,
+    ...childLocator,
   };
 }
 
@@ -554,11 +574,7 @@ export function getDomEditTargetKey(
 }
 
 export function isTextEditableSelection(selection: DomEditSelection): boolean {
-  return (
-    selection.textFields.length > 0 &&
-    !selection.isCompositionHost &&
-    !selection.isInsideLockedComposition
-  );
+  return resolveEditingSections(domEditSelectionToFacts(selection)).text;
 }
 
 // buildElementAgentPrompt is in domEditingAgentPrompt.ts

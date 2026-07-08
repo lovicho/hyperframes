@@ -45,6 +45,12 @@ describe("inlineSubCompositions – #ID selector scoping divergence", () => {
       label: "valid-parse-empty-body",
       html: "<!doctype html><html><head></head><body></body></html>",
     },
+    // linkedom's parseHTML("just some text") returns documentElement === null.
+    // Any code that then touches .head/.body (as linkedom's own internals do)
+    // throws "Cannot destructure property 'firstElementChild' of
+    // 'documentElement' as it is null" — the #1 raw crash in production
+    // telemetry. Must be skipped gracefully, not crash.
+    { label: "malformed non-HTML text", html: "just some plain text, no tags at all" },
   ])("skips $label sub-composition files gracefully", ({ html }) => {
     const document = makeHostDocument("intro");
     const host = document.querySelector('[data-composition-src="intro.html"]')!;
@@ -59,6 +65,21 @@ describe("inlineSubCompositions – #ID selector scoping divergence", () => {
     expect(missing).toEqual(["intro.html"]);
     expect(result.styles).toHaveLength(0);
     expect(result.scripts).toHaveLength(0);
+  });
+
+  it("passes the failure reason through to onMissingComposition", () => {
+    const document = makeHostDocument("intro");
+    const host = document.querySelector('[data-composition-src="intro.html"]')!;
+    const reasons: Array<string | undefined> = [];
+
+    inlineSubCompositions(document, [host], {
+      resolveHtml: () => "",
+      parseHtml: (h) => parseHTML(h).document,
+      onMissingComposition: (_src, reason) => reasons.push(reason),
+    });
+
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toContain("empty");
   });
 
   it("producer path (no flattenInnerRoot): strips inner root, losing #id attribute", () => {
@@ -152,6 +173,52 @@ describe("inlineSubCompositions – #ID selector scoping divergence", () => {
     // CSS is still rewritten to use the attribute selector.
     const scopedCss = result.styles.join("\n");
     expect(scopedCss).toContain('[data-hf-authored-id="intro"]');
+  });
+
+  it("with flattenInnerRoot: restores data-composition-id on the wrapper for an anonymous host", () => {
+    // Regression test: a host mounted via data-composition-src with no
+    // data-composition-id of its own (an "anonymous" host). The composition
+    // styles its own root box via the bare composition-id selector and a
+    // script self-references it too — both need something in the render DOM
+    // to actually carry that id once flattenInnerRoot strips it from the
+    // wrapper by default.
+    const { document } = parseHTML(`<!DOCTYPE html>
+<html><body>
+  <div data-composition-id="main">
+    <div data-composition-src="scoped-text.html" data-start="0" data-duration="3"></div>
+  </div>
+</body></html>`);
+    const host = document.querySelector('[data-composition-src="scoped-text.html"]')!;
+
+    const scopedTextHtml = `<template id="scoped-text-template">
+  <div data-composition-id="scoped-text" data-width="1080" data-height="1920" data-duration="3">
+    <div class="label">Scoped Text Should Stay Styled</div>
+    <style>
+      [data-composition-id="scoped-text"] { display: flex; background: rgb(12, 12, 12); }
+    </style>
+  </div>
+</template>`;
+
+    function flattenInnerRoot(innerRoot: Element): Element {
+      const clone = innerRoot.cloneNode(true) as Element;
+      clone.removeAttribute("data-composition-id");
+      clone.removeAttribute("data-start");
+      clone.removeAttribute("data-duration");
+      clone.setAttribute("data-hf-inner-root", "true");
+      return clone;
+    }
+
+    const result = inlineSubCompositions(document, [host], {
+      resolveHtml: () => scopedTextHtml,
+      parseHtml: (html) => parseHTML(html).document,
+      flattenInnerRoot,
+    });
+
+    const wrapper = host.querySelector("[data-hf-inner-root]");
+    expect(wrapper?.getAttribute("data-composition-id")).toBe("scoped-text");
+
+    const scopedCss = result.styles.join("\n");
+    expect(scopedCss).toContain("display: flex");
   });
 
   it("extracts <link> elements from sub-composition <head> with original rel and crossorigin", () => {

@@ -1,6 +1,7 @@
 import postcss, { type AtRule, type Node, type Rule } from "postcss";
 
 const AUTHORED_ROOT_ID_ATTR = "data-hf-authored-id";
+const INNER_ROOT_ATTR = "data-hf-inner-root";
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -117,6 +118,18 @@ function scopeSelector(
     "g",
   );
   if (compositionIdPattern.test(trimmed)) {
+    const isRootBoxSelector = trimmed.replace(compositionIdPattern, "").trim() === "";
+    if (isRootBoxSelector) {
+      // A bare root selector styles the composition's own box (flex/grid/
+      // position/padding). When flattenInnerRoot preserves the authored root
+      // as a wrapper below `scope` (see prepareFlattenedInnerRoot), that
+      // wrapper is the element real children are laid out in, not `scope`
+      // itself, so the box styling must land there instead. It must land on
+      // exactly one of the two: applying it to both compounds any additive
+      // property (padding, margin, non-zero transform) since the wrapper
+      // sits nested inside the host and would inherit the effect twice.
+      return `${scope}:not(:has([${INNER_ROOT_ATTR}])), ${scope} > [${INNER_ROOT_ATTR}]`;
+    }
     return selectorWithoutRootTiming.replace(compositionIdPattern, scope);
   }
   const leading = selectorWithoutRootTiming.match(/^\s*/)?.[0] ?? "";
@@ -383,6 +396,16 @@ export function wrapScopedCompositionScript(
     ? new Proxy(window, {
         get: function(target, prop, receiver) {
           if (prop === "__timelines") return __hfGetTimelineRegistry();
+          // Inside a sub-composition, __hyperframes is passed as a bare script
+          // param bound to the SCOPED variant (per-comp getVariables). But
+          // authors routinely write the documented window.__hyperframes.
+          // getVariables() form, which would otherwise fall through to the host
+          // page's base __hyperframes and return the WRONG (or empty) variables
+          // for this instance. Route it to the scoped variant too so both
+          // spellings resolve to this composition's own variables.
+          // (__hfScopedHyperframes is a hoisted var assigned below, before any
+          // sub-comp script -- the only code that reads this -- runs.)
+          if (prop === "__hyperframes") return __hfScopedHyperframes;
           return Reflect.get(target, prop, target);
         },
         set: function(target, prop, value, receiver) {

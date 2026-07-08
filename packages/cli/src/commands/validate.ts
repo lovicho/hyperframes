@@ -1,8 +1,11 @@
 import { defineCommand } from "citty";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveProject } from "../utils/project.js";
+import { resolveProject, type ProjectDir } from "../utils/project.js";
+import { normalizeErrorMessage } from "../utils/errorMessage.js";
+import type { ProjectLintResult } from "../utils/lintProject.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import { c } from "../ui/colors.js";
 import { withMeta } from "../utils/updateCheck.js";
@@ -30,7 +33,35 @@ interface ContrastEntry {
 
 const CONTRAST_SAMPLES = 5;
 const SEEK_SETTLE_MS = 150;
+const PREFERRED_SEEK_TARGET_WAIT_MS = 500;
 const MEDIA_EXTENSIONS = /\.(aac|flac|m4a|mov|mp3|mp4|oga|ogg|wav|webm)$/i;
+// Floor for the initial page navigation. A blocking external <script> (GSAP
+// from a CDN, etc.) delays `domcontentloaded`; the actual render (much larger
+// budget) rides it out, so validate's navigation must be at least as patient as
+// the user's --timeout, never stuck below this floor.
+const NAV_TIMEOUT_FLOOR_MS = 10000;
+
+// Navigation budget = the larger of the floor and the user's --timeout, so
+// `--timeout` (already the "wait longer for slow loads" knob for media/settle)
+// also extends navigation instead of being ignored by a hardcoded 10s.
+export function resolveNavigationTimeoutMs(optTimeout?: number): number {
+  return Math.max(NAV_TIMEOUT_FLOOR_MS, optTimeout ?? 0);
+}
+
+// Turn Puppeteer's opaque "Navigation timeout of Nms exceeded" into an
+// actionable message: the usual cause is a blocking CDN <script> that render
+// tolerates but validate's tighter budget does not. Returns a replacement Error
+// for a navigation timeout, or null for any other error (caller rethrows as-is).
+export function navigationTimeoutHint(err: unknown, navTimeoutMs: number): Error | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!/navigation timeout/i.test(msg)) return null;
+  return new Error(
+    `Page navigation timed out after ${navTimeoutMs}ms. A blocking external <script> ` +
+      `(e.g. GSAP loaded from a CDN) can delay page load past this budget even when the ` +
+      `full render succeeds. Vendor the script locally (recommended for deterministic ` +
+      `renders), or re-run with a longer --timeout.`,
+  );
+}
 
 export function shouldIgnoreRequestFailure(
   url: string,
@@ -55,7 +86,24 @@ async function getCompositionDuration(page: import("puppeteer-core").Page): Prom
 }
 
 async function seekTo(page: import("puppeteer-core").Page, time: number): Promise<void> {
+  await waitForPreferredSeekTarget(page);
   await page.evaluate((t: number) => {
+    // window.__player.renderSeek is exposed directly by the composition
+    // runtime (packages/core/src/runtime/init.ts) on every page load, and
+    // — unlike raw timeline.seek() — it also runs the runtime's own
+    // [data-start]/[data-duration] visibility sync, hiding clips outside
+    // their timeline window. window.__hf.seek only exists when the
+    // producer's render-pipeline bridge script has been injected, which
+    // validate's static preview server never does, so it was always
+    // falling through to the raw __timelines seek below and skipping that
+    // sync — leaving off-window elements looking fully visible to any
+    // check (e.g. the contrast audit) that reads computed style afterward.
+    const player = (window as unknown as { __player?: { renderSeek?: (t: number) => void } })
+      .__player;
+    if (player && typeof player.renderSeek === "function") {
+      player.renderSeek(t);
+      return;
+    }
     if (window.__hf && typeof window.__hf.seek === "function") {
       window.__hf.seek(t);
       return;
@@ -72,6 +120,63 @@ async function seekTo(page: import("puppeteer-core").Page, time: number): Promis
   await new Promise((r) => setTimeout(r, SEEK_SETTLE_MS));
 }
 
+interface WaitForFunctionPage {
+  waitForFunction: (pageFunction: () => boolean, options: { timeout: number }) => Promise<unknown>;
+}
+
+export async function waitForPreferredSeekTarget(
+  page: WaitForFunctionPage,
+  timeoutMs = PREFERRED_SEEK_TARGET_WAIT_MS,
+): Promise<void> {
+  try {
+    await page.waitForFunction(
+      () => {
+        const w = window as unknown as {
+          __hf?: { seek?: unknown };
+          __player?: { renderSeek?: unknown };
+        };
+        return typeof w.__player?.renderSeek === "function" || typeof w.__hf?.seek === "function";
+      },
+      { timeout: timeoutMs },
+    );
+  } catch {
+    // Older/static pages may only expose raw window.__timelines. Keep the
+    // legacy fallback path rather than turning a missing player API into a
+    // validate failure.
+  }
+}
+
+/**
+ * Race a media element's `loadedmetadata`/`error` event against a deadline,
+ * whichever comes first. Already-ready elements resolve immediately.
+ *
+ * This is the same wiring as the inline copy inside `auditClipDurations`'s
+ * `page.evaluate()` below — duplicated, not imported, because Puppeteer
+ * serializes that closure's source and re-runs it in an isolated browser
+ * realm with no access to this module's scope. Kept here (duck-typed on
+ * `EventTarget`-shaped objects, not `HTMLMediaElement`) so the actual
+ * race/cleanup logic has a real, deterministic unit test — Node's built-in
+ * `EventTarget` satisfies the same shape without a browser or DOM library.
+ * If you change one copy, change both.
+ */
+export function raceMediaReady(
+  el: EventTarget & { duration: number },
+  deadlineMs: number,
+): Promise<void> {
+  if (Number.isFinite(el.duration) && el.duration > 0) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const onReady = () => {
+      el.removeEventListener("loadedmetadata", onReady);
+      el.removeEventListener("error", onReady);
+      clearTimeout(timer);
+      resolve();
+    };
+    el.addEventListener("loadedmetadata", onReady, { once: true });
+    el.addEventListener("error", onReady, { once: true });
+    const timer = setTimeout(onReady, Math.max(0, deadlineMs - Date.now()));
+  });
+}
+
 /**
  * Flag `<video>`/`<audio>` clips whose source is meaningfully shorter than their
  * `data-duration` slot (the slot gets silently shortened in renders). Runs in
@@ -81,8 +186,46 @@ async function seekTo(page: import("puppeteer-core").Page, time: number): Promis
 async function auditClipDurations(
   page: import("puppeteer-core").Page,
   analyzeClipMediaFit: typeof import("@hyperframes/engine").analyzeClipMediaFit,
+  extraWaitMs: number,
 ): Promise<ConsoleEntry[]> {
-  const clips = await page.evaluate(() => {
+  // fallow-ignore-next-line complexity
+  const clips = await page.evaluate(async (maxWaitMs: number) => {
+    const nodes = Array.from(
+      document.querySelectorAll("video[data-duration], audio[data-duration]"),
+    ) as HTMLMediaElement[];
+
+    // The caller's page-settle sleep is a flat, unconditional wait shared with
+    // other audits — it isn't aware of how long any given media element takes
+    // to load metadata. A slow-loading audio file (large narration WAV, remote
+    // source) can still be mid-fetch when that sleep elapses, which read as
+    // el.duration === NaN and was misreported as "could not read the duration"
+    // even though the render pipeline (which properly awaits media readiness)
+    // handles the same file fine. Give still-loading elements one more real
+    // chance via loadedmetadata before giving up, instead of a single fixed-time
+    // snapshot. Elements that already have a duration resolve immediately, so
+    // this adds no latency in the common case.
+    const deadline = Date.now() + maxWaitMs;
+    await Promise.all(
+      nodes.map((el) => {
+        if (Number.isFinite(el.duration) && el.duration > 0) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          // fallow-ignore-next-line code-duplication
+          const cleanup = () => {
+            el.removeEventListener("loadedmetadata", onReady);
+            el.removeEventListener("error", onReady);
+            clearTimeout(timer);
+          };
+          const onReady = () => {
+            cleanup();
+            resolve();
+          };
+          el.addEventListener("loadedmetadata", onReady, { once: true });
+          el.addEventListener("error", onReady, { once: true });
+          const timer = setTimeout(onReady, Math.max(0, deadline - Date.now()));
+        });
+      }),
+    );
+
     const rows: Array<{
       id: string;
       kind: string;
@@ -91,10 +234,9 @@ async function auditClipDurations(
       duration: number;
       loop: boolean;
     }> = [];
-    document.querySelectorAll("video[data-duration], audio[data-duration]").forEach((node) => {
-      const el = node as HTMLMediaElement;
+    for (const el of nodes) {
       const slot = parseFloat(el.getAttribute("data-duration") ?? "");
-      if (!(slot > 0)) return;
+      if (!(slot > 0)) continue;
       rows.push({
         id: el.id || el.getAttribute("src") || `(${el.tagName.toLowerCase()})`,
         kind: el.tagName === "AUDIO" ? "Audio" : "Video",
@@ -103,9 +245,9 @@ async function auditClipDurations(
         duration: el.duration,
         loop: el.loop || el.getAttribute("data-loop") === "true",
       });
-    });
+    }
     return rows;
-  });
+  }, extraWaitMs);
 
   const warnings: ConsoleEntry[] = [];
   const unreadable: string[] = [];
@@ -178,22 +320,90 @@ function loadContrastAuditScript(): string {
   throw new Error("Missing contrast audit browser script");
 }
 
+/**
+ * Pull the `missing_or_empty_sub_composition` lint findings out of a
+ * `lintProject` result and shape them as `ConsoleEntry`s. Extracted as a
+ * pure function so it's testable without a headless browser or a real
+ * project directory — see validate.test.ts.
+ */
+export function extractCompositionErrorsFromLint(
+  lintResult: Pick<ProjectLintResult, "results">,
+): ConsoleEntry[] {
+  return lintResult.results
+    .flatMap((r) => r.result.findings)
+    .filter((f) => f.code === "missing_or_empty_sub_composition" && f.severity === "error")
+    .map((f) => ({ level: "error" as const, text: f.message }));
+}
+
+// Match the render pipeline: localize remote <img>/<video>/<audio>/@font-face
+// into a temp dir (served as an extra asset root) so validate resolves them
+// same-origin and doesn't false-fail on cross-origin (crossorigin/CORS) fetches
+// the real render never makes. Best-effort: no-op on any failure.
+async function localizeRemoteAssets(
+  html: string,
+): Promise<{ html: string; assetRoots: string[]; cleanup: () => void }> {
+  let dir: string | undefined;
+  try {
+    const { loadProducer } = await import("../utils/producer.js");
+    const { localizeRemoteMediaSources, localizeRemoteImageSources, localizeRemoteFontFaces } =
+      await loadProducer();
+    dir = mkdtempSync(join(tmpdir(), "hf-validate-assets-"));
+    const assetDir = dir;
+    const media = await localizeRemoteMediaSources(html, assetDir);
+    const images = await localizeRemoteImageSources(media.html, assetDir);
+    const fonts = await localizeRemoteFontFaces(images.html, assetDir);
+    const count =
+      media.remoteMediaAssets.size + images.remoteMediaAssets.size + fonts.remoteMediaAssets.size;
+    return {
+      html: fonts.html,
+      assetRoots: count > 0 ? [assetDir] : [],
+      cleanup: () => rmSync(assetDir, { recursive: true, force: true }),
+    };
+  } catch {
+    // Best-effort: drop any partial temp dir before falling back to remote URLs.
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    return { html, assetRoots: [], cleanup: () => {} };
+  }
+}
+
 async function validateInBrowser(
-  projectDir: string,
+  project: ProjectDir,
   opts: { timeout?: number; contrast?: boolean },
 ): Promise<{ errors: ConsoleEntry[]; warnings: ConsoleEntry[]; contrast?: ContrastEntry[] }> {
+  const projectDir = project.dir;
   const { bundleToSingleHtml } = await import("@hyperframes/core/compiler");
   const { ensureBrowser } = await import("../browser/manager.js");
   const { serveStaticProjectHtml } = await import("../utils/staticProjectServer.js");
+  const { lintProject } = await import("../utils/lintProject.js");
+
+  // Fail fast on missing/empty/unparsable data-composition-src references
+  // before spending time bundling and launching a browser. The bundler
+  // (bundleToSingleHtml → inlineSubCompositions) is intentionally tolerant of
+  // these — it skips the broken scene and keeps going, silently, with only a
+  // console.warn — so validate would otherwise report "No console errors"
+  // for a project that renders a materially broken video. Surface it as a
+  // real validate failure instead.
+  const lintResult = await lintProject(projectDir);
+  const compositionErrors = extractCompositionErrorsFromLint(lintResult);
 
   // `bundleToSingleHtml` now inlines the runtime IIFE by default, so the
   // previous post-bundle regex substitution (which matched `src="..."` on the
   // runtime tag) is no longer needed — there's no `src` attribute to match.
   const html = await bundleToSingleHtml(projectDir);
 
-  const server = await serveStaticProjectHtml(projectDir, html);
+  const localized = await localizeRemoteAssets(html);
+  const server = await serveStaticProjectHtml(
+    projectDir,
+    localized.html,
+    undefined,
+    localized.assetRoots,
+  ).catch((err) => {
+    // Server never started — the finally below won't run, so clean up here.
+    localized.cleanup();
+    throw err;
+  });
 
-  const errors: ConsoleEntry[] = [];
+  const errors: ConsoleEntry[] = [...compositionErrors];
   const warnings: ConsoleEntry[] = [];
   let contrast: ContrastEntry[] | undefined;
   const viewport = resolveCompositionViewportFromHtml(html);
@@ -226,7 +436,7 @@ async function validateInBrowser(
     });
 
     page.on("pageerror", (err) => {
-      const text = err instanceof Error ? err.message : String(err);
+      const text = normalizeErrorMessage(err);
       // CDN scripts (e.g. GSAP from jsdelivr) returning HTML error pages
       // instead of JS produce "Unexpected token '<'" SyntaxErrors. These
       // are network failures, not composition authoring errors.
@@ -256,10 +466,17 @@ async function validateInBrowser(
       }
     });
 
-    await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 10000 });
+    const navTimeoutMs = resolveNavigationTimeoutMs(opts.timeout);
+    try {
+      await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
+    } catch (err) {
+      const hinted = navigationTimeoutHint(err, navTimeoutMs);
+      if (hinted) throw hinted;
+      throw err;
+    }
     await new Promise((r) => setTimeout(r, opts.timeout ?? 3000));
 
-    for (const w of await auditClipDurations(page, analyzeClipMediaFit)) {
+    for (const w of await auditClipDurations(page, analyzeClipMediaFit, opts.timeout ?? 3000)) {
       warnings.push(w);
     }
 
@@ -270,6 +487,7 @@ async function validateInBrowser(
     await chromeBrowser.close();
   } finally {
     await server.close();
+    localized.cleanup();
   }
 
   return { errors, warnings, contrast };
@@ -375,7 +593,9 @@ Examples:
     },
     timeout: {
       type: "string",
-      description: "Ms to wait for scripts to settle (default: 3000)",
+      description:
+        "Ms to wait for scripts to settle and media to load (default: 3000). Also raises the " +
+        "page-navigation budget above its 10s floor when a slow external <script> needs longer.",
       default: "3000",
     },
   },
@@ -390,11 +610,11 @@ Examples:
     }
 
     try {
-      const result = await validateInBrowser(project.dir, { timeout, contrast: useContrast });
+      const result = await validateInBrowser(project, { timeout, contrast: useContrast });
       const exitCode = printValidationResult(result, asJson);
       process.exit(exitCode);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = normalizeErrorMessage(err);
       emitFailureReport(message, asJson);
       process.exit(1);
     }

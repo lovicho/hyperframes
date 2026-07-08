@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Eye, Layers, Move } from "../../icons/SystemIcons";
+import { Move } from "../../icons/SystemIcons";
+import { Eye, EyeSlash } from "@phosphor-icons/react";
 import { InspectorHeaderActions } from "./InspectorHeaderActions";
 import { useStudioShellContext } from "../../contexts/StudioContext";
 import { readStudioBoxSize, readStudioPathOffset, readStudioRotation } from "./manualEdits";
@@ -10,31 +11,29 @@ import {
   RESPONSIVE_GRID,
   readGsapRuntimeValuesForPanel,
   readGsapBorderRadiusForPanel,
+  isSelectedElementHidden,
 } from "./propertyPanelHelpers";
 import { MetricField, Section } from "./propertyPanelPrimitives";
 import { createTransformCommitHandlers } from "./propertyPanelTransformCommit";
 import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
-import { isMediaElement, MediaSection } from "./propertyPanelMediaSection";
-import {
-  ColorGradingSection,
-  isColorGradingCapableElement,
-} from "./propertyPanelColorGradingSection";
+import { resolveEditingSections } from "@hyperframes/core/editing";
+import { MediaSection } from "./propertyPanelMediaSection";
+import { ColorGradingSection } from "./propertyPanelColorGradingSection";
+import { domEditSelectionToFacts } from "./domEditingLayers";
 import { TextSection, StyleSections } from "./propertyPanelSections";
 import { GsapAnimationSection } from "./GsapAnimationSection";
 import { PropertyPanel3dTransform } from "./propertyPanel3dTransform";
 import { KeyframeNavigation } from "./KeyframeNavigation";
-import {
-  STUDIO_COLOR_GRADING_ENABLED,
-  STUDIO_GSAP_PANEL_ENABLED,
-  STUDIO_KEYFRAMES_ENABLED,
-} from "./manualEditingAvailability";
+import { STUDIO_GSAP_PANEL_ENABLED, STUDIO_KEYFRAMES_ENABLED } from "./manualEditingAvailability";
 import { usePlayerStore, liveTime } from "../../player";
 import { TimingSection } from "./propertyPanelTimingSection";
 import { type PropertyPanelProps } from "./propertyPanelHelpers";
 import { GestureRecordPanelButton } from "./GestureRecordControl";
+import { PropertyPanelEmptyState } from "./PropertyPanelEmptyState";
 
 // Re-export helpers that external consumers import from this module
 export {
+  buildInsetClipPathSides,
   buildStrokeStyleUpdates,
   buildStrokeWidthStyleUpdates,
   getCssFilterFunctionPx,
@@ -42,6 +41,7 @@ export {
   inferBoxShadowPreset,
   inferClipPathPreset,
   normalizePanelPxValue,
+  parseInsetClipPathSides,
   setCssFilterFunctionPx,
 } from "./propertyPanelHelpers";
 
@@ -58,7 +58,9 @@ export const PropertyPanel = memo(function PropertyPanel({
   onSetStyle,
   onSetAttribute,
   onSetAttributeLive,
+  onApplyColorGradingScope,
   onSetHtmlAttribute,
+  onRemoveBackground,
   onSetManualOffset,
   onSetManualSize,
   onSetManualRotation,
@@ -67,6 +69,7 @@ export const PropertyPanel = memo(function PropertyPanel({
   onAddTextField,
   onRemoveTextField,
   onAskAgent: _onAskAgent,
+  onToggleElementHidden,
   onImportAssets,
   fontAssets = [],
   onImportFonts,
@@ -97,6 +100,8 @@ export const PropertyPanel = memo(function PropertyPanel({
   recordingState,
   recordingDuration,
   onToggleRecording,
+  cropMode,
+  onCropModeChange,
 }: PropertyPanelProps) {
   const styles = element?.computedStyles ?? EMPTY_STYLES;
   const { showToast } = useStudioShellContext();
@@ -104,6 +109,10 @@ export const PropertyPanel = memo(function PropertyPanel({
   const clipboardTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const storeTime = usePlayerStore((s) => s.currentTime);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const timelineElements = usePlayerStore((s) => s.elements);
+  const selectedElementId = usePlayerStore((s) => s.selectedElementId);
+  const selectedElementHidden = isSelectedElementHidden(timelineElements, selectedElementId);
+  const visibilityToggleLabel = selectedElementHidden ? "Show element" : "Hide element";
   const liveTimeRef = useRef(storeTime);
   const [, forceRender] = useState(0);
   useEffect(() => {
@@ -163,35 +172,7 @@ export const PropertyPanel = memo(function PropertyPanel({
   };
 
   if (!element) {
-    return (
-      <div className="flex h-full flex-col bg-neutral-900">
-        <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-          {multiSelectCount > 1 ? (
-            <>
-              <Layers size={18} className="mb-3 text-neutral-600" />
-              <p className="text-sm font-medium text-neutral-200">
-                {multiSelectCount} elements selected
-              </p>
-              <p className="mt-2 max-w-[260px] text-xs leading-5 text-neutral-500">
-                Select a single element to edit its properties. Click an element in the preview or
-                use the timeline layer panel.
-              </p>
-            </>
-          ) : (
-            <>
-              <Eye size={18} className="mb-3 text-neutral-600" />
-              <p className="text-sm font-medium text-neutral-200">
-                Select an element in the preview.
-              </p>
-              <p className="mt-2 max-w-[260px] text-xs leading-5 text-neutral-500">
-                The inspector is tuned for element edits with safer geometry controls, color
-                picking, and cleaner grouped layer controls.
-              </p>
-            </>
-          )}
-        </div>
-      </div>
-    );
+    return <PropertyPanelEmptyState multiSelectCount={multiSelectCount} />;
   }
 
   const manualOffsetEditingDisabled = !element.capabilities.canApplyManualOffset;
@@ -199,6 +180,10 @@ export const PropertyPanel = memo(function PropertyPanel({
   const manualRotationEditingDisabled = !element.capabilities.canApplyManualRotation;
   const sourceLabel = element.id ? `#${element.id}` : element.selector;
   const showEditableSections = element.capabilities.canEditStyles;
+  // Capabilities are already resolved on the selection; recompute only sections,
+  // feeding the live GSAP tween count (arrives on the gsapAnimations prop, not the
+  // selection) so the Timing section shows for pure-GSAP elements with no data-start.
+  const sections = resolveEditingSections(domEditSelectionToFacts(element, gsapAnimations.length));
   const manualOffset = readStudioPathOffset(element.element);
   const manualSize = readStudioBoxSize(element.element);
   const resolvedWidth =
@@ -310,13 +295,32 @@ export const PropertyPanel = memo(function PropertyPanel({
             </div>
             <div className="mt-0.5 truncate text-[11px] text-neutral-500">{sourceLabel}</div>
           </div>
-          <InspectorHeaderActions
-            element={element}
-            copied={clipboardCopied}
-            onCopy={handleCopyElementInfo}
-            onClear={onClearSelection}
-            onUngroup={onUngroup}
-          />
+          <div className="flex items-center gap-1">
+            {selectedElementId && onToggleElementHidden && (
+              <button
+                type="button"
+                aria-label={visibilityToggleLabel}
+                title={visibilityToggleLabel}
+                onClick={() => {
+                  void onToggleElementHidden(selectedElementId, !selectedElementHidden);
+                }}
+                className="flex h-6 w-6 items-center justify-center rounded text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-300"
+              >
+                {selectedElementHidden ? (
+                  <EyeSlash size={13} weight="bold" aria-hidden="true" />
+                ) : (
+                  <Eye size={13} weight="bold" aria-hidden="true" />
+                )}
+              </button>
+            )}
+            <InspectorHeaderActions
+              element={element}
+              copied={clipboardCopied}
+              onCopy={handleCopyElementInfo}
+              onClear={onClearSelection}
+              onUngroup={onUngroup}
+            />
+          </div>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto">
@@ -339,7 +343,7 @@ export const PropertyPanel = memo(function PropertyPanel({
           onRemoveTextField={onRemoveTextField}
         />
 
-        {(element.dataAttributes.start != null || gsapAnimations.length > 0) && (
+        {sections.timing && (
           // Render whenever there's an authored clip range OR animations to infer
           // one from — a pure-GSAP element with no data-start still gets a Timing
           // range (TimingSection derives it from its tweens).
@@ -349,18 +353,7 @@ export const PropertyPanel = memo(function PropertyPanel({
             onSetAttribute={onSetAttribute}
           />
         )}
-        {isMediaElement(element) && (
-          <MediaSection
-            projectDir={projectDir}
-            element={element}
-            styles={styles}
-            onSetStyle={onSetStyle}
-            onSetAttribute={onSetAttribute}
-            onSetHtmlAttribute={onSetHtmlAttribute}
-          />
-        )}
-
-        {STUDIO_COLOR_GRADING_ENABLED && isColorGradingCapableElement(element) && (
+        {sections.colorGrading && (
           <ColorGradingSection
             key={[
               element.id ?? "",
@@ -368,11 +361,25 @@ export const PropertyPanel = memo(function PropertyPanel({
               element.selector ?? "",
               String(element.selectorIndex ?? ""),
             ].join("|")}
+            projectId={projectId}
             element={element}
             assets={assets}
             previewIframeRef={previewIframeRef}
             onImportAssets={onImportAssets}
             onSetAttributeLive={onSetAttributeLive}
+            onApplyScope={onApplyColorGradingScope}
+          />
+        )}
+
+        {sections.media && (
+          <MediaSection
+            projectDir={projectDir}
+            element={element}
+            styles={styles}
+            onSetStyle={onSetStyle}
+            onSetAttribute={onSetAttribute}
+            onSetHtmlAttribute={onSetHtmlAttribute}
+            onRemoveBackground={onRemoveBackground}
           />
         )}
 
@@ -577,6 +584,8 @@ export const PropertyPanel = memo(function PropertyPanel({
             onSetStyle={onSetStyle}
             onImportAssets={onImportAssets}
             gsapBorderRadius={gsapBorderRadius}
+            cropMode={cropMode}
+            onCropModeChange={onCropModeChange}
           />
         )}
       </div>

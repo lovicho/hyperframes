@@ -19,12 +19,17 @@ import type { Composition, JsonPatchOp } from "@hyperframes/sdk";
 import type { PatchOperation } from "./sourcePatcher";
 import { STUDIO_SDK_RESOLVER_SHADOW_ENABLED } from "../components/editor/manualEditingAvailability";
 import { patchOpsToSdkEditOps } from "./sdkOpMapping";
-import { trackStudioEvent } from "./studioTelemetry";
+import { trackStudioEvent, flushViaBeacon } from "./studioTelemetry";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface SdkResolverMismatch {
-  kind: "element_not_found" | "value_mismatch" | "dispatch_error" | "animation_not_found";
+  kind:
+    | "element_not_found"
+    | "value_mismatch"
+    | "dispatch_error"
+    | "animation_not_found"
+    | "session_empty";
   hfId?: string;
   animationId?: string;
   property?: string;
@@ -82,6 +87,14 @@ type AttrMap = Record<string, string | null>;
  * Mirror resolveScoped here: exact scoped-path match, then canonical bare
  * match, then first bare match — the resolvability dispatch actually has.
  */
+// Count static `data-hf-id="<id>"` occurrences (both quote styles) in source.
+// Substring split, not regex — no escaping, and the id never contains a quote.
+function countHfIdInSource(source: string, id: string): number {
+  return (
+    source.split(`data-hf-id="${id}"`).length - 1 + (source.split(`data-hf-id='${id}'`).length - 1)
+  );
+}
+
 function resolveSnapshot(session: Composition, id: string): FlatEl | null {
   const els = session.getElements();
   const exact = els.find((el) => el.scopedId === id);
@@ -164,8 +177,20 @@ export function sdkResolverShadowCheck(
   session: Composition,
   hfId: string,
   ops: PatchOperation[],
+  sourceContent?: string,
 ): SdkResolverMismatch[] {
   if (!resolveSnapshot(session, hfId)) {
+    // Runtime-node filter: an hf-id absent from the on-disk source the SDK
+    // parsed was never in the static DOM — it belongs to an element a
+    // composition <script> creates at runtime (e.g. caption word/group spans),
+    // which the SDK session cannot model by design. That is NOT a resolver bug,
+    // so suppress it. An hf-id PRESENT in source but missing from the session IS
+    // a genuine resolver divergence (the v0.6.110 class) — keep emitting that.
+    // ponytail: substring match; biases toward keeping signal on a loose hit.
+    if (sourceContent !== undefined && !sourceContent.includes(hfId)) return [];
+    // Loose match here vs. countHfIdInSource's strict data-hf-id="..." match in the
+    // caller (runResolverShadow) means an emitted event can carry sourceHfIdCount: 0 —
+    // see the comment on that field in runResolverShadow for what 0 means in that case.
     return [{ kind: "element_not_found", hfId }];
   }
 
@@ -209,6 +234,96 @@ export function sdkResolverShadowCheck(
   }
 }
 
+// ─── Attempt counter (denominator for the soak gate) ──────────────────────────
+//
+// The three emit functions below only fire a PostHog event on divergence —
+// parity is silent, by design, to avoid firing on every edit. That leaves no
+// way to compute a rate (divergences / attempts): we can count failures but
+// never attempts. This counter tracks attempts in memory and rolls them up
+// into ONE low-frequency event instead of firing per-attempt, which would
+// recreate the exact chattiness problem the divergence-only design avoids.
+
+const attemptCounts: Record<string, number> = {};
+
+/**
+ * Record that the resolver-shadow tripwire ran for `opLabel`, regardless of
+ * outcome (parity or divergence). No flag check of its own — only ever called
+ * from inside the three emit functions below, after their own
+ * STUDIO_SDK_RESOLVER_SHADOW_ENABLED guard, so it's already flag-gated.
+ */
+export function recordAttempt(opLabel: string): void {
+  attemptCounts[opLabel] = (attemptCounts[opLabel] ?? 0) + 1;
+  ensureAttemptFlushScheduled();
+}
+
+/**
+ * Return the accumulated attempt counts since the last flush (or `null` if
+ * nothing has been recorded — no point emitting an empty rollup), and reset
+ * the counter to empty.
+ */
+export function flushAttemptCounts(): Record<string, number> | null {
+  const keys = Object.keys(attemptCounts);
+  if (keys.length === 0) return null;
+  const snapshot: Record<string, number> = {};
+  for (const key of keys) {
+    snapshot[key] = attemptCounts[key];
+    delete attemptCounts[key];
+  }
+  return snapshot;
+}
+
+const ATTEMPT_FLUSH_INTERVAL_MS = 5 * 60_000;
+let attemptFlushTimer: ReturnType<typeof setInterval> | null = null;
+let attemptVisibilityHandler: (() => void) | null = null;
+
+function flushAndEmitAttempts(): void {
+  const counts = flushAttemptCounts();
+  if (counts === null) return;
+  trackStudioEvent("sdk_resolver_shadow_attempt", { counts: JSON.stringify(counts) });
+}
+
+// Lazily starts the rollup timer + visibilitychange listener on the FIRST
+// attempt in a session — mirrors studioTelemetry.ts's own lazy flushTimer
+// start, so a session that never exercises the tripwire never runs a
+// background timer.
+function ensureAttemptFlushScheduled(): void {
+  if (!attemptFlushTimer) {
+    attemptFlushTimer = setInterval(flushAndEmitAttempts, ATTEMPT_FLUSH_INTERVAL_MS);
+  }
+  if (!attemptVisibilityHandler && typeof document !== "undefined") {
+    attemptVisibilityHandler = () => {
+      if (document.visibilityState !== "hidden") return;
+      flushAndEmitAttempts();
+      // studioTelemetry.ts registers its own visibilitychange listener (on
+      // window, at module load) that drains its queue via sendBeacon. Listener
+      // execution order between that handler and this one (on document,
+      // registered lazily) is not something to rely on — whichever runs
+      // first could otherwise beacon-flush before or after this rollup lands
+      // in the queue. Forcing a beacon flush here makes delivery of this
+      // rollup event correct regardless of that order.
+      flushViaBeacon();
+    };
+    document.addEventListener("visibilitychange", attemptVisibilityHandler);
+  }
+}
+
+/**
+ * Test-only: clears the lazy timer/listener singleton state so tests can
+ * verify the "starts on first attempt" behavior in isolation, without an
+ * earlier test's real-timer interval (or visibilitychange listener) silently
+ * surviving into a later test. Does NOT touch attemptCounts — only the
+ * scheduling state. Not part of the public module contract; only imported
+ * from sdkResolverShadow.test.ts.
+ */
+export function __resetAttemptSchedulingForTests(): void {
+  if (attemptFlushTimer) clearInterval(attemptFlushTimer);
+  attemptFlushTimer = null;
+  if (attemptVisibilityHandler && typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", attemptVisibilityHandler);
+  }
+  attemptVisibilityHandler = null;
+}
+
 // ─── Telemetry ────────────────────────────────────────────────────────────────
 
 // Redact all user-content values before telemetry: style values and text both
@@ -237,21 +352,70 @@ function redactMismatches(mismatches: SdkResolverMismatch[]): SdkResolverMismatc
  * (see below). The session is shared with the cutover path, so it MUST end the
  * call exactly as it started.
  */
+// Sessions whose empty-session modeling gap has already been reported — one
+// event per session instance, not one per edit (the per-edit storm is noise;
+// the EXISTENCE of the gap is the signal).
+const emptySessionReported = new WeakSet<Composition>();
+
+/**
+ * An empty session structurally cannot resolve ANY id — a modeling gap (empty
+ * file, comp shape the SDK can't parse into elements), not a resolver
+ * divergence, and it can't cut over either, so it stays out of the attempt
+ * denominator. But silence would blind the tripwire to exactly the class that
+ * exposed the template-comp bug — so emit ONE distinguishable `session_empty`
+ * event per session, then skip. Returns true when the caller should skip.
+ */
+function reportEmptySession(session: Composition, opLabel: string): boolean {
+  if (session.getElements().length !== 0) return false;
+  if (!emptySessionReported.has(session)) {
+    emptySessionReported.add(session);
+    trackStudioEvent("sdk_resolver_shadow", {
+      opLabel,
+      sessionEmpty: true,
+      sessionElementCount: 0,
+      mismatchCount: 1,
+      mismatches: JSON.stringify([{ kind: "session_empty" } satisfies SdkResolverMismatch]),
+    });
+  }
+  return true;
+}
+
 export function runResolverShadow(
   session: Composition,
   hfId: string | null | undefined,
   ops: PatchOperation[],
+  sourceContent?: string,
 ): void {
   if (!STUDIO_SDK_RESOLVER_SHADOW_ENABLED) return;
   if (!hfId) return;
   try {
-    const mismatches = sdkResolverShadowCheck(session, hfId, ops);
+    if (reportEmptySession(session, "dom-edit")) return;
+    recordAttempt("dom-edit");
+    const mismatches = sdkResolverShadowCheck(session, hfId, ops, sourceContent);
     // Emit only on divergence — parity is silent, matching recordResolverParity
     // and recordAnimationResolverParity. Otherwise this fires a PostHog event on
     // every style/text/attr edit (the editor's chattiest path) at default-ON.
     if (mismatches.length === 0) return;
+    const isElementNotFound = mismatches.some((m) => m.kind === "element_not_found");
+    const strictCount =
+      isElementNotFound && sourceContent !== undefined
+        ? countHfIdInSource(sourceContent, hfId)
+        : undefined;
     trackStudioEvent("sdk_resolver_shadow", {
       hfId,
+      // sessionElementCount > 0 + element_not_found = runtime-only element;
+      // sessionElementCount === 0 = session is empty/broken (actionable).
+      sessionElementCount: session.getElements().length,
+      // Count of data-hf-id="<id>" occurrences in source for an emitted
+      // element_not_found. >1 = duplicate ids → resolver picked the wrong
+      // instance; =1 = single static node the SDK parse dropped (foreign-content
+      // exclusion / sub-comp inlining gap); =0 = the runtime-node filter above
+      // uses a loose substring match (biased toward keeping signal) while this
+      // count uses a strict attribute match — see sourceLooseMatchOnly below.
+      ...(strictCount !== undefined ? { sourceHfIdCount: strictCount } : {}),
+      // Loose suppression check matched (kept this event) but the strict
+      // attribute count came back 0 — see the sourceHfIdCount comment above.
+      ...(strictCount === 0 ? { sourceLooseMatchOnly: true } : {}),
       mismatchCount: mismatches.length,
       mismatches: JSON.stringify(redactMismatches(mismatches)),
     });
@@ -270,18 +434,56 @@ export function runResolverShadow(
  *
  * No-op when the shadow flag is off; never throws; never mutates the session.
  */
-export function recordResolverParity(
+export async function recordResolverParity(
   session: Composition | null | undefined,
   hfId: string | null | undefined,
   opLabel: string,
-): void {
+  readSource?: () => Promise<string | undefined>,
+): Promise<void> {
   if (!STUDIO_SDK_RESOLVER_SHADOW_ENABLED) return;
   if (!session || !hfId) return;
   try {
+    if (reportEmptySession(session, opLabel)) return;
+    recordAttempt(opLabel);
     if (resolveSnapshot(session, hfId)) return; // resolves — parity, nothing to record
+    // Capture BEFORE any await: this call is fire-and-forget (`void recordResolverParity(...)`)
+    // and the caller runs its own session mutation synchronously right after this call
+    // returns. getElements() caches and that cache is invalidated on dispatch, so reading
+    // the count after an await would silently reflect POST-edit state, not the pre-edit
+    // state this field exists to diagnose.
+    const sessionElementCount = session.getElements().length;
+    // Cheap check passed above, so the source read only runs on a real divergence.
+    let source: string | undefined;
+    let sourceReadFailed = false;
+    if (readSource) {
+      try {
+        source = await readSource();
+      } catch {
+        source = undefined; // fail-open: a read error must not drop a real divergence
+        sourceReadFailed = true;
+      }
+    }
+    // Runtime-generated node the static parse can't model — suppress (mirrors the dom-edit path).
+    if (source !== undefined && !source.includes(hfId)) return;
+    const strictCount = source !== undefined ? countHfIdInSource(source, hfId) : undefined;
     trackStudioEvent("sdk_resolver_shadow", {
       hfId,
       opLabel,
+      sessionElementCount,
+      // sourceHfIdCount: strict data-hf-id="..." attribute count. Can be 0 even
+      // on an emitted (non-suppressed) event — the suppression check above is a
+      // loose substring match (biased toward keeping signal); see the longer
+      // comment on this field in runResolverShadow for the full explanation.
+      ...(strictCount !== undefined ? { sourceHfIdCount: strictCount } : {}),
+      // Loose suppression check matched (kept this event) but the strict
+      // attribute count came back 0 — hfId appeared as plain text (class name,
+      // comment, script string) but never as a data-hf-id="..." attribute.
+      // Lets telemetry consumers filter this cohort without parsing the
+      // sourceHfIdCount comment above.
+      ...(strictCount === 0 ? { sourceLooseMatchOnly: true } : {}),
+      // The reader was wired but threw — distinguishes "read failed, emitted
+      // fail-open without the suppression/count checks" from "no reader wired".
+      ...(sourceReadFailed ? { sourceReadFailed: true } : {}),
       mismatchCount: 1,
       mismatches: JSON.stringify([
         { kind: "element_not_found", hfId } satisfies SdkResolverMismatch,
@@ -297,8 +499,9 @@ export function recordResolverParity(
  * dispatching. Read-only: emits `animation_not_found` when the SDK can't resolve
  * the animationId the server GSAP path is addressing — the GSAP-edit-surface
  * analogue of element_not_found. The SDK's resolvable animation ids are the
- * located ids attached to elements (buildAnimationIdMap), so a target absent
- * from every element's animationIds is a resolver divergence.
+ * located ids attached to elements (buildAnimationIdMap) OR any id parsed from
+ * the script regardless of DOM match (getAllAnimationIds) — a target absent
+ * from both is a resolver divergence.
  *
  * No-op when the shadow flag is off; never throws; never mutates the session.
  */
@@ -310,11 +513,16 @@ export function recordAnimationResolverParity(
   if (!STUDIO_SDK_RESOLVER_SHADOW_ENABLED) return;
   if (!session || !animationId) return;
   try {
-    const resolves = session.getElements().some((el) => el.animationIds.includes(animationId));
+    recordAttempt(opLabel);
+    const elements = session.getElements();
+    const resolves =
+      elements.some((el) => el.animationIds.includes(animationId)) ||
+      session.getAllAnimationIds().has(animationId);
     if (resolves) return; // SDK locates the animation — parity
     trackStudioEvent("sdk_resolver_shadow", {
       animationId,
       opLabel,
+      sessionElementCount: elements.length,
       mismatchCount: 1,
       mismatches: JSON.stringify([
         { kind: "animation_not_found", animationId } satisfies SdkResolverMismatch,

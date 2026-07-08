@@ -49,6 +49,8 @@ export interface TimelineElement {
   timingSource?: "authored" | "implicit";
   /** Set by data-timeline-locked on the host element — disables move and trim in Studio. */
   timelineLocked?: boolean;
+  /** Set by data-hidden on the host element — hides the clip in preview and render. */
+  hidden?: boolean;
   /** Value of data-timeline-role attribute — used to identify music vs. voiceover. */
   timelineRole?: string;
   /**
@@ -104,6 +106,21 @@ interface PlayerState {
   setMotionPathArmed: (armed: boolean) => void;
   motionPathCreateAvailable: boolean;
   setMotionPathCreateAvailable: (available: boolean) => void;
+  /** Global toggle for the "Add keyframe" diamond in the timeline toolbar (#1808).
+   *  When false, a manual drag/resize/rotate edit on an element that already has
+   *  a live tween shifts every keyframe by the edit's delta (preserving the
+   *  animation's shape) instead of inserting/updating a keyframe at the playhead. */
+  autoKeyframeEnabled: boolean;
+  setAutoKeyframeEnabled: (enabled: boolean) => void;
+
+  /** Crop mode. Armed from the preview toolbar, the Clip panel, or a
+   *  double-click on a croppable selection; while armed, edge handles on the
+   *  selection adjust a non-destructive clip-path inset. `available` is
+   *  published by DomEditOverlay when the selection can be cropped. */
+  cropMode: boolean;
+  setCropMode: (active: boolean) => void;
+  cropAvailable: boolean;
+  setCropAvailable: (available: boolean) => void;
 
   /** Multi-select: additional selected elements beyond selectedElementId. */
   selectedElementIds: Set<string>;
@@ -126,7 +143,9 @@ interface PlayerState {
   setSelectedElementId: (id: string | null) => void;
   updateElement: (
     elementId: string,
-    updates: Partial<Pick<TimelineElement, "start" | "duration" | "track" | "playbackStart">>,
+    updates: Partial<
+      Pick<TimelineElement, "start" | "duration" | "track" | "playbackStart" | "hidden">
+    >,
   ) => void;
   setZoomMode: (mode: ZoomMode) => void;
   setManualZoomPercent: (percent: number) => void;
@@ -238,6 +257,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setMotionPathArmed: (armed) => set({ motionPathArmed: armed }),
   motionPathCreateAvailable: false,
   setMotionPathCreateAvailable: (available) => set({ motionPathCreateAvailable: available }),
+  autoKeyframeEnabled: true,
+  setAutoKeyframeEnabled: (enabled) => set({ autoKeyframeEnabled: enabled }),
+  cropMode: false,
+  setCropMode: (active) => set({ cropMode: active }),
+  cropAvailable: false,
+  setCropAvailable: (available) =>
+    set(available ? { cropAvailable: true } : { cropAvailable: false, cropMode: false }),
 
   selectedElementIds: new Set<string>(),
   toggleSelectedElementId: (id: string) =>

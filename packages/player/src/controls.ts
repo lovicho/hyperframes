@@ -10,6 +10,10 @@ export interface ControlsCallbacks {
   onPlay: () => void;
   onPause: () => void;
   onSeek: (fraction: number) => void;
+  /** Scrub drag started (mousedown/touchstart on the scrubber). */
+  onScrubStart?: () => void;
+  /** Scrub drag ended (mouseup/touchend). */
+  onScrubEnd?: () => void;
   onSpeedChange: (speed: number) => void;
   onMuteToggle: () => void;
   onVolumeChange: (volume: number) => void;
@@ -73,7 +77,10 @@ export function createControls(
   const playBtn = document.createElement("button");
   playBtn.className = "hfp-play-btn";
   playBtn.type = "button";
-  playBtn.innerHTML = PLAY_ICON;
+  // Both glyphs stay in the DOM, stacked; toggling `hfp-playing` crossfade-morphs
+  // between them (see styles.ts) instead of swapping innerHTML, which would kill
+  // the transition.
+  playBtn.innerHTML = `<span class="hfp-ico hfp-ico-play">${PLAY_ICON}</span><span class="hfp-ico hfp-ico-pause">${PAUSE_ICON}</span>`;
   playBtn.setAttribute("aria-label", "Play");
 
   const scrubber = document.createElement("div");
@@ -290,13 +297,17 @@ export function createControls(
   scrubber.addEventListener("mousedown", (e) => {
     e.stopPropagation();
     scrubbing = true;
+    callbacks.onScrubStart?.();
     handleScrubAt(e.clientX);
   });
   const onMouseMove = (e: MouseEvent) => {
     if (scrubbing) handleScrubAt(e.clientX);
   };
   const onMouseUp = () => {
-    scrubbing = false;
+    if (scrubbing) {
+      scrubbing = false;
+      callbacks.onScrubEnd?.();
+    }
   };
   document.addEventListener("mousemove", onMouseMove);
   document.addEventListener("mouseup", onMouseUp);
@@ -305,6 +316,7 @@ export function createControls(
     "touchstart",
     (e) => {
       scrubbing = true;
+      callbacks.onScrubStart?.();
       const touch = e.touches[0];
       if (touch) handleScrubAt(touch.clientX);
     },
@@ -317,7 +329,10 @@ export function createControls(
     }
   };
   const onTouchEnd = () => {
-    scrubbing = false;
+    if (scrubbing) {
+      scrubbing = false;
+      callbacks.onScrubEnd?.();
+    }
   };
   document.addEventListener("touchmove", onTouchMove, { passive: true });
   document.addEventListener("touchend", onTouchEnd);
@@ -350,7 +365,7 @@ export function createControls(
     },
     updatePlaying(playing: boolean) {
       isPlaying = playing;
-      playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
+      playBtn.classList.toggle("hfp-playing", playing);
       playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
       if (playing) startHideTimer();
       else controls.classList.remove("hfp-hidden");

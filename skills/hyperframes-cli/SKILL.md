@@ -1,6 +1,6 @@
 ---
 name: hyperframes-cli
-description: HyperFrames CLI dev loop. Use when running npx hyperframes init, add, catalog, capture, lint, validate, inspect, layout, snapshot, preview, play, render, publish, lambda, doctor, browser, info, upgrade, skills, compositions, docs, benchmark, telemetry, transcribe, tts, or remove-background, or when troubleshooting the HyperFrames build/render environment. Entry point for AWS Lambda cloud rendering (`hyperframes lambda deploy / render / progress / destroy / policies`).
+description: HyperFrames CLI dev loop. Use when running npx hyperframes init, add, catalog, capture, lint, validate, inspect, layout, snapshot, preview, play, render, publish, feedback, lambda, doctor, browser, info, upgrade, skills, compositions, docs, benchmark, telemetry, transcribe, tts, or remove-background, or when troubleshooting the HyperFrames build/render environment. Entry point for AWS Lambda cloud rendering (`hyperframes lambda deploy / render / progress / destroy / policies / sites`).
 ---
 
 # HyperFrames CLI
@@ -20,6 +20,7 @@ Everything runs through `npx hyperframes` unless project instructions specify a 
    - Deliver: `npx hyperframes render --quality high --output out.mp4`
    - CI / cross-host repro: `npx hyperframes render --docker --strict --output out.mp4`
    - Cloud (long / large): `npx hyperframes lambda render ./my-project --width 1920 --height 1080 --wait` (see Lambda below)
+8. **Report feedback** — after verifying the output, `npx hyperframes feedback --rating <1-5> --comment "..."` once per task (see Agent Conventions).
 
 Run lint, validate, and inspect before preview. `lint` catches missing `data-composition-id`, overlapping tracks, and unregistered timelines. `validate` loads the composition in headless Chrome and reports runtime console errors plus WCAG contrast issues. `inspect` seeks through the timeline and reports text spilling out of bubbles/containers or off the canvas — and, when a `*.motion.json` sidecar is present, verifies motion intent (entrances firing under seek, stagger order, in-frame, liveness) against that same seeked timeline.
 
@@ -38,6 +39,7 @@ Cross-cutting rules that hold for every command:
 - **Use Studio context for user-directed edits.** When the user says "this selected element", "the thing I clicked", "current selection", or similar, ask them to select it in Studio, then run `npx hyperframes preview --context --json --context-fields selection`. Use the returned `selection.target.hfId` / `selector`, `selection.sourceFile`, `selection.currentTime`, and `selection.thumbnailUrl` to anchor the edit. If `selection` is `null` and `errors.selection.code` is `no-selection`, ask the user to click the element and rerun; do not guess from screenshots.
 - **Keep Studio context compact.** `preview --context --json` returns compact selection by default. Add `--context-fields selection`, `--context-fields selection,lint`, or `--context-fields lint` to avoid bloating agent context. Use `--context-detail full` only when you need heavy fields like computed styles, inline styles, or text-field metadata.
 - **Post-render verification.** After `render` returns exit 0, confirm the output file exists and has plausible size before reporting success: `[ -s "$OUTPUT" ] || echo "render produced no output"`. The CLI prints `◇  <path>` on success; for long renders also sanity-check duration with `ffprobe -i "$OUTPUT" -show_format -v error`.
+- **Report feedback after a successful render.** Once the output is verified, run `npx hyperframes feedback --rating <1-5> --comment "..."` once per task to report how the run went — `5` clean, lower when you hit friction. Put any bug, workaround, missing feature, or confusing behaviour you encountered in `--comment` (include the failing composition pattern and what you tried). This is the project's primary signal channel; renders that go silent leave the maintainers blind. Skip only when telemetry is disabled or the user opted out.
 
 ## Routing
 
@@ -54,7 +56,7 @@ Cross-cutting rules that hold for every command:
 
 - **Tailwind projects** (`init --tailwind`) → use `hyperframes-core` (Tailwind reference) before editing classes or theme tokens.
 - **Registry blocks/components** (`hyperframes add`, `hyperframes catalog`) → use `hyperframes-registry` for install paths, sub-composition wiring, and snippet merging.
-- **Asset preprocessing** (`tts`, `transcribe`, `remove-background`) → use `hyperframes-media` for voice selection, Whisper model rules, captions, and TTS-to-captions chain.
+- **Asset preprocessing** (`tts`, `transcribe`, `remove-background`) → use `media-use` for voice selection, Whisper model rules, captions, and TTS-to-captions chain.
 - **Parametrized renders** (`--variables`) → declared via `data-composition-variables` on `<html>`; see `hyperframes-core` for the full schema.
 
 ## Lambda (Cloud Rendering)

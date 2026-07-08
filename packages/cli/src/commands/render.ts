@@ -10,6 +10,7 @@ import {
   parseGifLoopArg,
   resolveBrowserTimeoutMsArg,
   resolveCompositionEntryArg,
+  resolveDefaultFpsArg,
 } from "../utils/renderArgs.js";
 
 export const examples: Example[] = [
@@ -55,12 +56,13 @@ import { lintProject, shouldBlockRender } from "../utils/lintProject.js";
 import { formatLintFindings } from "../utils/lintFormat.js";
 import { loadProducer } from "../utils/producer.js";
 import { c } from "../ui/colors.js";
-import { formatBytes, formatDuration, errorBox } from "../ui/format.js";
+import { formatBytes, formatRenderSummaryDetail, errorBox } from "../ui/format.js";
 import { renderProgress } from "../ui/progress.js";
 import {
   trackRenderComplete,
   trackRenderError,
   trackRenderObservation,
+  trackRenderPreflightRejected,
 } from "../telemetry/events.js";
 import { maybePromptRenderFeedback } from "../telemetry/feedback.js";
 import { renderJobObservabilityTelemetryPayload } from "../telemetry/renderObservability.js";
@@ -71,6 +73,7 @@ import { isDevMode } from "../utils/env.js";
 import { buildDockerRunArgs, resolveDockerPlatform } from "../utils/dockerRunArgs.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runEnvironmentChecks } from "../browser/preflight.js";
+import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import type { ProducerLogger, RenderJob } from "@hyperframes/producer";
 import {
   MAX_VP9_CPU_USED,
@@ -80,10 +83,12 @@ import {
 } from "@hyperframes/engine";
 import {
   normalizeResolutionFlag,
+  checkOutputResolutionCompatibility,
   parseFps,
   fpsToNumber,
   fpsToFfmpegArg,
   type CanvasResolution,
+  type OutputResolutionIssueKind,
   type Fps,
   type FpsParseResult,
 } from "@hyperframes/core";
@@ -167,8 +172,12 @@ export default defineCommand({
       description:
         "Frame rate. Accepts integer (24, 25, 30, 50, 60, 120, 240) or " +
         "ffmpeg-style rational (30000/1001 for NTSC 29.97, 24000/1001 for " +
-        "23.976, 60000/1001 for 59.94). Range 1-240.",
-      default: "30",
+        "23.976, 60000/1001 for 59.94). Range 1-240. " +
+        "Defaults to the composition's root data-fps, else 30.",
+      // No `default` here on purpose: citty would set args.fps="30" on
+      // omission, which would make explicitFps always non-null and short-
+      // circuit the data-fps resolution below (resolveDefaultFpsArg). The
+      // "30" fallback lives at the parseFps(fpsArg ?? "30") call instead.
     },
     quality: {
       type: "string",
@@ -354,6 +363,19 @@ export default defineCommand({
         "memory thrash on constrained machines. Default: auto-detected from " +
         "total RAM (<= 8 GB). Env: PRODUCER_LOW_MEMORY_MODE.",
     },
+    "experimental-fast-capture": {
+      type: "boolean",
+      description:
+        "Capture frames via Chrome's drawElementImage API instead of " +
+        "Page.captureScreenshot — reads DOM paint records directly, ~2x faster. " +
+        "Default: on where it can engage (macOS + hardware-GPU browser); " +
+        "incompatible compositions and self-verification failures fall back to " +
+        "screenshot capture automatically. Pass =false to disable. " +
+        "Env: PRODUCER_EXPERIMENTAL_FAST_CAPTURE.",
+      // No `default` — an omitted flag must stay `undefined` so the `!= null`
+      // guard below leaves PRODUCER_EXPERIMENTAL_FAST_CAPTURE untouched and the
+      // env fallback survives (matches the --low-memory-mode idiom).
+    },
   },
   // `run` is the citty handler for `hyperframes render` — sequential flag
   // validation + render dispatch. Inherited CRITICAL on main (CRAP 1290);
@@ -365,15 +387,24 @@ export default defineCommand({
     // ── Resolve project ────────────────────────────────────────────────────
     const project = resolveProject(args.dir);
 
+    // ── Resolve composition entry file ─────────────────────────────────────
+    // Needed early: fps default below must read the actual render target, not
+    // always index.html.
+    const entryFile = resolveCompositionEntryArg(args.composition, project.dir, statSync);
+
     // ── Validate fps ───────────────────────────────────────────────────────
     // Accept either integer (`30`) or ffmpeg-style rational (`30000/1001`).
     // The whitelist-based validator was replaced with a sane numeric range so
     // legitimate framerates (NTSC trio, PAL, 120/240 slow-mo) work without
     // CLI gymnastics. The exact rational survives end-to-end into FFmpeg's
     // `-r` / `-framerate` flags via `fpsToFfmpegArg`.
-    const fpsParse = parseFps(args.fps ?? "30");
+    // Precedence: explicit --fps, else the composition's root data-fps, else 30.
+    // Honoring data-fps matches the runtime — render used to silently force 30
+    // even when the composition declared e.g. data-fps="24".
+    const fpsArg = resolveDefaultFpsArg(args.fps, project.dir, project.indexPath, entryFile);
+    const fpsParse = parseFps(fpsArg ?? "30");
     if (!fpsParse.ok) {
-      errorBox("Invalid fps", formatFpsParseError(args.fps ?? "30", fpsParse.reason));
+      errorBox("Invalid fps", formatFpsParseError(fpsArg ?? "30", fpsParse.reason));
       process.exit(1);
     }
     let fps: Fps = fpsParse.value;
@@ -509,6 +540,13 @@ export default defineCommand({
       process.env.PRODUCER_LOW_MEMORY_MODE = args["low-memory-mode"] ? "true" : "false";
     }
 
+    // ── Override: experimental fast capture (drawElementImage) ───────────
+    if (args["experimental-fast-capture"] != null) {
+      process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE = args["experimental-fast-capture"]
+        ? "true"
+        : "false";
+    }
+
     // ── Validate max-concurrent-renders ─────────────────────────────────
     if (args["max-concurrent-renders"] != null) {
       const parsed = parseInt(args["max-concurrent-renders"], 10);
@@ -635,12 +673,11 @@ export default defineCommand({
       console.log(c.warn("  GIF output is capped at 30fps. Use --fps 15 for smaller files."));
     }
 
-    // ── Validate browser-timeout (seconds) and composition entry file ────
-    // Both validators live in `utils/renderArgs.ts` so the parse/reject
+    // ── Validate browser-timeout (seconds) ───────────────────────────────
+    // This validator lives in `utils/renderArgs.ts` so the parse/reject
     // branches are unit-testable without `process.exit`. See issue #1199
-    // for the original EISDIR / silent-timeout-0 footguns this guards.
+    // for the original silent-timeout-0 footgun this guards.
     const pageNavigationTimeoutMs = resolveBrowserTimeoutMsArg(args["browser-timeout"]);
-    const entryFile = resolveCompositionEntryArg(args.composition, project.dir, statSync);
 
     // ── Preflight batch rows before browser/lint work ────────────────────
     let batchModule: typeof import("./batchRender.js") | undefined;
@@ -658,6 +695,30 @@ export default defineCommand({
         });
       } catch (error: unknown) {
         batchModule.exitBatchRenderInputError(error);
+      }
+    }
+
+    // ── Slideshow guard ───────────────────────────────────────────────────
+    // A slideshow deck is several top-level scene compositions with no master
+    // root. `render` captures only the FIRST composition, so a deck renders as a
+    // silently truncated MP4 (e.g. slide 1 of a 40s deck). Warn and point at the
+    // deck-native path. Best-effort — never block a render on this probe.
+    if (!quiet) {
+      try {
+        const renderTarget = entryFile ? resolve(project.dir, entryFile) : project.indexPath;
+        const { slideshowIslandRegex } = await import("@hyperframes/core/slideshow");
+        if (slideshowIslandRegex("i").test(readFileSync(renderTarget, "utf8"))) {
+          console.log(
+            c.warn("⚠") +
+              "  This composition carries a slideshow island — `render` captures only the first" +
+              " scene, so the MP4 will be truncated to slide 1. Use " +
+              c.accent("hyperframes present") +
+              " for the deck; a linear main-line MP4 export is not yet available.",
+          );
+          console.log("");
+        }
+      } catch {
+        /* best-effort — a missing/unreadable target surfaces later in the real flow */
       }
     }
 
@@ -729,7 +790,7 @@ export default defineCommand({
         browserSpinner?.stop(c.error("Browser not available"));
         errorBox(
           "Chrome not found",
-          err instanceof Error ? err.message : String(err),
+          normalizeErrorMessage(err),
           "Run: npx hyperframes browser ensure",
         );
         process.exit(1);
@@ -758,6 +819,40 @@ export default defineCommand({
         }
         console.log(c.dim("  Continuing render despite lint issues. Use --strict to block."));
         console.log("");
+      }
+    }
+
+    // ── Pre-flight: output-resolution vs composition compatibility ────────
+    // Catch a preset whose orientation/aspect ratio (or alpha/HDR mode)
+    // conflicts with the composition BEFORE the browser and ffmpeg spin up —
+    // otherwise this surfaces cryptically deep inside the render compiler
+    // (resolveDeviceScaleFactor). Best-effort: a composition we can't read or
+    // whose dimensions aren't a known preset falls through to the pipeline's
+    // own defense-in-depth check rather than blocking a render we can't reason
+    // about. See render-reliability workstream P1-3.
+    if (outputResolution) {
+      let resolutionIssue: { message: string; kind: OutputResolutionIssueKind } | undefined;
+      try {
+        const renderTarget = entryFile ? resolve(project.dir, entryFile) : project.indexPath;
+        resolutionIssue = await checkRenderResolutionPreflight(
+          readFileSync(renderTarget, "utf8"),
+          outputResolution,
+          {
+            alphaRequested: format === "webm" || format === "mov" || format === "png-sequence",
+            hdrRequested: args.hdr ?? false,
+          },
+        );
+      } catch {
+        // Unreadable file is non-fatal here — the render pipeline will surface
+        // the real problem with full context.
+      }
+      if (resolutionIssue) {
+        // Count the pre-flight save so dashboard 1783183 can distinguish
+        // "caught early by pre-flight" from a deep render failure or a user who
+        // gave up — i.e. measure whether the P1-3 fix is doing its job.
+        trackRenderPreflightRejected({ kind: resolutionIssue.kind });
+        errorBox("Output resolution incompatible", resolutionIssue.message);
+        process.exit(1);
       }
     }
 
@@ -853,6 +948,7 @@ export default defineCommand({
         entryFile,
         outputResolution,
         pageSideCompositing: args["page-side-compositing"] !== false,
+        experimentalFastCapture: args["experimental-fast-capture"] === true,
         pageNavigationTimeoutMs,
         protocolTimeout,
         playerReadyTimeout,
@@ -922,6 +1018,8 @@ interface RenderOptions {
   /** Output resolution preset; see `resolveDeviceScaleFactor` for constraints. */
   outputResolution?: CanvasResolution;
   pageSideCompositing?: boolean;
+  /** EXPERIMENTAL. drawElementImage frame capture (--experimental-fast-capture). */
+  experimentalFastCapture?: boolean;
   /**
    * Puppeteer `page.goto()` timeout for the entry HTML, in milliseconds.
    * When omitted, the engine default (60s) applies. Surfaced as
@@ -966,6 +1064,73 @@ export function resolveBrowserGpuForCli(
   if (browserGpuArg === false) return "software";
   if (envMode === "hardware" || envMode === "software" || envMode === "auto") return envMode;
   return "auto";
+}
+
+/**
+ * Read a composition's dimensions from the SAME source the producer's compiler
+ * uses — `data-width` / `data-height` on the `[data-composition-id]` root (see
+ * htmlCompiler.ts). Returns `undefined` when they can't be determined (no root,
+ * missing/invalid attrs, unparseable HTML). Note the producer *defaults* a
+ * missing attr to 1080; this pre-flight deliberately defers instead (returns
+ * `undefined`) rather than guess a dimension the author didn't declare, so it
+ * never false-aborts — the producer's defense-in-depth still catches that case.
+ *
+ * Deriving dims any other way (e.g. `data-resolution` or a `#stage` heuristic)
+ * risks disagreeing with the actual render: most compositions (all registry
+ * blocks) carry `data-width/height` and no `data-resolution`, so a parallel
+ * heuristic could false-abort a valid render. `DOMParser` isn't shipped by
+ * Node — the CLI polyfills it via linkedom, imported lazily so the heavy DOM
+ * library stays out of `render.js`'s module-load graph (it cold-imports at
+ * >5 s already; a static linkedom import tips the render test suite's import
+ * hook over its timeout — see the note on `renderLocal browser GPU config`).
+ */
+async function readCompositionDimensions(
+  compositionHtml: string,
+): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const { ensureDOMParser } = await import("../utils/dom.js");
+    ensureDOMParser();
+    const doc = new DOMParser().parseFromString(compositionHtml, "text/html");
+    const rootEl = doc.querySelector("[data-composition-id]");
+    const width = parseInt(rootEl?.getAttribute("data-width") ?? "", 10);
+    const height = parseInt(rootEl?.getAttribute("data-height") ?? "", 10);
+    if (width > 0 && height > 0) return { width, height };
+  } catch {
+    // Unreadable / unparseable composition — fall through to `undefined`.
+  }
+  return undefined;
+}
+
+/**
+ * Render pre-flight: return an actionable message when the chosen
+ * `outputResolution` preset is incompatible with the composition's
+ * orientation/aspect ratio, or with the alpha/HDR mode — or `undefined` when
+ * the combination is fine (or can't be determined statically).
+ *
+ * Extracted (and exported) so the CLI wiring around `process.exit` stays a
+ * thin adapter and the branch logic is unit-testable. See render-reliability
+ * workstream P1-3.
+ */
+export async function checkRenderResolutionPreflight(
+  compositionHtml: string,
+  outputResolution: CanvasResolution | undefined,
+  modes: { alphaRequested: boolean; hdrRequested: boolean },
+): Promise<{ message: string; kind: OutputResolutionIssueKind } | undefined> {
+  if (!outputResolution) return undefined;
+  const dims = await readCompositionDimensions(compositionHtml);
+  // Couldn't determine the composition's actual dimensions — defer to the
+  // pipeline's own defense-in-depth check rather than guess.
+  if (!dims) return undefined;
+  const compat = checkOutputResolutionCompatibility({
+    compositionWidth: dims.width,
+    compositionHeight: dims.height,
+    outputResolution,
+    alphaRequested: modes.alphaRequested,
+    hdrRequested: modes.hdrRequested,
+  });
+  // Narrow to the incompatible case; `message`/`kind` are always set there.
+  if (compat.ok || !compat.message || !compat.kind) return undefined;
+  return { message: compat.message, kind: compat.kind };
 }
 
 const DOCKER_IMAGE_PREFIX = "hyperframes-renderer";
@@ -1026,8 +1191,8 @@ function ensureDockerImage(version: string, platform: string, quiet: boolean): s
 
   // Platform is now derived from the host arch (see resolveDockerPlatform).
   // Apple Silicon and other arm64 hosts get a native linux/arm64 build; the
-  // Dockerfile skips chrome-headless-shell on arm64 and falls back to system
-  // chromium because chrome-headless-shell ships linux64 only.
+  // Dockerfile installs a pinned arm64 chrome-headless-shell from Playwright
+  // (chrome-for-testing publishes no linux-arm64 build).
   //
   // TARGETARCH is passed explicitly rather than relying on BuildKit's
   // automatic platform args because the legacy builder (and some BuildKit
@@ -1052,7 +1217,7 @@ function ensureDockerImage(version: string, platform: string, quiet: boolean): s
       { stdio: quiet ? "pipe" : "inherit", timeout: 600_000 },
     );
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = normalizeErrorMessage(error);
     throw new Error(`Failed to build Docker image: ${message}`);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -1085,17 +1250,17 @@ function resolveDockerHostPlatform(options: RenderOptions): string {
   }
 
   if (!options.quiet && platform === "linux/arm64") {
-    // chrome-headless-shell doesn't publish a linux-arm64 build, so the arm64
-    // image falls back to system chromium. That loses byte-for-byte parity
-    // with amd64 renders — fine for end-user output, not fine if you're
-    // comparing against an amd64 golden baseline. Set
-    // HYPERFRAMES_DOCKER_PLATFORM=linux/amd64 to keep parity (qemu-emulated,
+    // The arm64 image uses Playwright's pinned linux-arm64 chrome-headless-shell
+    // (chrome-for-testing has no arm64 build). It's a different Chromium build
+    // than amd64's chrome-for-testing binary, so output isn't byte-identical to
+    // an amd64 golden baseline — fine for end-user output. Set
+    // HYPERFRAMES_DOCKER_PLATFORM=linux/amd64 to force parity (qemu-emulated,
     // slower).
     console.log(
       c.dim(
-        "  Host is arm64 — using linux/arm64 image with system chromium " +
-          "(output won't be byte-identical to amd64 renders; " +
-          "set HYPERFRAMES_DOCKER_PLATFORM=linux/amd64 to force parity).",
+        "  Host is arm64 — using linux/arm64 image with Playwright's " +
+          "chrome-headless-shell (output won't be byte-identical to amd64 " +
+          "renders; set HYPERFRAMES_DOCKER_PLATFORM=linux/amd64 to force parity).",
       ),
     );
   }
@@ -1125,7 +1290,7 @@ async function renderDocker(
   try {
     imageTag = ensureDockerImage(dockerVersion, platform, options.quiet);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = normalizeErrorMessage(error);
     const isDockerMissing = /connect|not found|ENOENT/i.test(message);
     errorBox(
       isDockerMissing ? "Docker not available" : "Docker image build failed",
@@ -1164,6 +1329,7 @@ async function renderDocker(
       outputResolution: options.outputResolution,
       pageSideCompositing: options.pageSideCompositing,
       debug: options.debug,
+      experimentalFastCapture: options.experimentalFastCapture,
       pageNavigationTimeoutMs: options.pageNavigationTimeoutMs,
     },
   });
@@ -1203,6 +1369,9 @@ async function renderDocker(
     ...getMemorySnapshot(),
   });
 
+  // ponytail: Docker runs the producer in a child process, so no perfSummary is
+  // threaded back here; the summary shows render time only (never a wrong video
+  // length). Probe the output with ffprobe if a duration figure is wanted here.
   printRenderComplete(outputPath, elapsed, options.quiet);
   if (options.exitAfterComplete) scheduleRenderProcessExit();
   return { renderTimeMs: elapsed };
@@ -1299,7 +1468,13 @@ export async function renderLocal(
 
   const elapsed = Date.now() - startTime;
   trackRenderMetrics(job, elapsed, options, false);
-  printRenderComplete(outputPath, elapsed, options.quiet);
+  printRenderComplete(
+    outputPath,
+    elapsed,
+    options.quiet,
+    job.perfSummary?.compositionDurationSeconds,
+    job.perfSummary?.totalFrames,
+  );
   if (!options.skipFeedback) {
     await maybePromptRenderFeedback({
       renderDurationMs: elapsed,
@@ -1449,6 +1624,15 @@ function handleRenderError(
   if (options.throwOnError) {
     throw new Error(message);
   }
+  // A `Failed to launch the browser process` / `libnss3.so cannot open ...`
+  // failure on Linux/WSL is an environment problem, not a composition bug.
+  // Replace the generic "Try --docker" hint with the exact per-distro
+  // remediation and a pointer at `doctor`.
+  const remediation = chromeLaunchRemediation(message);
+  if (remediation) {
+    errorBox("Render failed — Chrome could not launch", message, remediation);
+    process.exit(1);
+  }
   errorBox("Render failed", message, hint);
   process.exit(1);
 }
@@ -1491,12 +1675,32 @@ function trackRenderMetrics(
     staticDedupSkipReason: perf?.staticDedup?.skipReason,
     staticDedupPredictedFrames: perf?.staticDedup?.predictedFrames,
     staticDedupReusedFrames: perf?.staticDedup?.reusedFrames,
+    deCaptureMode: perf?.drawElement?.mode,
+    deCompileGate: perf?.drawElement?.compileGate,
+    deClampReason: perf?.drawElement?.clampReason,
+    deWorkerInversion: perf?.drawElement?.workerInversion,
+    dePreInversionWorkers: perf?.drawElement?.preInversionWorkers,
+    deGateReason: perf?.drawElement?.gateReason,
+    deWorkerEncode: perf?.drawElement?.workerEncode,
+    deVerifyArmed: perf?.drawElement?.verifyArmed,
+    deVerifyChecked: perf?.drawElement?.verifyChecked,
+    deVerifyMinDb: perf?.drawElement?.verifyMinDb,
+    deVerifyInitMs: perf?.drawElement?.verifyInitMs,
+    deSelfVerifyFallback: perf?.drawElement?.selfVerifyFallback,
+    deFallbackReason: perf?.drawElement?.fallbackReason,
+    deBlankSuspects: perf?.drawElement?.blankSuspects,
+    deBlankDeterministicAccepts: perf?.drawElement?.blankDeterministicAccepts,
+    deBlankRecaptures: perf?.drawElement?.blankRecaptures,
+    deBoundaryFrames: perf?.drawElement?.boundaryFrames,
+    deNcprFallbacks: perf?.drawElement?.ncprFallbacks,
     compositionDurationMs,
     compositionWidth: perf?.resolution.width,
     compositionHeight: perf?.resolution.height,
     totalFrames: perf?.totalFrames,
     speedRatio,
     captureAvgMs: perf?.captureAvgMs,
+    captureP50Ms: perf?.captureP50Ms,
+    videoCount: perf?.videoCount,
     capturePeakMs: perf?.capturePeakMs,
     tmpPeakBytes: perf?.tmpPeakBytes,
     stageCompileMs: stages.compileMs,
@@ -1522,12 +1726,20 @@ function trackRenderMetrics(
   });
 }
 
-function printRenderComplete(outputPath: string, elapsedMs: number, quiet: boolean): void {
+function printRenderComplete(
+  outputPath: string,
+  elapsedMs: number,
+  quiet: boolean,
+  outputDurationSeconds?: number,
+  frameCount?: number,
+): void {
   if (quiet) return;
 
   let fileSize = "unknown";
+  let isDirectory = false;
   try {
     const stat = statSync(outputPath);
+    isDirectory = stat.isDirectory();
     if (stat.isDirectory()) {
       // png-sequence output is a directory; sum the contained file sizes so
       // the user sees the on-disk footprint of the deliverable rather than
@@ -1549,8 +1761,13 @@ function printRenderComplete(outputPath: string, elapsedMs: number, quiet: boole
     // file doesn't exist or is inaccessible
   }
 
-  const duration = formatDuration(elapsedMs);
+  const detail = formatRenderSummaryDetail({
+    elapsedMs,
+    outputDurationSeconds,
+    isDirectory,
+    frameCount,
+  });
   console.log("");
   console.log(c.success("\u25C7") + "  " + c.accent(outputPath));
-  console.log("   " + c.bold(fileSize) + c.dim(" \u00B7 " + duration + " \u00B7 completed"));
+  console.log("   " + c.bold(fileSize) + c.dim(" \u00B7 " + detail));
 }

@@ -441,4 +441,95 @@ describe("hf-id surfacing in preview route", () => {
     expect(servedIds.length).toBeGreaterThanOrEqual(2);
     expect(servedIds).toEqual(diskIds);
   });
+
+  it("sub-comp route writes data-hf-id back to disk on first serve", async () => {
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const compPath = join(projectDir, "scene.html");
+    writeFileSync(compPath, `<div class="clip" data-start="0" data-end="3">Hi</div>`);
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    const res = await app.request("http://localhost/projects/demo/preview/comp/scene.html");
+    expect(res.status).toBe(200);
+    expect(readFileSync(compPath, "utf-8")).toContain('data-hf-id="hf-');
+  });
+
+  it("sub-comp served ids equal disk ids even when relative asset paths are rewritten", async () => {
+    // Regression guard for the setTiming element_not_found divergence class:
+    // the sub-comp route rewrites relative src/href BEFORE minting, so an
+    // element with a relative asset path got a preview-only id that existed
+    // nowhere in the raw file. Persisting ids from the RAW file first pins
+    // them; the rewrite then carries the pinned ids through unchanged.
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const compPath = join(projectDir, "scene.html");
+    writeFileSync(
+      compPath,
+      `<div class="clip" data-start="0" data-end="3"><img src="assets/logo.png"></div>`,
+    );
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    const res = await app.request("http://localhost/projects/demo/preview/comp/scene.html");
+    expect(res.status).toBe(200);
+    const servedIds = [...(await res.text()).matchAll(/data-hf-id="(hf-[a-z0-9]+)"/g)]
+      .map((m) => m[1])
+      .sort();
+    const diskIds = [...readFileSync(compPath, "utf-8").matchAll(/data-hf-id="(hf-[a-z0-9]+)"/g)]
+      .map((m) => m[1])
+      .sort();
+    expect(servedIds.length).toBeGreaterThanOrEqual(2); // div + img
+    expect(servedIds).toEqual(diskIds);
+  });
+
+  it("template-based sub-comp: inner ids persist to disk and match the served (unwrapped) ids", async () => {
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const compPath = join(projectDir, "test-minimal.html");
+    writeFileSync(
+      compPath,
+      `<template data-composition-id="test-minimal"><div class="clip" data-start="0" data-end="3">Hello</div><div class="clip" data-start="3" data-end="6">World</div></template>`,
+    );
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    const res = await app.request("http://localhost/projects/demo/preview/comp/test-minimal.html");
+    expect(res.status).toBe(200);
+    const servedIds = [...(await res.text()).matchAll(/data-hf-id="(hf-[a-z0-9]+)"/g)].map(
+      (m) => m[1],
+    );
+    const diskIds = [
+      ...readFileSync(compPath, "utf-8").matchAll(/data-hf-id="(hf-[a-z0-9]+)"/g),
+    ].map((m) => m[1]);
+    expect(diskIds.length).toBe(2);
+    for (const id of diskIds) expect(servedIds).toContain(id);
+  });
+
+  it("sub-comp route does NOT rewrite a non-HTML file on disk (GET must not corrupt assets)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const svgPath = join(projectDir, "logo.svg");
+    const svgBytes = `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>`;
+    writeFileSync(svgPath, svgBytes);
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    await app.request("http://localhost/projects/demo/preview/comp/logo.svg");
+    // Whatever the route serves, a GET must leave the file byte-identical.
+    expect(readFileSync(svgPath, "utf-8")).toBe(svgBytes);
+  });
+
+  it("sub-comp route does NOT persist ids inside a plain <template> (runtime clone-source)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const projectDir = createProjectDir();
+    const compPath = join(projectDir, "clones.html");
+    writeFileSync(
+      compPath,
+      `<div class="clip" data-start="0" data-end="3">stage</div><template><li class="row">item</li></template>`,
+    );
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    const res = await app.request("http://localhost/projects/demo/preview/comp/clones.html");
+    expect(res.status).toBe(200);
+    const disk = readFileSync(compPath, "utf-8");
+    expect(disk).toMatch(/<div[^>]*data-hf-id/); // stage div stamped
+    expect(disk).not.toMatch(/<li[^>]*data-hf-id/); // clone-source untouched
+  });
 });

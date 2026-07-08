@@ -19,6 +19,7 @@ import {
   wrapInlineScriptWithErrorBoundary,
   wrapScopedCompositionScript,
 } from "./compositionScoping";
+import { checkSubCompositionUsability } from "@hyperframes/parsers/sub-composition-validity";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -101,10 +102,14 @@ export interface InlineSubCompositionsOptions {
   scriptErrorLabel?: string;
 
   /**
-   * Log a warning when a composition file cannot be resolved.
+   * Log a warning when a composition file cannot be resolved. `reason` is a
+   * short, human-readable explanation (e.g. "the file is empty (0 bytes or
+   * whitespace-only)") from `checkSubCompositionUsability` — present for
+   * every skip except when `resolveHtml` returns `null` (file not found,
+   * which callers detect themselves before calling `resolveHtml`).
    * Defaults to `console.warn`.
    */
-  onMissingComposition?: (srcPath: string) => void;
+  onMissingComposition?: (srcPath: string, reason?: string) => void;
 }
 
 export interface InlineSubCompositionsResult {
@@ -176,16 +181,26 @@ export function inlineSubCompositions(
     if (!src) continue;
 
     const compHtml = resolveHtml(src);
-    if (compHtml == null || !compHtml.trim()) {
+    // Shared with lint + render pre-flight (@hyperframes/parsers'
+    // subCompositionValidity.ts) so all three callers agree on what counts
+    // as a usable sub-composition file. This path stays intentionally
+    // tolerant (skip, don't throw) — preview and studio must keep bundling
+    // around a scene that's still being authored. Lint and the render
+    // pre-flight check use the same helper to fail loudly instead.
+    const validity = checkSubCompositionUsability(compHtml, parseHtml);
+    if (!validity.ok) {
+      onMissingComposition?.(src, validity.detail);
+      continue;
+    }
+    if (compHtml == null) {
+      // Unreachable in practice — checkSubCompositionUsability's "empty"
+      // reason already covers null/undefined — but this lets TypeScript
+      // narrow compHtml to `string` below without an `as T` assertion.
       onMissingComposition?.(src);
       continue;
     }
 
     const compDoc = parseHtml(compHtml);
-    if (!compDoc.documentElement) {
-      onMissingComposition?.(src);
-      continue;
-    }
 
     // Determine composition IDs
     let compId: string | null;
@@ -357,6 +372,16 @@ export function inlineSubCompositions(
       for (const child of [...innerRoot.querySelectorAll("style, script")]) child.remove();
       if (flattenInnerRoot) {
         const prepared = flattenInnerRoot(innerRoot);
+        if (!compId && inferredCompId) {
+          // Anonymous host: flattenInnerRoot strips data-composition-id,
+          // assuming the host already carries the composition's identity.
+          // When the host has none, nothing in the render DOM matches the
+          // composition's own root-styling CSS or self-referencing scripts
+          // (e.g. document.querySelector('[data-composition-id="X"]')).
+          // Restore it on the wrapper so both keep resolving, same as
+          // before flattening preserved it via outerHTML.
+          prepared.setAttribute("data-composition-id", inferredCompId);
+        }
         hostEl.innerHTML = prepared.outerHTML || "";
       } else {
         hostEl.innerHTML = compId ? innerRoot.innerHTML || "" : innerRoot.outerHTML || "";

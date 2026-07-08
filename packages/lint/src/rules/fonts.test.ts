@@ -146,6 +146,30 @@ describe("font rules", () => {
       expect(findings).toHaveLength(0);
     });
 
+    it("does not flag a system font declared via @font-face src: local()", async () => {
+      // Regression: two independent reports of this rule hard-erroring on OS
+      // system fonts (Hiragino Sans, Microsoft YaHei) that have no downloadable
+      // file. src: local(...) already satisfies the check (extractFontFaceFamilies
+      // only looks at the font-family declaration, not the src value) — the gap
+      // was that the fixHint didn't mention this as an option.
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>
+          @font-face { font-family: 'Microsoft YaHei'; src: local('Microsoft YaHei'); }
+          body { font-family: 'Microsoft YaHei', sans-serif; }
+        </style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings).toHaveLength(0);
+    });
+
+    it("fixHint mentions the local() pattern for system fonts", async () => {
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>body { font-family: 'GT Walsheim', sans-serif; }</style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings[0]!.fixHint).toContain("local(");
+    });
+
     it("does not flag generic font families", async () => {
       const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
         <style>body { font-family: monospace; }</style>
@@ -261,6 +285,16 @@ describe("font rules", () => {
       expect(findings).toHaveLength(0);
     });
 
+    it("does not flag vendor-prefixed system-font keywords (-apple-system, BlinkMacSystemFont)", async () => {
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+        </style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings).toHaveLength(0);
+    });
+
     it("does not flag installed registry blocks that declare fonts via Google Fonts", async () => {
       const html =
         `<!-- hyperframes-registry-item: my-block -->\n` +
@@ -280,6 +314,40 @@ describe("font rules", () => {
       </div>`;
       const findings = await findByCode(html, "font_family_without_font_face");
       expect(findings).toHaveLength(0);
+    });
+
+    it("does not flag the -apple-system / BlinkMacSystemFont system-ui stack", async () => {
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }</style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings).toHaveLength(0);
+    });
+
+    it("does not flag a var() font-family indirection it cannot resolve", async () => {
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>:root { --heading: 'Inter'; } h1 { font-family: var(--heading); }</style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings).toHaveLength(0);
+    });
+
+    it("does not flag a var() with a quoted fallback font", async () => {
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>h1 { font-family: var(--heading, 'Geist'), sans-serif; }</style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings).toHaveLength(0);
+    });
+
+    it("still flags a real undeclared font sitting next to a system stack", async () => {
+      const html = `<div data-composition-id="test" data-width="1920" data-height="1080">
+        <style>body { font-family: 'Aeonik', -apple-system, BlinkMacSystemFont, sans-serif; }</style>
+      </div>`;
+      const findings = await findByCode(html, "font_family_without_font_face");
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.message).toContain("aeonik");
+      expect(findings[0]!.message).not.toContain("apple-system");
     });
   });
 });

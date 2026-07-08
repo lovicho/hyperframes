@@ -40,9 +40,22 @@ export interface RenderCaptureObservability {
   usePageSideCompositing?: boolean;
   hasHdrContent?: boolean;
   browserGpuMode?: string;
+  /** drawElement per-render self-verification tripped → whole render re-ran via screenshot. */
+  deSelfVerifyFallback?: boolean;
+  /** Auto-parallel inversion outcome: "inverted" (fired, held) | "reverted" (fired, self-verify retry rolled back). */
+  deWorkerInversion?: "inverted" | "reverted";
   protocolTimeoutMs?: number;
   pageNavigationTimeoutMs?: number;
   playerReadyTimeoutMs?: number;
+  /**
+   * Render-reliability counters (see PostHog dashboard 1783183). Emitted so the
+   * capture-hardening in #1842 is measurable from a metric, not just logs:
+   * how often the bounded transient-tab-death retry fired on a render that
+   * ultimately succeeded, and whether the failure was classified as an
+   * out-of-memory exhaustion (`Set maximum size exceeded` and friends).
+   */
+  transientRetries?: number;
+  memoryExhaustionDetected?: boolean;
 }
 
 export interface RenderExtractionObservability {
@@ -295,6 +308,13 @@ export class RenderObservabilityRecorder {
 
   hasFailure(): boolean {
     return this.failedPhase !== undefined;
+  }
+
+  /** A phase failure that was subsequently recovered (e.g. the drawElement
+   * self-verify fallback re-rendering via screenshot) should not brand the
+   * whole render as failed in the summary. */
+  clearFailure(phase: string): void {
+    if (this.failedPhase === phase) this.failedPhase = undefined;
   }
 
   private record(event: RenderObservationEvent): RenderObservationEvent {

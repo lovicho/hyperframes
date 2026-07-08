@@ -25,9 +25,12 @@ import {
   addKeyframeToScript as addKeyframeRecast,
   updateKeyframeInScript as updateKeyframeRecast,
   removeKeyframeFromScript as removeKeyframeRecast,
+  moveKeyframeInScript as moveKeyframeRecast,
+  resizeKeyframedTweenInScript as resizeKeyframedTweenRecast,
   addAnimationWithKeyframesToScript as addWithKfRecast,
   shiftPositionsInScript as shiftRecast,
   scalePositionsInScript as scaleRecast,
+  dedupePositionWritesInScript as dedupePosRecast,
   type SplitAnimationsOptions,
 } from "./gsapParser.js";
 import {
@@ -48,10 +51,13 @@ import {
   addKeyframeToScript as addKeyframeAcorn,
   updateKeyframeInScript as updateKeyframeAcorn,
   removeKeyframeFromScript as removeKeyframeAcorn,
+  moveKeyframeInScript as moveKeyframeAcorn,
+  resizeKeyframedTweenInScript as resizeKeyframedTweenAcorn,
   addAnimationWithKeyframesToScript as addWithKfAcorn,
   removeAnimationFromScript as removeAnimAcorn,
   shiftPositionsInScript as shiftAcorn,
   scalePositionsInScript as scaleAcorn,
+  dedupePositionWritesInScript as dedupePosAcorn,
 } from "./gsapWriterAcorn.js";
 
 function acornId(script: string): string {
@@ -161,6 +167,44 @@ describe("parity: removeAllKeyframesFromScript (recast vs acorn)", () => {
     `;
     const id = acornId(script);
     expect(removeAllAcorn(script, id)).toBe(script);
+  });
+});
+
+describe("parity: dedupePositionWritesInScript (recast vs acorn)", () => {
+  const DUP = `
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#box", { duration: 0, x: -766, y: 314, immediateRender: true }, 1.333);
+    gsap.set("#box", { x: -520, y: 170 });
+    gsap.set("#box", { rotation: 45 });
+    tl.to("#box", { opacity: 1, duration: 1 }, 0);
+  `;
+
+  it("keeps the same single position write in both writers (keep last)", () => {
+    const recastOut = dedupePosRecast(DUP, "#box");
+    const acornOut = dedupePosAcorn(DUP, "#box");
+    expect(modelOf(acornOut)).toEqual(modelOf(recastOut));
+    const posCount = modelOf(acornOut).filter(
+      (a) => "x" in a.properties || "y" in a.properties,
+    ).length;
+    expect(posCount).toBe(1);
+  });
+
+  it("keeps keepId (the tl.to) in both writers", () => {
+    const keepId = parseGsapScriptAcorn(DUP).animations.find(
+      (a) => a.method === "to" && a.propertyGroup === "position",
+    )!.id;
+    const recastOut = dedupePosRecast(DUP, "#box", keepId);
+    const acornOut = dedupePosAcorn(DUP, "#box", keepId);
+    expect(modelOf(acornOut)).toEqual(modelOf(recastOut));
+  });
+
+  it("no-op when 0 or 1 position writes — both writers", () => {
+    const single = `
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#box", { x: 10, duration: 1 }, 0);
+    `;
+    expect(dedupePosAcorn(single, "#box")).toBe(single);
+    expect(dedupePosRecast(single, "#box")).toBe(single);
   });
 });
 
@@ -1074,6 +1118,246 @@ describe("parity: updateKeyframeInScript (recast vs acorn)", () => {
     const acorn = updateKeyframeAcorn(UPD_ARRAY_SCRIPT, id, 50, { x: 60 });
     const recast = updateKeyframeRecast(UPD_ARRAY_SCRIPT, id, 50, { x: 60 });
     expect(modelOf(acorn)).toEqual(modelOf(recast));
+  });
+});
+
+// ── moveKeyframeInScript (retime: preserve value + ease) ─────────────────────
+// "Move to Playhead" retimes a keyframe in time, keeping its properties and
+// per-keyframe ease. The moved keyframe must vanish from the source percentage
+// and reappear (with identical value + ease) at the destination; a destination
+// collision is overwritten, not duplicated. recast and acorn must agree.
+const MOVE_KF_SCRIPT = `
+  const tl = gsap.timeline({ paused: true });
+  tl.to("#box", { keyframes: { "0%": { x: 0 }, "50%": { x: 100, opacity: 0.5, ease: "power2.in" }, "100%": { x: 200 } }, duration: 1 }, 0.2);
+`;
+
+describe("moveKeyframeInScript: retime preserves value + ease (acorn) ", () => {
+  it("moves a keyframe to a new percentage, keeping properties + ease", () => {
+    const id = acornId(MOVE_KF_SCRIPT);
+    const out = moveKeyframeAcorn(MOVE_KF_SCRIPT, id, 50, 75);
+    const kfs = shapeOf(out).keyframes?.keyframes ?? [];
+    const pcts = kfs.map((k) => k.percentage);
+    expect(pcts).toEqual([0, 75, 100]);
+    const moved = kfs.find((k) => k.percentage === 75)!;
+    expect(moved.properties).toEqual({ x: 100, opacity: 0.5 });
+    expect(moved.ease).toBe("power2.in");
+    // The source percentage is gone.
+    expect(pcts).not.toContain(50);
+  });
+
+  it("overwrites the destination keyframe on collision (no duplicate)", () => {
+    const id = acornId(MOVE_KF_SCRIPT);
+    const out = moveKeyframeAcorn(MOVE_KF_SCRIPT, id, 50, 100);
+    const kfs = shapeOf(out).keyframes?.keyframes ?? [];
+    const pcts = kfs.map((k) => k.percentage);
+    expect(pcts).toEqual([0, 100]);
+    const dest = kfs.find((k) => k.percentage === 100)!;
+    // The moved keyframe's value + ease replaced the old 100% { x: 200 }.
+    expect(dest.properties).toEqual({ x: 100, opacity: 0.5 });
+    expect(dest.ease).toBe("power2.in");
+  });
+
+  it("no-ops only for a negligible move (below the drag epsilon)", () => {
+    const id = acornId(MOVE_KF_SCRIPT);
+    // < 0.05% of travel resolves onto its own source keyframe → skip the write.
+    expect(moveKeyframeAcorn(MOVE_KF_SCRIPT, id, 50, 50.02)).toBe(MOVE_KF_SCRIPT);
+    expect(moveKeyframeRecast(MOVE_KF_SCRIPT, id, 50, 50.02)).toBe(MOVE_KF_SCRIPT);
+  });
+
+  // Regression: a deliberate sub-PCT_TOLERANCE (2%) retime must COMMIT, not get
+  // swallowed by the old `collision.prop === match.prop` guard (findKfPropByPct
+  // resolves the 51% destination back onto the 50% from-keyframe).
+  it("commits a sub-2% retime, keeping value + ease", () => {
+    const id = acornId(MOVE_KF_SCRIPT);
+    const out = moveKeyframeAcorn(MOVE_KF_SCRIPT, id, 50, 51);
+    expect(out).not.toBe(MOVE_KF_SCRIPT);
+    const kfs = shapeOf(out).keyframes?.keyframes ?? [];
+    expect(kfs.map((k) => k.percentage)).toEqual([0, 51, 100]);
+    const moved = kfs.find((k) => k.percentage === 51)!;
+    expect(moved.properties).toEqual({ x: 100, opacity: 0.5 });
+    expect(moved.ease).toBe("power2.in");
+  });
+
+  it("no-ops on unknown id / absent source keyframe (both writers)", () => {
+    const id = acornId(MOVE_KF_SCRIPT);
+    expect(moveKeyframeAcorn(MOVE_KF_SCRIPT, "bad-id", 50, 75)).toBe(MOVE_KF_SCRIPT);
+    expect(moveKeyframeRecast(MOVE_KF_SCRIPT, "bad-id", 50, 75)).toBe(MOVE_KF_SCRIPT);
+    expect(moveKeyframeAcorn(MOVE_KF_SCRIPT, id, 33, 75)).toBe(MOVE_KF_SCRIPT);
+  });
+});
+
+describe("parity: moveKeyframeInScript (recast vs acorn)", () => {
+  function expectParity(script: string, from: number, to: number) {
+    const id = acornId(script);
+    expect(parseGsapScript(script).animations[0]!.id).toBe(id);
+    expect(modelOf(moveKeyframeAcorn(script, id, from, to))).toEqual(
+      modelOf(moveKeyframeRecast(script, id, from, to)),
+    );
+  }
+
+  it("retime to a fresh percentage", () => {
+    expectParity(MOVE_KF_SCRIPT, 50, 75);
+  });
+
+  it("retime earlier, re-sorting keyframes", () => {
+    expectParity(MOVE_KF_SCRIPT, 50, 10);
+  });
+
+  it("retime onto an existing percentage (collision overwrite)", () => {
+    expectParity(MOVE_KF_SCRIPT, 50, 100);
+  });
+
+  it("retime an endpoint inward", () => {
+    expectParity(MOVE_KF_SCRIPT, 0, 25);
+  });
+
+  it("sub-2% retime agrees between writers (regression for the swallow bug)", () => {
+    expectParity(MOVE_KF_SCRIPT, 50, 51);
+  });
+});
+
+// Regression: array-form `keyframes: [...]` has no explicit percentages, so
+// locateWithKeyframes/findKeyframesObjectNode (which only match the object
+// form) resolved to nothing and the move silently no-op'd — Studio's "Move to
+// Playhead" and drag-to-retime did nothing on any array-authored tween. Both
+// writers now normalize array → object form first (mirrors addKeyframeToScript).
+describe("moveKeyframeInScript: array-form keyframes (recast + acorn parity)", () => {
+  for (const [label, move] of [
+    ["acorn", moveKeyframeAcorn],
+    ["recast", moveKeyframeRecast],
+  ] as const) {
+    it(`${label}: normalizes the array then retimes the moved keyframe`, () => {
+      const id = acornId(KF_ADD_ARRAY_SCRIPT);
+      const out = move(KF_ADD_ARRAY_SCRIPT, id, 50, 75);
+      expect(out).not.toBe(KF_ADD_ARRAY_SCRIPT);
+      const kfs = shapeOf(out).keyframes?.keyframes ?? [];
+      expect(kfs.map((k) => k.percentage)).toEqual([0, 75, 100]);
+      expect(kfs.find((k) => k.percentage === 75)!.properties).toEqual({ x: 50, y: 80 });
+    });
+  }
+
+  it("parity: both writers reparse to the same model", () => {
+    const id = acornId(KF_ADD_ARRAY_SCRIPT);
+    expect(modelOf(moveKeyframeAcorn(KF_ADD_ARRAY_SCRIPT, id, 50, 75))).toEqual(
+      modelOf(moveKeyframeRecast(KF_ADD_ARRAY_SCRIPT, id, 50, 75)),
+    );
+  });
+});
+
+// ── resizeKeyframedTweenInScript (boundary drag: re-key + grow window) ────────
+// Boundary drag-to-retime grows/shifts the tween window and RE-KEYS keyframes in
+// place. Unlike replace-with-keyframes (array rebuild), it must preserve author
+// intent verbatim: `_auto` endpoint markers, per-keyframe `ease`, the keyframes-
+// object `easeEach`, and the OUTER tween `ease`.
+const RESIZE_KF_SCRIPT = `
+  const tl = gsap.timeline({ paused: true });
+  tl.to("#box", { keyframes: { "0%": { opacity: 0, _auto: 1 }, "50%": { opacity: 0.5, ease: "power2.in" }, "100%": { opacity: 1, _auto: 1 }, easeEach: "power1.inOut" }, duration: 1, ease: "power3.out" }, 0.2);
+`;
+// Window [0.2, 1.2]; drag the last keyframe (abs 1.2) out to abs 2.2 → [0.2, 2.2].
+// abs 0.2/0.7/2.2 over the new 2.0s window → 0 / 25 / 100.
+const RESIZE_REMAP = [
+  { from: 0, to: 0 },
+  { from: 50, to: 25 },
+  { from: 100, to: 100 },
+];
+
+describe("resizeKeyframedTweenInScript: preserves author intent (acorn + recast)", () => {
+  for (const [label, resize] of [
+    ["acorn", resizeKeyframedTweenAcorn],
+    ["recast", resizeKeyframedTweenRecast],
+  ] as const) {
+    it(`${label}: re-keys + grows the window, keeping _auto / ease / easeEach / outer ease`, () => {
+      const id = acornId(RESIZE_KF_SCRIPT);
+      const out = resize(RESIZE_KF_SCRIPT, id, 0.2, 2, RESIZE_REMAP);
+      expect(out).not.toBe(RESIZE_KF_SCRIPT);
+      const shape = shapeOf(out);
+      expect(shape.duration).toBe(2);
+      expect(parseGsapScript(out).animations[0]!.position).toBeCloseTo(0.2, 5);
+      // Outer tween ease + keyframes-object easeEach survive.
+      expect(shape.ease).toBe("power3.out");
+      expect(shape.keyframes?.easeEach).toBe("power1.inOut");
+      const kfs = shape.keyframes?.keyframes ?? [];
+      expect(kfs.map((k) => k.percentage)).toEqual([0, 25, 100]);
+      // _auto endpoints preserved (parsed back as an _auto property).
+      expect(kfs.find((k) => k.percentage === 0)!.properties).toEqual({ opacity: 0, _auto: 1 });
+      expect(kfs.find((k) => k.percentage === 100)!.properties).toEqual({ opacity: 1, _auto: 1 });
+      // Per-keyframe ease on the interior keyframe survives the re-key.
+      const interior = kfs.find((k) => k.percentage === 25)!;
+      expect(interior.properties).toEqual({ opacity: 0.5 });
+      expect(interior.ease).toBe("power2.in");
+    });
+
+    it(`${label}: no-ops on unknown id`, () => {
+      expect(resize(RESIZE_KF_SCRIPT, "bad-id", 0.2, 2, RESIZE_REMAP)).toBe(RESIZE_KF_SCRIPT);
+    });
+  }
+
+  it("parity: both writers reparse to the same model", () => {
+    const id = acornId(RESIZE_KF_SCRIPT);
+    expect(modelOf(resizeKeyframedTweenAcorn(RESIZE_KF_SCRIPT, id, 0.2, 2, RESIZE_REMAP))).toEqual(
+      modelOf(resizeKeyframedTweenRecast(RESIZE_KF_SCRIPT, id, 0.2, 2, RESIZE_REMAP)),
+    );
+  });
+});
+
+// Regression: same array-form gap as moveKeyframeInScript above — boundary
+// drag-to-retime re-keys existing keyframes to arbitrary percentages, which an
+// array can't host. Both writers now normalize array → object form first.
+const RESIZE_ARRAY_REMAP = [
+  { from: 0, to: 0 },
+  { from: 50, to: 25 },
+  { from: 100, to: 100 },
+];
+
+describe("resizeKeyframedTweenInScript: array-form keyframes (recast + acorn parity)", () => {
+  for (const [label, resize] of [
+    ["acorn", resizeKeyframedTweenAcorn],
+    ["recast", resizeKeyframedTweenRecast],
+  ] as const) {
+    it(`${label}: normalizes the array then re-keys to the remapped percentages`, () => {
+      const id = acornId(KF_ADD_ARRAY_SCRIPT);
+      const out = resize(KF_ADD_ARRAY_SCRIPT, id, 0.2, 2, RESIZE_ARRAY_REMAP);
+      expect(out).not.toBe(KF_ADD_ARRAY_SCRIPT);
+      const kfs = shapeOf(out).keyframes?.keyframes ?? [];
+      expect(kfs.map((k) => k.percentage)).toEqual([0, 25, 100]);
+      expect(kfs.find((k) => k.percentage === 25)!.properties).toEqual({ x: 50, y: 80 });
+    });
+  }
+
+  it("parity: both writers reparse to the same model", () => {
+    const id = acornId(KF_ADD_ARRAY_SCRIPT);
+    expect(
+      modelOf(resizeKeyframedTweenAcorn(KF_ADD_ARRAY_SCRIPT, id, 0.2, 2, RESIZE_ARRAY_REMAP)),
+    ).toEqual(
+      modelOf(resizeKeyframedTweenRecast(KF_ADD_ARRAY_SCRIPT, id, 0.2, 2, RESIZE_ARRAY_REMAP)),
+    );
+  });
+});
+
+describe("removeAllKeyframesFromScript: array-form keyframes (recast + acorn parity)", () => {
+  // Regression: the recast writer required an object-form `keyframes` node
+  // before doing anything, so array-form tweens silently no-op'd — the studio
+  // clears its keyframe cache optimistically on delete-all, so the diamonds
+  // vanished from the UI while the script kept every keyframe untouched.
+  for (const [label, removeAll] of [
+    ["acorn", removeAllAcorn],
+    ["recast", removeAllRecast],
+  ] as const) {
+    it(`${label}: normalizes the array then collapses to the last keyframe`, () => {
+      const id = acornId(KF_ADD_ARRAY_SCRIPT);
+      const out = removeAll(KF_ADD_ARRAY_SCRIPT, id);
+      expect(out).not.toBe(KF_ADD_ARRAY_SCRIPT);
+      const shape = shapeOf(out);
+      expect(shape.keyframes).toBeUndefined();
+      expect(shape.properties).toEqual({ x: 100, y: 0 });
+    });
+  }
+
+  it("parity: both writers reparse to the same model", () => {
+    const id = acornId(KF_ADD_ARRAY_SCRIPT);
+    expect(modelOf(removeAllAcorn(KF_ADD_ARRAY_SCRIPT, id))).toEqual(
+      modelOf(removeAllRecast(KF_ADD_ARRAY_SCRIPT, id)),
+    );
   });
 });
 

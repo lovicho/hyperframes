@@ -7,7 +7,7 @@
 
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, unlinkSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { createProjectWatcher, type ProjectWatcher } from "./fileWatcher.js";
 import {
@@ -16,15 +16,19 @@ import {
   loadRuntimeSourceSignature,
 } from "./runtimeSource.js";
 import { VERSION as version } from "../version.js";
+import { buildStudioHeadScripts, resolveCliTelemetryDistinctId } from "./telemetryIdentity.js";
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
+import { isDevMode } from "../utils/env.js";
 import {
   createStudioManualEditsRenderBodyScript,
   createStudioApi,
   createProjectSignature,
+  createBackgroundRemovalJob,
   getMimeType,
   type StudioApiAdapter,
   type ResolvedProject,
   type RenderJobState,
+  type BackgroundRemovalRender,
 } from "@hyperframes/studio-server";
 import { getElementScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
 import type { ScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
@@ -33,6 +37,12 @@ import type { RenderJob } from "@hyperframes/producer";
 const STUDIO_MANUAL_EDITS_PATH = ".hyperframes/studio-manual-edits.json";
 const REMOTE_GIF_IMG_SRC_RE =
   /<img\b[^>]*?\bsrc\s*=\s*["'](https?:\/\/[^"']+\.gif(?:[?#][^"']*)?)["'][^>]*>/gi;
+
+async function loadStudioProducer() {
+  return isDevMode()
+    ? await import("../../../producer/src/index.js")
+    : await import("@hyperframes/producer");
+}
 
 // ── Path resolution ─────────────────────────────────────────────────────────
 
@@ -301,7 +311,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         // we can point it at our hot-reloadable local runtime endpoint. Inlining
         // ~150 KB of runtime body on every preview render would defeat browser
         // caching across composition edits.
-        let html = await bundleToSingleHtml(dir, { runtime: "placeholder" });
+        let html = await bundleToSingleHtml(dir, {
+          runtime: "placeholder",
+          inlineColorGradingLuts: false,
+        });
         html = html.replace(
           'data-hyperframes-preview-runtime="1" src=""',
           'data-hyperframes-preview-runtime="1" src="/api/runtime.js"',
@@ -348,19 +361,36 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     rendersDir: () => join(projectDir, "renders"),
 
     startRender(opts): RenderJobState {
+      const abortController = new AbortController();
       const state: RenderJobState = {
         id: opts.jobId,
         status: "rendering",
         progress: 0,
         outputPath: opts.outputPath,
+        cancel: () => abortController.abort(),
       };
 
       // Run render asynchronously, mutating the state object
       const startTime = Date.now();
       (async () => {
         let renderJob: RenderJob | undefined;
+        const removeCancelledOutput = () => {
+          // User-initiated cancel: not a failure. Remove any output so the
+          // cancelled job doesn't resurrect in the render history.
+          state.status = "cancelled";
+          for (const suffix of ["", ".meta.json"]) {
+            const fp = suffix
+              ? opts.outputPath.replace(/\.(mp4|webm|mov)$/, suffix)
+              : opts.outputPath;
+            try {
+              if (existsSync(fp)) unlinkSync(fp);
+            } catch {
+              /* ignore */
+            }
+          }
+        };
         try {
-          const { createRenderJob, executeRenderJob } = await import("@hyperframes/producer");
+          const { createRenderJob, executeRenderJob } = await loadStudioProducer();
           const { ensureBrowser } = await import("../browser/manager.js");
 
           try {
@@ -389,7 +419,19 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             state.progress = j.progress;
             if (j.currentStage) state.stage = j.currentStage;
           };
-          await executeRenderJob(job, opts.project.dir, opts.outputPath, onProgress);
+          await executeRenderJob(
+            job,
+            opts.project.dir,
+            opts.outputPath,
+            onProgress,
+            abortController.signal,
+          );
+          if (abortController.signal.aborted) {
+            // Cancel landed just as the render finished: honor the cancel the
+            // route already reported instead of resurrecting a completed job.
+            removeCancelledOutput();
+            return;
+          }
           state.status = "complete";
           state.progress = 100;
           const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
@@ -399,6 +441,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           );
           emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary);
         } catch (err) {
+          if (abortController.signal.aborted) {
+            removeCancelledOutput();
+            return;
+          }
           state.status = "failed";
           state.error = err instanceof Error ? err.message : String(err);
           // fallow-ignore-next-line code-duplication
@@ -413,6 +459,16 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       })();
 
       return state;
+    },
+
+    startBackgroundRemoval(opts) {
+      return createBackgroundRemovalJob(opts, async (renderOpts) => {
+        const sourcePipelinePath = "../background-removal/pipeline.ts";
+        const pipeline = (await import("../background-removal/pipeline.js").catch(
+          () => import(sourcePipelinePath),
+        )) as { render: BackgroundRemovalRender };
+        return pipeline.render(renderOpts);
+      });
     },
 
     async generateThumbnail(opts): Promise<Buffer | null> {
@@ -437,6 +493,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             { timeout: 5000 },
           )
           .catch(() => {});
+        // fallow-ignore-next-line code-duplication
         await page.evaluate((t: number) => {
           const w = window as Window & {
             __player?: { seek?: (time: number) => void };
@@ -564,6 +621,15 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       });
     };
     return serve();
+  });
+
+  // CLI → Studio telemetry identity endpoint (Layer 1). Studio reads the
+  // injected `window.__HF_CLI_DISTINCT_ID` first; this GET is a fallback for
+  // clients that can't rely on the injected global. Returns the CLI's anonymous
+  // distinct id (no PII) so the browser session can join the CLI's PostHog
+  // person, or `{ distinctId: null }` when CLI telemetry is disabled.
+  app.get("/api/telemetry-identity", (c) => {
+    return c.json({ distinctId: resolveCliTelemetryDistinctId() });
   });
 
   app.get("/api/events", (c) => {
@@ -700,9 +766,12 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       );
     }
     let html = readFileSync(indexPath, "utf-8");
-    const envScript = buildRuntimeEnvScript();
-    if (envScript) {
-      html = html.replace("<head>", `<head>${envScript}`);
+    // Inject before the studio bundle runs. Identity script first (see
+    // buildStudioHeadScripts) so the CLI distinct id is on `window` by the time
+    // telemetry init reads it.
+    const headScript = buildStudioHeadScripts(buildRuntimeEnvScript());
+    if (headScript) {
+      html = html.replace("<head>", `<head>${headScript}`);
     }
     return c.html(html);
   });

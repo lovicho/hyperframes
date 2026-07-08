@@ -78,8 +78,10 @@
               "guides/skills",
               "guides/authentication",
               "guides/video-components",
+              "guides/color-grading",
               "guides/html-in-canvas",
               "guides/website-to-video",
+              "guides/figma",
               "guides/antigravity",
               "guides/copilot-cli",
               "guides/claude-design",
@@ -335,6 +337,41 @@
               "packages/gcp-cloud-run",
               "packages/studio",
               "packages/cli"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDK",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "sdk/overview",
+              "sdk/quickstart"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "sdk/guides/querying-and-editing",
+              "sdk/guides/timing-and-animation",
+              "sdk/guides/undo-redo-and-patches",
+              "sdk/guides/persistence",
+              "sdk/guides/embedded-override-mode",
+              "sdk/guides/canvas-integration",
+              "sdk/guides/editing-affordances"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "sdk/reference/open-composition",
+              "sdk/reference/composition",
+              "sdk/reference/edit-operations",
+              "sdk/reference/types",
+              "sdk/reference/adapters",
+              "sdk/reference/utilities"
             ]
           }
         ]

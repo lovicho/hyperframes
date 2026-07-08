@@ -28,12 +28,18 @@ import { createRuntimeStartTimeResolver } from "./startResolver";
 import { createClipTree } from "./clipTree";
 import { loadExternalCompositions, loadInlineTemplateCompositions } from "./compositionLoader";
 import { applyCaptionOverrides } from "./captionOverrides";
+import { applyPositionEdits } from "./positionEdits";
 import { createColorGradingRuntime, type RuntimeColorGradingApi } from "./colorGrading";
 import { TransportClock } from "./clock";
 import { WebAudioTransport } from "./webAudioTransport";
 import { quantizeTimeToFrame } from "../inline-scripts/parityContract";
 import { STUDIO_MANUAL_EDIT_GESTURE_ATTR } from "../studio-api/helpers/draftMarkers";
-import type { RuntimeDeterministicAdapter, RuntimeJson, RuntimeTimelineLike } from "./types";
+import type {
+  RuntimeDeterministicAdapter,
+  RuntimeJson,
+  RuntimeSeekOptions,
+  RuntimeTimelineLike,
+} from "./types";
 import type { PlayerAPI } from "../core.types";
 import { swallow } from "./diagnostics";
 
@@ -72,6 +78,12 @@ function resolveExportRenderFps(): ExportRenderFpsResolution {
 
 export function initSandboxRuntimeModular(): void {
   const state = createRuntimeState();
+  // SDK moveElement edits must render even when no usable GSAP timeline ever
+  // binds (CSS/WAAPI-animated or fully static compositions) — apply at init.
+  // This runs at DOMContentLoaded, after inline composition scripts have
+  // parsed their tweens, so GSAP (when present) won't fold the translate.
+  // Re-applied on every timeline bind for the rebind/soft-reload paths.
+  applyPositionEdits(document);
   const exportRenderFps = resolveExportRenderFps();
   state.canonicalFps = exportRenderFps.fps ?? state.canonicalFps;
   if (window.__HF_EXPORT_RENDER_SEEK_CONFIG) {
@@ -198,7 +210,7 @@ export function initSandboxRuntimeModular(): void {
     getTime: () => number;
     getDuration: () => number;
     isPlaying: () => boolean;
-    renderSeek: (timeSeconds: number) => void;
+    renderSeek: (timeSeconds: number, options?: RuntimeSeekOptions) => void;
   }): PlayerAPI => {
     const defaultStageZoom: ReturnType<PlayerAPI["getStageZoom"]> = {
       scale: 1,
@@ -496,7 +508,16 @@ export function initSandboxRuntimeModular(): void {
 
   const resolveMediaStartSeconds = (element: Element, fallback = 0): number => {
     if (!element.hasAttribute("data-hf-auto-start") && element.hasAttribute("data-start")) {
-      return Math.max(0, Number(element.getAttribute("data-start") ?? 0) || 0);
+      // `data-start` is authored relative to the media element's OWN sub-
+      // composition, not the root timeline — `fallback` carries the host
+      // composition's resolved absolute start (see syncMediaForCurrentState's
+      // inheritedStart), so it must be added, not discarded. Skipping it made
+      // a nested video play from root t=0 instead of holding until its
+      // parent scene began (issue #1838) — resolveStartForElement's own
+      // absolute-expression branch already adds this same host offset, this
+      // fast literal-value path just didn't.
+      const own = Math.max(0, Number(element.getAttribute("data-start") ?? 0) || 0);
+      return own + fallback;
     }
     return resolveStartForElement(element, fallback);
   };
@@ -673,6 +694,32 @@ export function initSandboxRuntimeModular(): void {
     );
   };
 
+  // Non-GSAP runtimes (CSS, WAAPI, Lottie) have no window.__timelines entry
+  // and thus no authored source of truth for total duration. Adapters that
+  // implement getInferredDurationSeconds() report the longest end time they
+  // can discover from their own animations (see runtime/types.ts). Folding
+  // that into the duration floor here — the same mechanism data-duration and
+  // media windows already use — makes data-duration optional wherever the
+  // runtime can figure the duration out on its own, instead of hard-failing
+  // capture with "Composition has zero duration".
+  const resolveAdapterDurationFloorSeconds = (): number | null => {
+    let maxSeconds = 0;
+    for (const adapter of state.deterministicAdapters) {
+      const getter = adapter.getInferredDurationSeconds;
+      if (typeof getter !== "function") continue;
+      let inferred: number | null = null;
+      try {
+        inferred = getter();
+      } catch (err) {
+        swallow("runtime.init.adapterDuration", err);
+      }
+      if (typeof inferred === "number" && Number.isFinite(inferred) && inferred > 0) {
+        maxSeconds = Math.max(maxSeconds, inferred);
+      }
+    }
+    return maxSeconds > MIN_VALID_TIMELINE_DURATION_SECONDS ? maxSeconds : null;
+  };
+
   const getSafeTimelineDurationSeconds = (
     timeline: RuntimeTimelineLike | null,
     fallback = 0,
@@ -680,7 +727,12 @@ export function initSandboxRuntimeModular(): void {
     const timelineDuration = getTimelineDurationSeconds(timeline);
     const mediaFloor = resolveMediaDurationFloorSeconds();
     const authoredCompositionFloor = resolveAuthoredCompositionDurationFloorSeconds();
-    const durationFloor = Math.max(mediaFloor ?? 0, authoredCompositionFloor ?? 0);
+    const adapterFloor = resolveAdapterDurationFloorSeconds();
+    const durationFloor = Math.max(
+      mediaFloor ?? 0,
+      authoredCompositionFloor ?? 0,
+      adapterFloor ?? 0,
+    );
     const fallbackDuration =
       Number.isFinite(fallback) && fallback > MIN_VALID_TIMELINE_DURATION_SECONDS ? fallback : 0;
     let safeDuration = 0;
@@ -1158,6 +1210,12 @@ export function initSandboxRuntimeModular(): void {
       // during initial rebind (timing race on first load / soft reload).
       const applyFn = (window as Record<string, unknown>).__hfStudioManualEditsApply;
       if (typeof applyFn === "function") applyFn();
+
+      // SDK moveElement edits (data-hf-edit-base-x/y markers) render as a
+      // CSS translate delta. Must run after the timeline is bound so GSAP has
+      // already parsed the elements — a translate present at first parse gets
+      // folded into the cached transform and lost per-axis on seek.
+      applyPositionEdits(document);
     }
     if (resolution.diagnostics) {
       postRuntimeMessage({
@@ -1613,6 +1671,8 @@ export function initSandboxRuntimeModular(): void {
     timedClipInFlow = new WeakMap<Element, boolean>();
     timedClipIsLeaf = new WeakMap<Element, boolean>();
   };
+  const dataHiddenDisplayRestores = new WeakMap<HTMLElement, string>();
+  const dataHiddenDisplayNodes = new WeakSet<HTMLElement>();
 
   const syncMediaForCurrentState = () => {
     const resolveMediaCompositionContext = (element: HTMLVideoElement | HTMLAudioElement) => {
@@ -1700,6 +1760,29 @@ export function initSandboxRuntimeModular(): void {
     const rootComp = resolveRootCompositionElement();
     for (const rawNode of visibilityNodes) {
       if (!(rawNode instanceof HTMLElement)) continue;
+
+      if (rawNode.hasAttribute("data-hidden")) {
+        if (!dataHiddenDisplayNodes.has(rawNode)) {
+          dataHiddenDisplayRestores.set(rawNode, rawNode.style.getPropertyValue("display"));
+          dataHiddenDisplayNodes.add(rawNode);
+        }
+        rawNode.style.display = "none";
+        if (rawNode instanceof HTMLVideoElement || rawNode instanceof HTMLImageElement) {
+          colorGradingRuntime?.setSourceVisibility(rawNode, false);
+        }
+        continue;
+      }
+
+      if (dataHiddenDisplayNodes.has(rawNode)) {
+        const previousDisplay = dataHiddenDisplayRestores.get(rawNode);
+        if (previousDisplay) {
+          rawNode.style.display = previousDisplay;
+        } else {
+          rawNode.style.removeProperty("display");
+        }
+        dataHiddenDisplayRestores.delete(rawNode);
+        dataHiddenDisplayNodes.delete(rawNode);
+      }
 
       let isVisibleNow = isTimedElementVisibleAt(rawNode, state.currentTime);
       // Descendants must not override a hidden ancestor clip. CSS visibility can
@@ -1823,7 +1906,7 @@ export function initSandboxRuntimeModular(): void {
       }
       if (method === "discover") {
         try {
-          adapter.seek({ time: timeSeconds });
+          adapter.seek({ time: timeSeconds, suppressEvents: true });
         } catch (err) {
           // ignore seek bootstrap failures
           swallow("runtime.init.site9", err);
@@ -1986,10 +2069,14 @@ export function initSandboxRuntimeModular(): void {
       syncMediaForCurrentState();
     },
     onStatePost: postState,
-    onDeterministicSeek: (timeSeconds) => {
+    onDeterministicSeek: (timeSeconds, options) => {
       for (const adapter of state.deterministicAdapters) {
+        if (adapter.name === "gsap" && state.capturedTimeline) continue;
         try {
-          adapter.seek({ time: Number(timeSeconds) || 0 });
+          adapter.seek({
+            time: Number(timeSeconds) || 0,
+            suppressEvents: options?.suppressEvents,
+          });
         } catch (err) {
           // ignore adapter failure
           swallow("runtime.init.site11", err);
@@ -2273,20 +2360,22 @@ export function initSandboxRuntimeModular(): void {
     timeline: RuntimeTimelineLike,
     timeSeconds: number,
     swallowLabel: string,
+    options?: RuntimeSeekOptions,
   ) => {
     try {
+      const suppressEvents = options?.suppressEvents === true;
       timeline.pause();
       if (typeof timeline.totalTime === "function") {
-        timeline.totalTime(timeSeconds, false);
+        timeline.totalTime(timeSeconds, suppressEvents);
       } else {
-        timeline.seek(timeSeconds, false);
+        timeline.seek(timeSeconds, suppressEvents);
       }
     } catch (err) {
       swallow(swallowLabel, err);
     }
   };
 
-  const seekStandaloneRegisteredTimelines = (timeSeconds: number) => {
+  const seekStandaloneRegisteredTimelines = (timeSeconds: number, options?: RuntimeSeekOptions) => {
     const timelines = (window.__timelines ?? {}) as Record<string, RuntimeTimelineLike | undefined>;
     const rootCompositionId =
       resolveRootCompositionElement()?.getAttribute("data-composition-id") ?? null;
@@ -2308,7 +2397,7 @@ export function initSandboxRuntimeModular(): void {
           ? Math.min(duration, timeSeconds - start)
           : timeSeconds - start,
       );
-      seekRuntimeTimeline(timeline, localTime, "runtime.init.transport.childTimeline");
+      seekRuntimeTimeline(timeline, localTime, "runtime.init.transport.childTimeline", options);
     }
   };
 
@@ -2332,8 +2421,76 @@ export function initSandboxRuntimeModular(): void {
     }
   };
 
-  const seekTimelineAndAdapters = (t: number, opts?: { activateChildren?: boolean }) => {
+  const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null;
+
+  const gsapCallbackTweenCache = new WeakMap<RuntimeTimelineLike, boolean>();
+  const GSAP_CALLBACK_NAMES = [
+    "onStart",
+    "onUpdate",
+    "onComplete",
+    "onReverseComplete",
+    "onRepeat",
+  ];
+
+  const readGsapDuration = (child: Record<string, unknown>, property: string): number | null => {
+    const getter = child[property];
+    if (typeof getter !== "function") return null;
+    try {
+      const value = Number(getter.call(child));
+      return Number.isFinite(value) ? value : null;
+    } catch (err) {
+      swallow("runtime.init.gsapCallbackDuration", err);
+      return null;
+    }
+  };
+
+  const hasZeroDurationCallbackTween = (timeline: RuntimeTimelineLike): boolean => {
+    const cached = gsapCallbackTweenCache.get(timeline);
+    if (cached != null) return cached;
+
+    if (!("getChildren" in timeline) || typeof timeline.getChildren !== "function") {
+      return false;
+    }
+
+    let children: unknown;
+    try {
+      children = timeline.getChildren(true, true, true);
+    } catch (err) {
+      swallow("runtime.init.gsapCallbackChildren", err);
+      gsapCallbackTweenCache.set(timeline, false);
+      return false;
+    }
+    if (!Array.isArray(children)) {
+      gsapCallbackTweenCache.set(timeline, false);
+      return false;
+    }
+
+    for (const child of children) {
+      if (!isObjectRecord(child) || !isObjectRecord(child.vars)) continue;
+      const hasCallback = GSAP_CALLBACK_NAMES.some(
+        (name) => typeof child.vars[name] === "function",
+      );
+      if (!hasCallback) continue;
+
+      const totalDuration = readGsapDuration(child, "totalDuration");
+      const duration = totalDuration ?? readGsapDuration(child, "duration");
+      if (duration != null && duration <= 0.000001) {
+        gsapCallbackTweenCache.set(timeline, true);
+        return true;
+      }
+    }
+
+    gsapCallbackTweenCache.set(timeline, false);
+    return false;
+  };
+
+  const seekTimelineAndAdapters = (
+    t: number,
+    opts?: { activateChildren?: boolean; suppressEvents?: boolean },
+  ) => {
     const tl = state.capturedTimeline;
+    const suppressEvents = opts?.suppressEvents === true;
     if (tl) {
       // When rendering frame-by-frame (activateChildren=true), ensure all
       // sibling timelines are unpaused before seeking the root. GSAP
@@ -2367,9 +2524,16 @@ export function initSandboxRuntimeModular(): void {
       }
       try {
         if (typeof tl.totalTime === "function") {
-          tl.totalTime(tlSeekTime, false);
+          tl.totalTime(tlSeekTime, suppressEvents);
+          if (!suppressEvents && !hasZeroDurationCallbackTween(tl)) {
+            // Preserve GSAP's forced-render nudge for root timelines without
+            // firing callbacks a second time. The first seek is the only
+            // eventful one; the follow-up nudges only refresh computed styles.
+            tl.totalTime(tlSeekTime + 0.001, true);
+            tl.totalTime(tlSeekTime, true);
+          }
         } else {
-          tl.seek(tlSeekTime, false);
+          tl.seek(tlSeekTime, suppressEvents);
         }
       } catch (err) {
         swallow("runtime.init.transport.seek", err);
@@ -2382,11 +2546,12 @@ export function initSandboxRuntimeModular(): void {
       // Play/pause propagation for siblings happens in the player.play()
       // and player.pause() overrides via the adapter layer.
     } else {
-      seekStandaloneRegisteredTimelines(t);
+      seekStandaloneRegisteredTimelines(t, opts);
     }
     for (const adapter of state.deterministicAdapters) {
+      if (adapter.name === "gsap" && tl) continue;
       try {
-        adapter.seek({ time: t });
+        adapter.seek({ time: t, suppressEvents });
       } catch (err) {
         swallow("runtime.init.transport.adapter", err);
       }
@@ -2713,7 +2878,7 @@ export function initSandboxRuntimeModular(): void {
     postState(true);
   };
 
-  player.renderSeek = (timeSeconds: number) => {
+  player.renderSeek = (timeSeconds: number, options?: RuntimeSeekOptions) => {
     const quantized = quantizeTimeToFrame(
       Math.max(0, Number(timeSeconds) || 0),
       state.canonicalFps,
@@ -2723,7 +2888,10 @@ export function initSandboxRuntimeModular(): void {
     state.currentTime = clock.now();
     state.isPlaying = false;
     state.mediaForceSyncNextTick = true;
-    seekTimelineAndAdapters(state.currentTime, { activateChildren: true });
+    seekTimelineAndAdapters(state.currentTime, {
+      activateChildren: true,
+      suppressEvents: options?.suppressEvents,
+    });
     syncMediaForCurrentState();
     colorGrading.redraw();
     postState(true);

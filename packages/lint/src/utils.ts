@@ -21,14 +21,35 @@ export const SCRIPT_BLOCK_PATTERN = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
 const COMPOSITION_ID_IN_CSS_PATTERN = /\[data-composition-id=["']([^"']+)["']\]/g;
 export const TIMELINE_REGISTRY_INIT_PATTERN =
   /window\.__timelines\s*=\s*window\.__timelines\s*\|\|\s*\{\}|window\.__timelines\s*=\s*\{\}|window\.__timelines\s*\?\?=\s*\{\}/i;
+// Object-literal registration that assigns at least one `key: value` entry inline,
+// e.g. `window.__timelines = { main: tl }` or `window.__timelines = { "comp-1": tl }`.
+// Distinct from the empty-init form (`= {}`) — requires a key followed by `:`.
+export const TIMELINE_REGISTRY_OBJECT_LITERAL_PATTERN =
+  /window\.__timelines\s*=\s*\{\s*(?:["'][^"']+["']|[A-Za-z_$][\w$]*)\s*:/i;
 export const TIMELINE_REGISTRY_ASSIGN_PATTERN =
   /window\.__timelines(?:\[[^\]]+\]|\.[A-Za-z_$][\w$]*)\s*=/i;
+// The bracket branch accepts either a quoted string key (`["root"]`) or a
+// computed key (`[spec.id]`, `[id]`) — a bare-identifier-only bracket branch
+// missed `window.__timelines[spec.id] = tl`, a pattern the shipped
+// code-particle-assemble/code-3d-extrude registry blocks actually use,
+// making gsap_timeline_not_registered false-fire on correctly registered
+// timelines. The computed-key alternative is deliberately non-capturing:
+// its text isn't a literal composition id, so callers reading group 1/2
+// (readRegisteredTimelineCompositionId) must keep falling back to null for it.
 export const WINDOW_TIMELINE_ASSIGN_PATTERN =
-  /window\.__timelines(?:\[\s*["']([^"']+)["']\s*\]|\.\s*([A-Za-z_$][\w$]*))\s*=\s*([A-Za-z_$][\w$]*)/i;
+  /window\.__timelines(?:\[\s*(?:["']([^"']+)["']|[A-Za-z_$][\w$.]*)\s*\]|\.\s*([A-Za-z_$][\w$]*))\s*=\s*([A-Za-z_$][\w$]*)/i;
 export const INVALID_SCRIPT_CLOSE_PATTERN = /<script[^>]*>[\s\S]*?<\s*\/\s*script(?!>)/i;
 
 const TIMELINE_REGISTRY_KEY_PATTERN =
   /window\.__timelines(?:\[\s*["']([^"']+)["']\s*\]|\.\s*([A-Za-z_$][\w$]*))\s*=/g;
+
+// The `window.__timelines = { ... }` object-literal body (group 1), captured so its
+// `key: value` entries can be scanned for registered keys.
+const TIMELINE_REGISTRY_OBJECT_BODY_PATTERN = /window\.__timelines\s*=\s*\{([\s\S]*?)\}/i;
+// A single object-literal entry whose value is an identifier (real timeline registration),
+// e.g. `main: tl` or `"comp-1": tl`. Captures the key in group 1 (quoted) or 2 (bare).
+const TIMELINE_REGISTRY_OBJECT_ENTRY_PATTERN =
+  /(?:["']([^"']+)["']|([A-Za-z_$][\w$]*))\s*:\s*[A-Za-z_$][\w$]*/g;
 
 export function extractOpenTags(source: string): OpenTag[] {
   const tags: OpenTag[] = [];
@@ -79,6 +100,7 @@ export function findHtmlTag(source: string): OpenTag | null {
   };
 }
 
+// fallow-ignore-next-line complexity
 export function findRootTag(source: string): OpenTag | null {
   const bodyOpenMatch = /<body\b([^>]*)>/i.exec(source);
   const bodyCloseMatch = /<\/body>/i.exec(source);
@@ -102,8 +124,34 @@ export function findRootTag(source: string): OpenTag | null {
       : source.length;
   const bodyContent = bodyOpenMatch ? source.slice(bodyStart, bodyEnd) : source;
   const bodyTags = extractOpenTags(bodyContent);
+  // Set when a leading <svg> defs block is skipped (see below) — extractOpenTags
+  // is a flat, nesting-unaware scan, so without this the very next tag it
+  // returns is the svg's own nested child (<defs>, <filter>, ...), not the
+  // sibling that follows the closed </svg>.
+  let skipBefore = -1;
   for (const tag of bodyTags) {
+    if (tag.index < skipBefore) continue;
     if (["script", "style", "meta", "link", "title"].includes(tag.name)) continue;
+    // A leading <svg> block (icon/gradient/filter <defs>, referenced by url(#id)
+    // from elsewhere in the document) is shared visual plumbing, not the
+    // composition root — two independent reports of this being mistaken for
+    // the root, manufacturing root_missing_composition_id/root_missing_dimensions
+    // on an otherwise-correct composition. Only skip it when it carries none of
+    // the composition markers itself, so an intentionally SVG-rooted composition
+    // (data-composition-id/data-width/data-height directly on the <svg>) is
+    // still eligible as the root.
+    if (
+      tag.name === "svg" &&
+      !readAttr(tag.raw, "data-composition-id") &&
+      !readAttr(tag.raw, "data-width") &&
+      !readAttr(tag.raw, "data-height")
+    ) {
+      const closeMatch = /<\/svg\s*>/i.exec(bodyContent.slice(tag.index));
+      // No closing tag found (malformed HTML) — skip everything rather than
+      // risk returning one of the svg's own children as the root.
+      skipBefore = closeMatch ? tag.index + closeMatch.index + closeMatch[0].length : Infinity;
+      continue;
+    }
     return { ...tag, index: tag.index + bodyStart };
   }
   return null;
@@ -112,7 +160,11 @@ export function findRootTag(source: string): OpenTag | null {
 export function readAttr(tagSource: string, attr: string): string | null {
   if (!tagSource) return null;
   const escaped = attr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = tagSource.match(new RegExp(`\\b${escaped}\\s*=\\s*["']([^"']+)["']`, "i"));
+  // `(?<![\w-])` not `\b`: a plain `\b` boundary treats the hyphen in a longer
+  // attribute as a word break, so reading "id" would wrongly match the trailing
+  // `id="…"` inside `data-hf-id="…"` (and "width" inside `data-width`, etc.).
+  // The lookbehind requires the match to start a fresh attribute name.
+  const match = tagSource.match(new RegExp(`(?<![\\w-])${escaped}\\s*=\\s*["']([^"']+)["']`, "i"));
   return match?.[1] || null;
 }
 
@@ -131,7 +183,11 @@ export function readAttr(tagSource: string, attr: string): string | null {
 export function readJsonAttr(tagSource: string, attr: string): string | null {
   if (!tagSource) return null;
   const escaped = attr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = tagSource.match(new RegExp(`\\b${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+  // See readAttr: `(?<![\w-])` prevents a short name from matching the tail of a
+  // longer hyphenated attribute (e.g. "id" inside `data-hf-id`).
+  const match = tagSource.match(
+    new RegExp(`(?<![\\w-])${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"),
+  );
   if (!match) return null;
   return match[1] ?? match[2] ?? null;
 }
@@ -168,6 +224,17 @@ export function extractTimelineRegistryKeys(source: string): string[] {
   while ((match = pattern.exec(source)) !== null) {
     const key = match[1] ?? match[2];
     if (key) keys.add(key);
+  }
+  const objectBody = TIMELINE_REGISTRY_OBJECT_BODY_PATTERN.exec(source)?.[1];
+  if (objectBody) {
+    const entryPattern = new RegExp(
+      TIMELINE_REGISTRY_OBJECT_ENTRY_PATTERN.source,
+      TIMELINE_REGISTRY_OBJECT_ENTRY_PATTERN.flags,
+    );
+    while ((match = entryPattern.exec(objectBody)) !== null) {
+      const key = match[1] ?? match[2];
+      if (key) keys.add(key);
+    }
   }
   return [...keys];
 }
@@ -290,6 +357,13 @@ export function extractScriptTextsAndSrcs(scripts: ExtractedBlock[]): {
 
 export function isMediaTag(tagName: string): boolean {
   return tagName === "video" || tagName === "audio" || tagName === "img";
+}
+
+// Whether any <style> block in the composition defines caption group/word
+// classes (`.caption-group`, `.caption_word`, etc.) — the signal several
+// caption-specific rules use to skip non-caption compositions entirely.
+export function hasCaptionStyles(styles: ExtractedBlock[]): boolean {
+  return styles.some((s) => /\.caption[-_]?(?:group|word)/i.test(s.content));
 }
 
 export function truncateSnippet(value: string, maxLength = 220): string | undefined {

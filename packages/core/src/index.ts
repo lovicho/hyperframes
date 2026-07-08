@@ -35,6 +35,8 @@ export type {
   CompositionVariable,
   CompositionSpec,
   WaveformData,
+  OutputResolutionCompatibility,
+  OutputResolutionIssueKind,
 } from "./core.types";
 
 export type {
@@ -53,6 +55,7 @@ export {
   CANVAS_DIMENSIONS,
   VALID_CANVAS_RESOLUTIONS,
   normalizeResolutionFlag,
+  checkOutputResolutionCompatibility,
   parseFps,
   parseFpsWithDefault,
   toFps,
@@ -149,13 +152,22 @@ export {
   rewriteInlineStyleAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
 export { CSS_URL_RE, isNonRelativeUrl, isPathInside } from "./compiler/assetPaths";
+export {
+  checkSubCompositionUsability,
+  type ParsableDocumentLike,
+  type SubCompositionValidity,
+  type SubCompositionValidityReason,
+} from "./compiler/subCompositionValidity";
 export { queryByAttr } from "./utils/cssSelector";
 export { decodeUrlPathVariants } from "./utils/urlPath";
 export { parseAnimatedGifMetadata, type AnimatedGifMetadata } from "./media/gif";
 export {
   HF_COLOR_GRADING_ATTR,
   HF_COLOR_GRADING_ADJUST_KEYS,
+  HF_COLOR_GRADING_CANVAS_ID_PREFIX,
   HF_COLOR_GRADING_COLOR_SPACE,
+  HF_COLOR_GRADING_DETAIL_KEYS,
+  HF_COLOR_GRADING_EFFECT_KEYS,
   HF_COLOR_GRADING_PRESETS,
   isHfColorGradingActive,
   normalizeHfColorGrading,
@@ -165,6 +177,10 @@ export {
   type HfColorGrading,
   type HfColorGradingAdjust,
   type HfColorGradingAdjustKey,
+  type HfColorGradingDetailKey,
+  type HfColorGradingDetails,
+  type HfColorGradingEffectKey,
+  type HfColorGradingEffects,
   type HfColorGradingLutRef,
   type HfColorGradingPreset,
   type HfColorGradingPresetId,
@@ -216,6 +232,11 @@ export type { FitTextOptions, FitTextResult } from "./text/index.js";
 
 // Runtime helpers (composition-side)
 export { getVariables } from "./runtime/getVariables.js";
+export {
+  parseStartExpression,
+  parseNumeric,
+  type ReferenceExpression,
+} from "./runtime/startExpression.js";
 
 // Variable validation (CLI / tooling-side)
 export {

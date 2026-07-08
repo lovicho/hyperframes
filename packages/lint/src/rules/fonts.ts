@@ -16,6 +16,12 @@ const GENERIC_FAMILIES = new Set([
   "math",
   "emoji",
   "fangsong",
+  // Vendor-prefixed system-font keywords. Like `system-ui`, the engine resolves
+  // these to the OS UI font — they are never installable files and must not be
+  // flagged as a missing @font-face, even when a generic fallback follows them
+  // (e.g. `-apple-system, system-ui, sans-serif`).
+  "-apple-system",
+  "blinkmacsystemfont",
   "inherit",
   "initial",
   "unset",
@@ -50,6 +56,22 @@ function extractFontFaceFamilies(styles: Array<{ content: string }>): Set<string
   return families;
 }
 
+// Normalize one comma-separated font-family entry to a lowercase family name,
+// or null if it carries no resolvable name. `var(--heading)` (or any function
+// token) is an indirection the linter cannot statically resolve, so the literal
+// `var(...)` is not a font name and flagging it is a false positive. Comma-split
+// fallbacks like `var(--x, 'Inter')` also leave a dangling `)` on the fallback
+// part, so skip anything bearing parentheses.
+function normalizeUsedFontName(part: string): string | null {
+  const name = part
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .trim()
+    .toLowerCase();
+  if (!name || name.includes("(") || name.includes(")")) return null;
+  return name;
+}
+
 function extractUsedFontFamilies(styles: Array<{ content: string }>): string[] {
   const used: string[] = [];
   const seen = new Set<string>();
@@ -58,13 +80,8 @@ function extractUsedFontFamilies(styles: Array<{ content: string }>): string[] {
     const withoutFontFace = stripCssComments(style.content).replace(/@font-face\s*\{[^}]*\}/gi, "");
     let match: RegExpExecArray | null;
     while ((match = propRe.exec(withoutFontFace)) !== null) {
-      const stack = match[1]!;
-      for (const part of stack.split(",")) {
-        const name = part
-          .trim()
-          .replace(/^['"]|['"]$/g, "")
-          .trim()
-          .toLowerCase();
+      for (const part of match[1]!.split(",")) {
+        const name = normalizeUsedFontName(part);
         if (name && !GENERIC_FAMILIES.has(name) && !seen.has(name)) {
           seen.add(name);
           used.push(name);
@@ -215,7 +232,10 @@ export const fontRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
         "Text will fall back to a generic font, producing incorrect typography in the video.",
       fixHint:
         "Add @font-face { font-family: '...'; src: url('capture/assets/fonts/...woff2'); } " +
-        "for each font family, pointing to the captured .woff2 files.",
+        "for each font family, pointing to the captured .woff2 files. For an OS-bundled " +
+        "system font (e.g. Hiragino Sans, Microsoft YaHei) that has no downloadable file, " +
+        "use src: local('Exact Font Name') instead — the declaration alone satisfies this " +
+        "check without needing a font file.",
     });
     return findings;
   },

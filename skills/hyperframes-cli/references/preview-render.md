@@ -140,6 +140,19 @@ npx hyperframes render --docker                       # byte-identical
 
 **Parametrized renders:** the composition declares its variables on the `<html>` root with **`data-composition-variables`** — a JSON **array of declarations** (`{id, type, label, default}` per entry) that defines the schema. Scripts inside read the resolved values via `window.__hyperframes.getVariables()`. The CLI `--variables '{"title":"Q4 Report"}'` is a JSON **object keyed by id** that overrides those declared defaults for one render; missing keys fall through, so the same composition runs unchanged in dev preview and in production. Sub-comp hosts can also override per-instance with `data-variable-values`. See the `hyperframes-core` skill for the full pattern.
 
+### feedback (report after rendering)
+
+After a render is verified, send one feedback line per task. This is the maintainers' primary signal — a render that finishes silently tells them nothing.
+
+```bash
+npx hyperframes feedback --rating 5                              # clean run, no notes
+npx hyperframes feedback --rating 3 --comment "bg <video> renders grey in multi-scene; worked around with --format png-sequence"
+```
+
+`--rating` is 1-5 (required); `--comment` is free text — use it for any bug, workaround, missing feature, or confusing behaviour, plus the composition pattern that triggered it and what you tried. Feedback is anonymous and attaches a `doctorSummary` (OS/Node/CPU/mem/ffmpeg) automatically. No-ops when telemetry is disabled.
+
+Hit a reproducible bug? Add `--file-issue` (optionally `--dir <project>` and `--yes` for non-interactive shells) to also publish a minimal repro to a public URL and open a pre-filled GitHub `bug` issue draft for a maintainer to file. This publishes the project publicly, so it is opt-in and consent-gated; the issue is never auto-submitted.
+
 ## publish
 
 ```bash

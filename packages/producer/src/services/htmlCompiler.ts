@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication complexity
 /**
  * HTML Compiler for Producer
  *
@@ -23,7 +24,14 @@ import {
   type ResolvedDuration,
   type UnresolvedElement,
 } from "@hyperframes/core";
-import { inlineSubCompositions as inlineSubCompositionsShared } from "@hyperframes/core/compiler";
+import {
+  inlineSubCompositions as inlineSubCompositionsShared,
+  prepareFlattenedInnerRoot,
+} from "@hyperframes/core/compiler";
+import {
+  checkSubCompositionUsability,
+  type ParsableDocumentLike,
+} from "@hyperframes/parsers/sub-composition-validity";
 import { extractMediaMetadata, extractAudioMetadata } from "../utils/ffprobe.js";
 import { isPathInside, toExternalAssetKey } from "../utils/paths.js";
 import {
@@ -38,7 +46,10 @@ import {
 } from "@hyperframes/engine";
 import { assertPublicHttpsUrl, downloadToTemp, isHttpUrl } from "../utils/urlDownloader.js";
 import type { Page } from "puppeteer-core";
-import { injectDeterministicFontFaces } from "./deterministicFonts.js";
+import {
+  injectDeterministicFontFaces,
+  normalizeSystemFontPrimaryFamilies,
+} from "./deterministicFonts.js";
 import { prepareAnimatedGifInputs } from "./animatedGifPrep.js";
 import { createStudioPositionSeekReapplyScript } from "@hyperframes/studio-server/manual-edits-render-script";
 import { defaultLogger, type ProducerLogger } from "../logger.js";
@@ -57,6 +68,135 @@ export interface CompiledComposition {
   staticDuration: number;
   renderModeHints: RenderModeHints;
   hasShaderTransitions: boolean;
+  /** Author HTML/CSS/scripts use a CSS 3D rendering context (pre-CDN-inline scan). */
+  usesThreeDTransforms: boolean;
+  /** Author HTML/CSS use mix-blend-mode (pre-CDN-inline scan). */
+  usesMixBlendMode: boolean;
+}
+
+/** Adapts linkedom's `parseHTML` to the `checkSubCompositionUsability` contract. */
+function parseSubCompHtmlForValidity(html: string): ParsableDocumentLike {
+  return parseHTML(html).document as unknown as ParsableDocumentLike;
+}
+
+/**
+ * Thrown by {@link assertSubCompositionsUsable} when one or more
+ * `data-composition-src` references resolve to a missing, empty, or
+ * unparsable file. This is the render-path enforcement of the #1 render
+ * failure bucket in production telemetry: a scene-authoring step (most
+ * commonly an AI agent) writes the `data-composition-src` reference before,
+ * or without ever, writing valid content into the scene file.
+ *
+ * Unlike the tolerant inliner (`packages/core/src/compiler/inlineSubCompositions.ts`,
+ * intentionally kept lenient for preview/studio so mid-authoring iteration
+ * doesn't break bundling), a render that silently drops a scene produces a
+ * materially broken video with no visible error — strictly worse than
+ * refusing to render. This check runs before any compilation work starts so
+ * the failure is immediate and names every offending file at once, instead
+ * of surfacing 45+ seconds later as a `pollSubCompositionTimelines` timeout
+ * or a raw `Cannot destructure property 'firstElementChild' of
+ * 'documentElement' as it is null` crash deep inside linkedom.
+ *
+ * Not exported — nothing needs `instanceof` narrowing on this today. Callers
+ * catch it generically (`catch (err: unknown)`, matching on `.message`) the
+ * same way they handle every other compile-time failure. Kept as a class
+ * (not a plain `throw new Error(...)`) so the aggregated multi-file message
+ * construction has a single, testable home.
+ */
+class EmptyCompositionError extends Error {
+  readonly code = "EMPTY_COMPOSITION" as const;
+  readonly problems: ReadonlyArray<{ srcPath: string; detail: string }>;
+
+  constructor(problems: ReadonlyArray<{ srcPath: string; detail: string }>) {
+    const lines = problems.map((p) => `  - ${p.srcPath}: ${p.detail}`);
+    super(
+      `${problems.length} composition file${problems.length === 1 ? "" : "s"} referenced by ` +
+        `data-composition-src cannot be rendered:\n${lines.join("\n")}\n\n` +
+        "Check that each file referenced by data-composition-src contains valid HTML with a " +
+        "<template> or <body> containing a [data-composition-id] element. If a scene-authoring " +
+        "step is still running, wait for it to finish before referencing the file.",
+    );
+    this.name = "EmptyCompositionError";
+    this.problems = problems;
+  }
+}
+
+/**
+ * Recursively walk every `data-composition-src` reference reachable from
+ * `html` (including nested sub-compositions) and verify each resolves to a
+ * usable file — exists, non-empty, parses to HTML with renderable content.
+ * Uses the same `checkSubCompositionUsability` helper the tolerant inliner
+ * and `hyperframes lint` use, so all three agree on what counts as usable.
+ *
+ * Throws {@link EmptyCompositionError} naming every offending file at once
+ * (not just the first one hit) if any reference is unusable. Call this
+ * before any compilation work starts — it deliberately duplicates a small
+ * amount of file-reading work that `parseSubCompositions` also does, in
+ * exchange for failing in milliseconds instead of after the browser has
+ * already launched and waited out a capture timeout.
+ */
+// fallow-ignore-next-line complexity
+function assertSubCompositionsUsable(
+  html: string,
+  projectDir: string,
+  visited: Set<string> = new Set(),
+): void {
+  const { document } = parseHTML(html);
+  const hosts = [...document.querySelectorAll("[data-composition-src]")];
+  const problems: Array<{ srcPath: string; detail: string }> = [];
+
+  for (const el of hosts) {
+    const srcPath = el.getAttribute("data-composition-src");
+    if (!srcPath) continue;
+    if (/^__[A-Z_]+__$/.test(srcPath)) continue; // template placeholder, not a real reference — matches lint's skip
+
+    const filePath = resolve(projectDir, srcPath);
+    // Circular reference guard. parseSubCompositions (below) silently
+    // `continue`s on a repeat visit with no reporting at all — mirror that
+    // silence here rather than pretend it surfaces an error somewhere else.
+    if (visited.has(filePath)) continue;
+
+    if (!existsSync(filePath)) {
+      problems.push({ srcPath, detail: "the file does not exist" });
+      continue;
+    }
+
+    const fileHtml = readFileSync(filePath, "utf-8");
+    const validity = checkSubCompositionUsability(fileHtml, parseSubCompHtmlForValidity);
+    if (!validity.ok) {
+      problems.push({
+        srcPath,
+        detail: validity.detail ?? "the file is empty or could not be parsed",
+      });
+      continue;
+    }
+
+    // Recurse into nested sub-compositions so a broken scene three levels
+    // deep is still named directly instead of surfacing as a parent-level
+    // "no error, just missing content" mystery.
+    //
+    // Pass `projectDir` unchanged (not dirname(filePath)) — data-composition-src
+    // is always resolved root-relative, even from within a nested
+    // sub-composition. This must match parseSubCompositions' own recursive
+    // call below exactly (it threads the original projectDir through every
+    // level too), or this pre-flight check resolves nested references to the
+    // wrong path and aborts renders that would have actually succeeded.
+    const nestedVisited = new Set(visited);
+    nestedVisited.add(filePath);
+    try {
+      assertSubCompositionsUsable(fileHtml, projectDir, nestedVisited);
+    } catch (err) {
+      if (err instanceof EmptyCompositionError) {
+        problems.push(...err.problems);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  if (problems.length > 0) {
+    throw new EmptyCompositionError(problems);
+  }
 }
 
 export type RenderModeHintCode = "iframe" | "requestAnimationFrame" | "htmlInCanvas";
@@ -136,6 +276,35 @@ export function detectRenderModeHints(html: string): RenderModeHints {
     recommendScreenshot: reasons.length > 0,
     reasons,
   };
+}
+
+/**
+ * 3D rendering-context signals. drawElementImage paints elements inside a
+ * CSS 3D rendering context incorrectly: backface-visibility:hidden is
+ * ignored (mid-flip elements show their mirrored backface), sibling content
+ * of the 3D context can drop out of the capture, and the context's
+ * background is lost. Observed on real-world gen_os comps (flip-card and
+ * rotationX scene-entrance patterns) on macOS hardware GPU — this is a
+ * drawElementImage limitation, not a SwiftShader artifact.
+ *
+ * Only genuine 3D-context signals are matched: `perspective` (property or
+ * transform function), `transform-style: preserve-3d`, `backface-visibility`,
+ * `matrix3d(` / `rotate3d(`, and GSAP's `transformPerspective`. Flat
+ * rotationX/Y tweens without a perspective context render as 2D and are
+ * deliberately NOT matched, nor is the ubiquitous `translateZ(0)` promotion
+ * hack.
+ */
+const THREE_D_CONTEXT_PATTERN =
+  /transform-style\s*:\s*preserve-3d|backface-visibility\s*:|perspective\s*:\s*[0-9]|perspective\s*\(|matrix3d\s*\(|rotate3d\s*\(|\btransformPerspective\b/i;
+
+export function detectThreeDTransformUsage(html: string): boolean {
+  return THREE_D_CONTEXT_PATTERN.test(html);
+}
+
+const MIX_BLEND_MODE_PATTERN = /mix-blend-mode\s*:/i;
+
+function detectMixBlendModeUsage(html: string): boolean {
+  return MIX_BLEND_MODE_PATTERN.test(html);
 }
 
 const SHADER_TRANSITION_USAGE_PATTERN =
@@ -616,24 +785,25 @@ function inlineSubCompositions(
       },
       parseHtml: (htmlStr: string) => parseHTML(htmlStr).document as unknown as Document,
       scriptErrorLabel: "[Compiler] Composition script failed",
-      compoundAuthoredRoot: true,
-      onMissingComposition: (srcPath: string) => {
-        console.warn(`[Compiler] Composition file missing or empty: ${srcPath}`);
+      // Preserve the authored root wrapper as a child of the host, matching
+      // the preview bundler's shape (htmlBundler.ts's prepareFlattenedInnerRoot,
+      // which the runtime compositionLoader mirrors with its own copy for the
+      // live-loaded case). Without this, the wrapper element (and its
+      // class/id) is discarded and any CSS anchored on it —
+      // `.wrapper-class .title`, `#wrapper-id` — is dead at render time even
+      // though it works in preview.
+      flattenInnerRoot: prepareFlattenedInnerRoot as (innerRoot: Element) => Element,
+      onMissingComposition: (srcPath: string, reason?: string) => {
+        // In the render path this is normally unreachable — compileForRender
+        // calls assertSubCompositionsUsable() before any of this runs, so a
+        // hit here means the file changed on disk between that pre-flight
+        // check and this later inline step (e.g. a concurrent scene-writer).
+        console.warn(
+          `[Compiler] Skipping sub-composition "${srcPath}": ${reason ?? "the file is missing or empty"}.`,
+        );
       },
     },
   );
-
-  // Set data-hf-authored-id on host elements so the scoped script proxy
-  // can rewrite #id selectors (e.g. #us-map → [data-hf-authored-id="us-map"]).
-  // Unlike flattenInnerRoot (which changes DOM structure and breaks baselines),
-  // this preserves the existing innerHTML-based inlining while enabling the
-  // authored-id selector contract.
-  for (const hostEl of hosts) {
-    const compId = hostEl.getAttribute("data-composition-id");
-    if (compId && !hostEl.getAttribute("data-hf-authored-id")) {
-      hostEl.setAttribute("data-hf-authored-id", compId);
-    }
-  }
 
   // Producer-specific: set explicit pixel dimensions on host elements so
   // children using width/height: 100% resolve correctly. The runtime does
@@ -1040,6 +1210,47 @@ export async function localizeRemoteImageSources(
   );
 }
 
+// Match a remote url() inside a `background` / `background-image` CSS declaration
+// (style blocks or inline style attrs). `[^;}"']*?` lets position/color tokens
+// precede the url() in the shorthand while stopping at the declaration boundary.
+const REMOTE_BG_URL_RE =
+  /background(?:-image)?\s*:\s*[^;}"']*?url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)/gi;
+
+/**
+ * Download remote CSS `background-image: url(https://...)` references and rewrite
+ * them to local same-origin paths.
+ *
+ * Why: `drawElementImage` (fast capture) OMITS cross-origin content, so a remote
+ * background image renders BLACK on the drawElement path while the screenshot
+ * baseline captures it (origin-agnostic) — a whole-region mismatch (e.g. 10f79c0b
+ * picsum.photos backgrounds, 9.3 dB). `<img>`/`<video>`/`@font-face` are localized
+ * by their own passes; this closes the background-image gap so the fast path sees
+ * the same pixels as the baseline.
+ *
+ * @internal exported for unit testing only
+ */
+export async function localizeRemoteBackgroundImages(
+  html: string,
+  downloadDir: string,
+): Promise<{ html: string; remoteMediaAssets: Map<string, string> }> {
+  const urlSet = new Set<string>();
+  const re = new RegExp(REMOTE_BG_URL_RE.source, REMOTE_BG_URL_RE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    if (m[1] && !isGoogleFontsUrl(m[1])) urlSet.add(m[1]);
+  }
+  return downloadAndRewriteUrls(
+    urlSet,
+    html,
+    join(downloadDir, REMOTE_MEDIA_SUBDIR),
+    "Remote background-image download failed for",
+    "Localized remote background-image(s)",
+    // Quoted url('..')/url("..") are rewritten by downloadAndRewriteUrls' default
+    // replaceAll; this handles the unquoted url(https://..) form.
+    (h, url, rel) => h.replaceAll(`url(${url})`, `url(${rel})`),
+  );
+}
+
 // Match url("https://...") or url('https://...') inside @font-face blocks.
 // We scan the full HTML (which includes <style> blocks) — matching against
 // @font-face context precisely would require a CSS parser; instead we match
@@ -1367,6 +1578,15 @@ export async function compileForRender(
   options: CompileForRenderOptions = {},
 ): Promise<CompiledComposition> {
   const rawHtml = rewriteUnresolvableGsapToCdn(readFileSync(htmlPath, "utf-8"), projectDir);
+
+  // Pre-flight: every data-composition-src reference must resolve to a
+  // usable file before we spend any time compiling, launching a browser, or
+  // waiting out a capture timeout. See EmptyCompositionError for why this is
+  // unconditional (not gated behind --strict like lint warnings) — a render
+  // that silently drops a scene is strictly worse than one that refuses to
+  // start.
+  assertSubCompositionsUsable(rawHtml, projectDir);
+
   const { html: compiledHtml, unresolvedCompositions } = await compileHtmlFile(
     rawHtml,
     projectDir,
@@ -1403,16 +1623,22 @@ export async function compileForRender(
   );
   const renderModeHints = detectRenderModeHints(sanitizedHtml);
   const hasShaderTransitions = detectShaderTransitionUsage(sanitizedHtml);
+  // Detected BEFORE inlineExternalScripts: GSAP's own source contains
+  // `transformPerspective`, so scanning post-inline HTML would flag every
+  // composition that loads GSAP from a CDN.
+  const usesThreeDTransforms = detectThreeDTransformUsage(sanitizedHtml);
+  const usesMixBlendMode = detectMixBlendModeUsage(sanitizedHtml);
 
-  const coalescedHtml = await injectDeterministicFontFaces(
+  const normalizedFontHtml = normalizeSystemFontPrimaryFamilies(
     injectTextRenderingRule(
       coalesceHeadStylesAndBodyScripts(promoteCssImportsToLinkTags(sanitizedHtml)),
     ),
-    {
-      failClosedFontFetch: options.failClosedFontFetch === true,
-      allowSystemFontCapture: options.allowSystemFontCapture,
-    },
   );
+
+  const coalescedHtml = await injectDeterministicFontFaces(normalizedFontHtml, {
+    failClosedFontFetch: options.failClosedFontFetch === true,
+    allowSystemFontCapture: options.allowSystemFontCapture,
+  });
 
   // Download CDN scripts and inline them AFTER coalescing. This order matters:
   // coalesceHeadStylesAndBodyScripts merges inline scripts and appends them at
@@ -1456,12 +1682,18 @@ export async function compileForRender(
   const { html: htmlWithLocalImages, remoteMediaAssets: remoteImageAssets } =
     await localizeRemoteImageSources(htmlWithLocalMedia, downloadDir);
 
+  // Download remote CSS background-image url() references. drawElementImage omits
+  // cross-origin content, so remote backgrounds render black on the fast path;
+  // localising them to same-origin closes that gap.
+  const { html: htmlWithLocalBg, remoteMediaAssets: remoteBgAssets } =
+    await localizeRemoteBackgroundImages(htmlWithLocalImages, downloadDir);
+
   // Download remote @font-face src URLs and rewrite to local paths.
   // Remote font URLs fail with a CORS rejection at render time (S3 does not
   // allow http://localhost:PORT as origin), causing Chrome to silently fall
   // back to the next font in the stack.
   const { html: htmlWithLocalizedFonts, remoteMediaAssets: remoteFontAssets } =
-    await localizeRemoteFontFaces(htmlWithLocalImages, downloadDir);
+    await localizeRemoteFontFaces(htmlWithLocalBg, downloadDir);
 
   const gifSourceAssets = new Map<string, string>(remoteImageAssets);
   const {
@@ -1490,6 +1722,9 @@ export async function compileForRender(
     externalAssets.set(relPath, absPath);
   }
   for (const [relPath, absPath] of remoteImageAssets) {
+    externalAssets.set(relPath, absPath);
+  }
+  for (const [relPath, absPath] of remoteBgAssets) {
     externalAssets.set(relPath, absPath);
   }
   for (const [relPath, absPath] of remoteFontAssets) {
@@ -1565,6 +1800,8 @@ export async function compileForRender(
     staticDuration,
     renderModeHints,
     hasShaderTransitions,
+    usesThreeDTransforms,
+    usesMixBlendMode,
   };
 }
 
@@ -1585,6 +1822,8 @@ export interface BrowserMediaElement {
   loop: boolean;
   hasAudio: boolean;
   volume: number;
+  /** The `muted` attribute/property. Preview silences muted media; the mix must too. */
+  muted: boolean;
 }
 
 export interface BrowserAudioVolumeAutomation {
@@ -1605,6 +1844,7 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       loop: boolean;
       hasAudio: boolean;
       volume: number;
+      muted: boolean;
     }[] = [];
 
     const mediaEls = document.querySelectorAll("video[data-start], audio[data-start]");
@@ -1621,6 +1861,7 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       const loop = htmlEl.hasAttribute("loop");
       const hasAudio = htmlEl.getAttribute("data-has-audio") === "true";
       const volume = parseFloat(htmlEl.getAttribute("data-volume") || "1");
+      const muted = htmlEl.hasAttribute("muted") || htmlEl.muted;
 
       results.push({
         id,
@@ -1633,6 +1874,7 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
         loop,
         hasAudio,
         volume,
+        muted,
       });
     });
 

@@ -1267,13 +1267,13 @@ function isEditablePropertyKey(key: string): boolean {
   return !BUILTIN_VAR_KEYS.has(key) && !DROPPED_VAR_KEYS.has(key) && !EXTRAS_KEYS.has(key);
 }
 
-function makeObjectProperty(key: string, value: number | string): AstNode {
+function makeObjectProperty(key: string, value: number | string | boolean): AstNode {
   const obj = parseExpr(`{ ${safeKey(key)}: ${valueToCode(value)} }`);
   return obj.properties[0];
 }
 
 /** Set (or insert) a single key on an ObjectExpression, preserving sibling keys. */
-function setVarsKey(varsArg: AstNode, key: string, value: number | string): void {
+function setVarsKey(varsArg: AstNode, key: string, value: number | string | boolean): void {
   if (varsArg?.type !== "ObjectExpression") return;
   const existing = varsArg.properties.find(
     (p: AstNode) => isObjectProperty(p) && propKeyName(p) === key,
@@ -1624,10 +1624,15 @@ export function removeAnimationFromScript(script: string, animationId: string): 
     target = parsed.located.find((l) => l.id === convertedId);
   }
   if (!target) return script;
-  const node = target.call.node;
-  const stmtPath = findStatementPath(target.call.path);
-  if (!stmtPath) return script;
+  removeCallFromAst(target.call);
+  return recast.print(parsed.ast).code;
+}
 
+/** Remove a single located tween call from the AST (standalone stmt or chain link). */
+function removeCallFromAst(call: TweenCallInfo): void {
+  const node = call.node;
+  const stmtPath = findStatementPath(call.path);
+  if (!stmtPath) return;
   const parentCall = findChainParentCall(stmtPath.node, node);
   if (parentCall) {
     // Inner link of a chain — splice it out by re-pointing the next link.
@@ -1638,6 +1643,36 @@ export function removeAnimationFromScript(script: string, animationId: string): 
   } else {
     // Standalone tween — remove the whole statement.
     stmtPath.prune();
+  }
+}
+
+/**
+ * Recast twin of {@link dedupePositionWritesInScript} (acorn). Enforce "exactly
+ * one position write per element": keep `keepId` (or the LAST position write in
+ * source order if stale), remove every OTHER pure-position write
+ * (`propertyGroup === "position"` — tl.to/from/fromTo flat-or-keyframed, tl.set,
+ * standalone gsap.set, incl. degenerate duration:0 tweens). Non-position writes
+ * for the selector are left untouched.
+ */
+export function dedupePositionWritesInScript(
+  script: string,
+  selector: string,
+  keepId?: string,
+): string {
+  let parsed: ParsedGsapAst;
+  try {
+    parsed = parseGsapAst(script);
+  } catch {
+    return script;
+  }
+  const posWrites = parsed.located.filter(
+    (l) => l.animation.targetSelector === selector && l.animation.propertyGroup === "position",
+  );
+  if (posWrites.length <= 1) return script;
+  const keeper = posWrites.find((l) => l.id === keepId) ?? posWrites[posWrites.length - 1]!;
+  for (const l of posWrites) {
+    if (l === keeper) continue;
+    removeCallFromAst(l.call);
   }
   return recast.print(parsed.ast).code;
 }
@@ -1934,6 +1969,10 @@ function percentageFromKey(key: string): number {
 
 const PCT_TOLERANCE = 2;
 
+// Below this (tween-%) a retime resolves onto its own source keyframe → skip the
+// write. Mirrors the drag layer's NOOP_EPSILON so a deliberate 1% retime commits.
+const MOVE_NOOP_EPSILON_PCT = 0.05;
+
 function findKeyframePropByPct(
   kfNode: AstNode,
   percentage: number,
@@ -1955,8 +1994,11 @@ function buildKeyframeValueNode(
   properties: Record<string, number | string>,
   ease?: string,
 ): AstNode {
-  const entries = Object.entries(properties).map(([k, v]) => `${safeKey(k)}: ${valueToCode(v)}`);
-  if (ease) entries.push(`ease: ${JSON.stringify(ease)}`);
+  const effectiveEase = ease ?? (typeof properties.ease === "string" ? properties.ease : undefined);
+  const entries = Object.entries(properties)
+    .filter(([k]) => k !== "ease")
+    .map(([k, v]) => `${safeKey(k)}: ${valueToCode(v)}`);
+  if (effectiveEase) entries.push(`ease: ${JSON.stringify(effectiveEase)}`);
   return parseExpr(`{ ${entries.join(", ")} }`);
 }
 
@@ -2281,6 +2323,104 @@ export function removeKeyframeFromScript(
 }
 
 /**
+ * Retime a keyframe: move the keyframe at `fromPercentage` to `toPercentage`,
+ * PRESERVING its properties and per-keyframe ease (the Studio "Move to Playhead"
+ * gesture). Re-sorts keyframes by percentage. If a keyframe already exists at
+ * `toPercentage`, it is overwritten by the moved one (no duplicate). No-op when
+ * the animation/keyframe isn't found, the tween has no object-form keyframes, or
+ * the move resolves onto the same keyframe. Acorn twin: moveKeyframeInScript.
+ */
+export function moveKeyframeInScript(
+  script: string,
+  animationId: string,
+  fromPercentage: number,
+  toPercentage: number,
+): string {
+  const loc = locateAnimationWithFallback(script, animationId);
+  if (!loc) return script;
+  // Array-form keyframes can't host an arbitrary destination percentage —
+  // normalize to object form in place first (mirrors addKeyframeToScript).
+  const kfNode =
+    findKeyframesObjectNode(loc.target.call.varsArg) ??
+    convertArrayKeyframesToObjectNode(loc.target.call.varsArg);
+  if (!kfNode) return script;
+
+  const match = findKeyframePropByPct(kfNode, fromPercentage);
+  if (!match) return script;
+  // No-op ONLY for a negligible move (matches the drag's NOOP_EPSILON). The old
+  // `collision.prop === match.prop` guard dropped EVERY sub-PCT_TOLERANCE (2%)
+  // retime, because findKeyframePropByPct resolves the destination back onto the
+  // from-keyframe — so a deliberate 1% drag committed nothing. Acorn twin too.
+  if (Math.abs(fromPercentage - toPercentage) < MOVE_NOOP_EPSILON_PCT) return script;
+  // A destination keyframe is only a real collision (overwrite) when it's a
+  // DIFFERENT keyframe; resolving back onto the from-keyframe is not.
+  const dest = findKeyframePropByPct(kfNode, toPercentage);
+  const collision = dest && dest.prop !== match.prop ? dest : null;
+
+  // Reuse each keyframe's value node verbatim (preserves properties +
+  // per-keyframe ease + _auto). Drop the moved keyframe (and any destination
+  // keyframe it overwrites), re-key the moved value to toPercentage, then re-sort.
+  const movedValue = match.prop.value;
+  const entries: Array<{ pct: number; value: AstNode }> = [];
+  for (const prop of filterPercentageProps(kfNode)) {
+    if (prop === match.prop) continue;
+    if (collision && prop === collision.prop) continue;
+    const pct = percentageFromKey(propKeyName(prop) ?? "");
+    if (Number.isNaN(pct)) continue;
+    entries.push({ pct, value: prop.value });
+  }
+  entries.push({ pct: toPercentage, value: movedValue });
+  entries.sort((a, b) => a.pct - b.pct);
+
+  kfNode.properties = entries.map((e) => {
+    const p = parseExpr(`{ ${JSON.stringify(`${e.pct}%`)}: {} }`).properties[0];
+    p.value = e.value;
+    return p;
+  });
+  return recast.print(loc.parsed.ast).code;
+}
+
+/**
+ * Resize a keyframed tween's window (boundary drag-to-retime): set the tween's
+ * `position` + `duration` and RE-KEY each existing keyframe to its new percentage
+ * via `pctRemap` (each `{ from, to }` matches an existing keyframe by its current
+ * tween-% and re-keys it to `to`).
+ *
+ * Re-keys the percentage KEY in place, leaving every value node (so `_auto` +
+ * per-keyframe `ease` survive), the keyframes-object `easeEach`, and the OUTER
+ * tween `ease` untouched. Acorn twin: resizeKeyframedTweenInScript.
+ */
+export function resizeKeyframedTweenInScript(
+  script: string,
+  animationId: string,
+  newPosition: number,
+  newDuration: number,
+  pctRemap: ReadonlyArray<{ from: number; to: number }>,
+): string {
+  const loc = locateAnimationWithFallback(script, animationId);
+  if (!loc) return script;
+  // Array-form keyframes can't host an arbitrary re-keyed percentage —
+  // normalize to object form in place first (mirrors addKeyframeToScript).
+  const kfNode =
+    findKeyframesObjectNode(loc.target.call.varsArg) ??
+    convertArrayKeyframesToObjectNode(loc.target.call.varsArg);
+  if (!kfNode) return script;
+
+  const seen = new Set<AstNode>();
+  for (const { from, to } of pctRemap) {
+    const match = findKeyframePropByPct(kfNode, from);
+    if (!match || seen.has(match.prop)) continue;
+    seen.add(match.prop);
+    // Replace only the key node; the value node (incl. _auto + per-keyframe ease)
+    // stays verbatim. easeEach is a sibling non-percentage prop, left untouched.
+    match.prop.key = parseExpr(`{ ${JSON.stringify(`${to}%`)}: 0 }`).properties[0].key;
+  }
+
+  applyUpdatesToCall(loc.target.call, { position: newPosition, duration: newDuration });
+  return recast.print(loc.parsed.ast).code;
+}
+
+/**
  * Replace the properties (and optionally ease) at an existing keyframe percentage.
  */
 export function updateKeyframeInScript(
@@ -2463,7 +2603,13 @@ export function convertToKeyframesInScript(
 export function removeAllKeyframesFromScript(script: string, animationId: string): string {
   let loc = locateAnimationWithFallback(script, animationId);
   if (!loc) return script;
-  const kfNode = findKeyframesObjectNode(loc.target.call.varsArg);
+  // Array-form keyframes have no percentage-keyed props for
+  // filterPercentageProps to read — normalize to object form first (mirrors
+  // addKeyframeToScript/moveKeyframeInScript), otherwise this silently no-ops
+  // on every array-form tween.
+  const kfNode =
+    findKeyframesObjectNode(loc.target.call.varsArg) ??
+    convertArrayKeyframesToObjectNode(loc.target.call.varsArg);
   if (!kfNode) return script;
 
   const kfEntries = filterPercentageProps(kfNode)
@@ -2478,6 +2624,29 @@ export function removeAllKeyframesFromScript(script: string, animationId: string
   const collapseEntry = method === "from" ? kfEntries[0]! : kfEntries[kfEntries.length - 1]!;
   const record = objectExpressionToRecord(collapseEntry.prop.value, loc.parsed.scope);
   collapseKeyframesToFlat(loc.target.call.varsArg, record);
+  // Removing ALL keyframes HOLDS the element statically — collapse to a
+  // zero-duration immediateRender tween (a `gsap.set` equivalent), dropping the
+  // original duration/ease so the element does not re-animate from its base
+  // toward the collapsed value (which moved it out from under the selection).
+  removeVarsKey(loc.target.call.varsArg, "ease");
+  setVarsKey(loc.target.call.varsArg, "duration", 0);
+  setVarsKey(loc.target.call.varsArg, "immediateRender", true);
+
+  // Removing all keyframes of a POSITION tween leaves exactly ONE held state:
+  // strip every sibling position write for the same selector (stray gsap.set or a
+  // second tl.to/tl.set) so the collapsed hold is the lone position source. Only
+  // position siblings are stripped; rotation/opacity/etc. for the selector remain.
+  if (loc.target.animation.propertyGroup === "position") {
+    for (const l of loc.parsed.located) {
+      if (l === loc.target) continue;
+      if (
+        l.animation.targetSelector === loc.target.animation.targetSelector &&
+        l.animation.propertyGroup === "position"
+      ) {
+        removeCallFromAst(l.call);
+      }
+    }
+  }
 
   return recast.print(loc.parsed.ast).code;
 }

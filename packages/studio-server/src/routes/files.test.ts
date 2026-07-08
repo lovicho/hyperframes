@@ -239,6 +239,48 @@ tl.fromTo("#box", { opacity: 0, x: -50 }, { opacity: 1, x: 0, duration: 1.5, eas
     expect(result.parsed.animations[0].fromProperties?.x).toBe(-50);
   });
 
+  it("consolidate-position-writes leaves exactly one position write per selector", async () => {
+    const projectDir = createProjectDir();
+    const CORRUPTED = `<!DOCTYPE html><html><body><script data-hyperframes-gsap>
+const tl = gsap.timeline({ paused: true });
+tl.to("#box", { duration: 0, x: -766, y: 314, immediateRender: true }, 1.333);
+gsap.set("#box", { x: -520, y: 170 });
+gsap.set("#box", { rotation: 45 });
+</script></body></html>`;
+    writeHtml(projectDir, "dup.html", CORRUPTED);
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+
+    const res = await app.request("http://localhost/projects/demo/gsap-mutations/dup.html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "consolidate-position-writes", targetSelector: "#box" }),
+    });
+    const result = (await res.json()) as {
+      ok: boolean;
+      parsed: {
+        animations: Array<{
+          targetSelector: string;
+          propertyGroup?: string;
+          properties: Record<string, unknown>;
+        }>;
+      };
+    };
+
+    expect(res.status).toBe(200);
+    expect(result.ok).toBe(true);
+    const posWrites = result.parsed.animations.filter(
+      (a) => a.targetSelector === "#box" && a.propertyGroup === "position",
+    );
+    expect(posWrites).toHaveLength(1);
+    // The non-position rotation set is untouched.
+    expect(
+      result.parsed.animations.some(
+        (a) => a.targetSelector === "#box" && "rotation" in a.properties,
+      ),
+    ).toBe(true);
+  });
+
   it("rejects serialized non-finite mutation values before writing source", async () => {
     const projectDir = createProjectDir();
     writeHtml(projectDir, "comp.html", FROMTO_COMP);
@@ -406,6 +448,159 @@ tl.to("#box", { opacity: 1, duration: 1 }, 0);
     const fp = result.parsed.animations[0].fromProperties ?? {};
     expect(fp.x).toBeUndefined();
     expect(fp.opacity).toBe(0); // untouched
+  });
+
+  // Object-form keyframes — exercises the move-keyframe (retime) route.
+  const KEYFRAME_COMP = `<!DOCTYPE html><html><body data-duration="3">
+<div id="box" data-start="0" data-duration="3"></div>
+<script data-hyperframes-gsap>
+const tl = gsap.timeline();
+tl.to("#box", { keyframes: { "0%": { x: 0 }, "50%": { x: 100, opacity: 0.5, ease: "power2.in" }, "100%": { x: 200 } }, duration: 1.5 }, 0);
+</script>
+</body></html>`;
+
+  it("move-keyframe retimes a keyframe, preserving its value + ease", async () => {
+    const projectDir = createProjectDir();
+    writeHtml(projectDir, "kf.html", KEYFRAME_COMP);
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+
+    const anim = await getFirstAnimation(app, "kf.html");
+
+    const res = await app.request("http://localhost/projects/demo/gsap-mutations/kf.html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "move-keyframe",
+        animationId: anim.id,
+        fromPercentage: 50,
+        toPercentage: 75,
+      }),
+    });
+    const result = (await res.json()) as {
+      ok: boolean;
+      changed: boolean;
+      parsed: {
+        animations: Array<{
+          keyframes?: {
+            keyframes: Array<{
+              percentage: number;
+              properties: Record<string, number | string>;
+              ease?: string;
+            }>;
+          };
+        }>;
+      };
+    };
+
+    expect(res.status).toBe(200);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+    const kfs = result.parsed.animations[0].keyframes?.keyframes ?? [];
+    expect(kfs.map((k) => k.percentage)).toEqual([0, 75, 100]);
+    const moved = kfs.find((k) => k.percentage === 75)!;
+    expect(moved.properties).toEqual({ x: 100, opacity: 0.5 });
+    expect(moved.ease).toBe("power2.in");
+  });
+
+  it("move-keyframe rejects non-finite percentages before writing source", async () => {
+    const projectDir = createProjectDir();
+    writeHtml(projectDir, "kf.html", KEYFRAME_COMP);
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+
+    const anim = await getFirstAnimation(app, "kf.html");
+    const before = readFileSync(join(projectDir, "kf.html"), "utf-8");
+    const res = await app.request("http://localhost/projects/demo/gsap-mutations/kf.html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "move-keyframe",
+        animationId: anim.id,
+        fromPercentage: 50,
+        toPercentage: Number.NaN,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(readFileSync(join(projectDir, "kf.html"), "utf-8")).toBe(before);
+  });
+
+  it("resize-keyframed-tween grows the window + re-keys, preserving value + ease", async () => {
+    const projectDir = createProjectDir();
+    writeHtml(projectDir, "kf.html", KEYFRAME_COMP);
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+
+    const anim = await getFirstAnimation(app, "kf.html");
+
+    // Window [0, 1.5]; drag the last keyframe (abs 1.5) out to abs 3 → [0, 3].
+    // abs 0/0.75/3 over the new 3s window → 0 / 25 / 100.
+    const res = await app.request("http://localhost/projects/demo/gsap-mutations/kf.html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "resize-keyframed-tween",
+        animationId: anim.id,
+        position: 0,
+        duration: 3,
+        pctRemap: [
+          { from: 0, to: 0 },
+          { from: 50, to: 25 },
+          { from: 100, to: 100 },
+        ],
+      }),
+    });
+    const result = (await res.json()) as {
+      ok: boolean;
+      changed: boolean;
+      parsed: {
+        animations: Array<{
+          duration?: number;
+          keyframes?: {
+            keyframes: Array<{
+              percentage: number;
+              properties: Record<string, number | string>;
+              ease?: string;
+            }>;
+          };
+        }>;
+      };
+    };
+
+    expect(res.status).toBe(200);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.parsed.animations[0].duration).toBe(3);
+    const kfs = result.parsed.animations[0].keyframes?.keyframes ?? [];
+    expect(kfs.map((k) => k.percentage)).toEqual([0, 25, 100]);
+    const interior = kfs.find((k) => k.percentage === 25)!;
+    expect(interior.properties).toEqual({ x: 100, opacity: 0.5 });
+    expect(interior.ease).toBe("power2.in");
+  });
+
+  it("resize-keyframed-tween rejects non-finite numbers before writing source", async () => {
+    const projectDir = createProjectDir();
+    writeHtml(projectDir, "kf.html", KEYFRAME_COMP);
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+
+    const anim = await getFirstAnimation(app, "kf.html");
+    const before = readFileSync(join(projectDir, "kf.html"), "utf-8");
+    const res = await app.request("http://localhost/projects/demo/gsap-mutations/kf.html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "resize-keyframed-tween",
+        animationId: anim.id,
+        position: 0,
+        duration: Number.NaN,
+        pctRemap: [{ from: 0, to: 0 }],
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(readFileSync(join(projectDir, "kf.html"), "utf-8")).toBe(before);
   });
 
   it("remove-from-property returns 400 for a non-fromTo animation", async () => {

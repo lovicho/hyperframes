@@ -100,6 +100,47 @@ describe("applySoftReload", () => {
     expect(contentWindow.__hfStudioManualEditsApply).toHaveBeenCalled();
   });
 
+  it("seeks to the caller-supplied currentTime override instead of the iframe's own __player.getTime()", () => {
+    // Regression: the iframe's raw __player.getTime() (2.0 here, per the mock)
+    // can desync from the studio's authoritative scrub position — e.g. a
+    // keyframe-node drag parks the playhead via the store before this reload's
+    // async commit resolves. The rebuilt timeline must re-seek to the caller's
+    // value, not the iframe's possibly-stale one.
+    const { iframe, contentWindow } = buildMockIframe();
+    const result = applySoftReload(iframe, SCRIPT_TEXT, undefined, 0);
+    expect(result).toBe("applied");
+    expect(contentWindow.__player.seek).toHaveBeenCalledWith(0);
+  });
+
+  it("strips a stale inline transform from an orphaned (non-timeline-child) element", () => {
+    // Repro: an element dragged via gsap.set whose keyframes were then removed is
+    // no longer a timeline child, so the timeline-children sweep misses it. Its
+    // stale inline transform must still be cleared so it snaps back to its source
+    // (overlay) position instead of rendering offset.
+    const orphan = document.createElement("div");
+    orphan.style.cssText = "left: 1240px; top: 200px; transform: translate(449px, 0px)";
+    Object.assign(orphan, { _gsap: {} }); // GSAP cache marker (set by gsap.set)
+
+    const scriptEl = document.createElement("script");
+    scriptEl.textContent = 'const tl = gsap.timeline({ paused: true }); tl.to("#x", { x: 1 });';
+    const container = document.createElement("div");
+    container.appendChild(scriptEl);
+
+    const { iframe } = buildMockIframe({ gsap: { timeline: vi.fn(), set: vi.fn() } });
+    (iframe as unknown as { contentDocument: unknown }).contentDocument = {
+      querySelectorAll: (sel: string) =>
+        sel === "script:not([src])" ? [scriptEl] : sel === "[style*='transform']" ? [orphan] : [],
+      createElement: (tag: string) => document.createElement(tag),
+      body: container,
+      head: document.createElement("div"),
+    };
+
+    applySoftReload(iframe, SCRIPT_TEXT);
+
+    expect(orphan.style.transform).toBe(""); // stale GSAP transform stripped
+    expect(orphan.style.left).toBe("1240px"); // authored CSS base preserved
+  });
+
   it("wraps execution in __hfSuppressSceneMutations when available", () => {
     let suppressionCalled = false;
     const { iframe } = buildMockIframe({

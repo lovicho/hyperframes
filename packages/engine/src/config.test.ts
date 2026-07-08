@@ -1,13 +1,20 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveConfig, DEFAULT_CONFIG } from "./config.js";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { resolveConfig, DEFAULT_CONFIG, scaleProtocolTimeoutForComposition } from "./config.js";
 import { isLowMemorySystem } from "./services/systemMemory.js";
 
 describe("resolveConfig", () => {
   const savedEnv = new Map<string, string | undefined>();
 
   function setEnv(key: string, value: string) {
-    savedEnv.set(key, process.env[key]);
+    if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
     process.env[key] = value;
+  }
+
+  function unsetEnv(key: string) {
+    if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
+    delete process.env[key];
   }
 
   beforeEach(() => {
@@ -182,6 +189,113 @@ describe("resolveConfig", () => {
     });
   });
 
+  describe("extraction cache env", () => {
+    it("defaults the extract cache directory to tmpdir plus uid when env is unset", () => {
+      unsetEnv("HYPERFRAMES_EXTRACT_CACHE_DIR");
+
+      const config = resolveConfig();
+
+      expect(config.extractCacheDir).toBe(
+        join(tmpdir(), `hyperframes-extract-cache-${process.getuid?.() ?? "u"}`),
+      );
+    });
+
+    it("disables the extract cache when env is an opt-out token", () => {
+      for (const value of ["off", "none", "false", "0", " OFF "]) {
+        setEnv("HYPERFRAMES_EXTRACT_CACHE_DIR", value);
+
+        expect(resolveConfig().extractCacheDir).toBeUndefined();
+      }
+    });
+
+    it("uses an explicit extract cache path from env", () => {
+      setEnv("HYPERFRAMES_EXTRACT_CACHE_DIR", "/tmp/custom-hf-cache");
+
+      expect(resolveConfig().extractCacheDir).toBe("/tmp/custom-hf-cache");
+    });
+
+    it("converts HYPERFRAMES_EXTRACT_CACHE_MAX_MB to bytes", () => {
+      setEnv("HYPERFRAMES_EXTRACT_CACHE_MAX_MB", "512");
+
+      expect(resolveConfig().extractCacheMaxBytes).toBe(512 * 1024 ** 2);
+    });
+  });
+
+  describe("useDrawElement (PRODUCER_EXPERIMENTAL_FAST_CAPTURE)", () => {
+    it("default is clamped off on software-GPU hosts (page-side compositing preserved)", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "software");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      unsetEnv("HF_DE_WORKER_ENCODE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(false);
+      expect(config.enablePageSideCompositing).toBe(true);
+    });
+
+    it("default engages on macOS with a hardware-GPU browser", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      unsetEnv("HF_DE_WORKER_ENCODE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(process.platform === "darwin");
+    });
+
+    it("default engages on macOS with auto GPU mode (the stock CLI path)", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "auto");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      unsetEnv("HF_DE_WORKER_ENCODE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(process.platform === "darwin");
+    });
+
+    it("default requires worker-encode (the verified drain)", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
+      setEnv("HF_DE_WORKER_ENCODE", "false");
+      unsetEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(false);
+    });
+
+    it("explicit env opt-in skips the platform clamp", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "software");
+      setEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", "true");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(true);
+    });
+
+    it("env kill switch wins over the default", () => {
+      setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
+      setEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", "false");
+      const config = resolveConfig();
+      expect(config.useDrawElement).toBe(false);
+    });
+
+    it("explicit override wins over the env var", () => {
+      setEnv("PRODUCER_EXPERIMENTAL_FAST_CAPTURE", "true");
+      const config = resolveConfig({ useDrawElement: false });
+      expect(config.useDrawElement).toBe(false);
+    });
+
+    it("forces page-side compositing off when enabled (incompatible strategies)", () => {
+      const config = resolveConfig({ useDrawElement: true, enablePageSideCompositing: true });
+      expect(config.useDrawElement).toBe(true);
+      expect(config.enablePageSideCompositing).toBe(false);
+      // The auto-disable is recorded so compile-time gates can restore it.
+      expect(config.pageSideCompositingAutoDisabled).toBe(true);
+    });
+
+    it("does NOT mark auto-disabled when the caller explicitly opted out of page-side compositing", () => {
+      const config = resolveConfig({ useDrawElement: true, enablePageSideCompositing: false });
+      expect(config.enablePageSideCompositing).toBe(false);
+      // Explicit caller intent — a compile-time drawElement gate must not restore it.
+      expect(config.pageSideCompositingAutoDisabled).not.toBe(true);
+    });
+
+    it("leaves page-side compositing on when fast capture is off", () => {
+      const config = resolveConfig({ useDrawElement: false });
+      expect(config.enablePageSideCompositing).toBe(true);
+    });
+  });
+
   describe("lowMemoryMode", () => {
     it("forces on for truthy PRODUCER_LOW_MEMORY_MODE values", () => {
       setEnv("PRODUCER_LOW_MEMORY_MODE", "true");
@@ -209,5 +323,45 @@ describe("resolveConfig", () => {
       setEnv("PRODUCER_LOW_MEMORY_MODE", "true");
       expect(resolveConfig({ lowMemoryMode: false }).lowMemoryMode).toBe(false);
     });
+  });
+});
+
+describe("scaleProtocolTimeoutForComposition", () => {
+  const base = 300_000;
+
+  it("keeps the base timeout for a reference-or-smaller canvas", () => {
+    // 1080p == reference area → factor 1, no scale.
+    expect(scaleProtocolTimeoutForComposition(base, { width: 1920, height: 1080 })).toBe(base);
+    // Smaller than reference → still the base (never scales down).
+    expect(scaleProtocolTimeoutForComposition(base, { width: 1280, height: 720 })).toBe(base);
+  });
+
+  it("scales up proportionally with output pixel area", () => {
+    // 4K == 4× the reference area, which stays under the 30-minute ceiling.
+    const scaled = scaleProtocolTimeoutForComposition(base, { width: 3840, height: 2160 });
+    expect(scaled).toBeGreaterThan(base);
+    expect(scaled).toBe(base * 4);
+  });
+
+  it("clamps at the 30-minute ceiling for a pathological canvas", () => {
+    // 8K == 16× area → 4.8M ms, clamped to the 30-minute ceiling.
+    const scaled = scaleProtocolTimeoutForComposition(base, { width: 7680, height: 4320 });
+    expect(scaled).toBe(1_800_000);
+  });
+
+  it("never lowers a base timeout that already exceeds the ceiling", () => {
+    // Base above the 30-min ceiling + a large canvas: must not clamp below base.
+    const highBase = 2_400_000;
+    expect(
+      scaleProtocolTimeoutForComposition(highBase, { width: 3840, height: 2160 }),
+    ).toBeGreaterThanOrEqual(highBase);
+  });
+
+  it("returns the base timeout for degenerate dimensions", () => {
+    expect(scaleProtocolTimeoutForComposition(base, { width: 0, height: 1080 })).toBe(base);
+    expect(scaleProtocolTimeoutForComposition(base, { width: 1920, height: 0 })).toBe(base);
+    expect(scaleProtocolTimeoutForComposition(base, { width: Number.NaN, height: 1080 })).toBe(
+      base,
+    );
   });
 });

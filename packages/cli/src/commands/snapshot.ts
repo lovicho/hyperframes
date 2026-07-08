@@ -3,13 +3,48 @@ import { spawn } from "node:child_process";
 import { defineCommand } from "citty";
 import { existsSync, mkdtempSync, readFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve, join, relative, isAbsolute } from "node:path";
+import { resolve, join, relative, isAbsolute, basename } from "node:path";
 import { resolveProject } from "../utils/project.js";
+import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { c } from "../ui/colors.js";
 import { findFFmpeg } from "../browser/ffmpeg.js";
+import { parseAngle, type Camera } from "./motionShotLayout.js";
 import type { Example } from "./_examples.js";
+
+// Runs IN THE BROWSER (serialized into page.evaluate). Tilt the whole stage so
+// the REAL painted pixels are viewed from an orthogonal angle (FINDING [10]:
+// snapshot only captured the composition's own head-on camera, so 3D depth /
+// occlusion couldn't be verified). Same approach as motionShot's orbit camera:
+// make the composition root + its ancestor chain preserve-3d, strip intermediate
+// perspective, put one perspective on the root's parent (the lens) and rotate
+// the root — works on any composition shape (no #stage assumption).
+//
+// Kept as a self-contained copy of motionShot.ts's `applyOrbitCamera` because
+// that one is module-private; this is ~15 lines and sharing it would mean
+// touching motionShot.ts (out of scope for this change).
+function orbitStageSource(): string {
+  return `function(cam) {
+    var root = document.querySelector("[data-composition-id]")
+      || document.querySelector("#stage")
+      || document.body.firstElementChild
+      || document.body;
+    var n = root;
+    while (n && n !== document.body) {
+      n.style.transformStyle = "preserve-3d";
+      n.style.perspective = "none";
+      n = n.parentElement;
+    }
+    root.style.transformStyle = "preserve-3d";
+    root.style.perspective = "none";
+    root.style.transformOrigin = "50% 50%";
+    root.style.transform = "rotateX(" + cam.pitch + "deg) rotateY(" + cam.yaw + "deg)";
+    var lens = root.parentElement || document.body;
+    lens.style.perspective = "1600px";
+    lens.style.perspectiveOrigin = "50% 50%";
+  }`;
+}
 
 /** Maximum time a single-frame FFmpeg extract is allowed to run. Mirrors the
  * default applied by `@hyperframes/engine`'s `runFfmpeg` so a pathological
@@ -86,7 +121,61 @@ async function extractVideoFrameToBuffer(
 export const examples: Example[] = [
   ["Capture 5 key frames from a composition", "snapshot capture"],
   ["Capture 10 evenly-spaced frames", "snapshot capture --frames 10"],
+  ["View the 3D stage from an isometric angle", "snapshot capture --angle iso"],
 ];
+
+/**
+ * Seeking the timeline to EXACTLY `data-duration` renders blank — the runtime
+ * treats t >= clip-end as past-end and unmounts the clip (verified on a V4 3D
+ * artifact: t=8.0 of an 8s clip was pure white, t=7.76 showed the final hero).
+ * So the "final frame" must be sampled just-before-end. The blank tail observed
+ * spanned the last ~2.5% of the timeline, hence a 3%-of-duration nudge (floored
+ * at 50ms so very short clips still back off a readable amount).
+ */
+export function tailFrameTime(duration: number): number {
+  return Math.max(0, duration - Math.max(0.05, duration * 0.03));
+}
+
+/**
+ * Pick the seek positions to screenshot. Pure so the "tail is always captured"
+ * guarantee is unit-testable (FINDING [7]: evenly-spaced --at times skipped the
+ * final beat and short hero beats with no signal).
+ *
+ * - No --at: evenly-spaced frames, but the LAST point is moved off the exact
+ *   duration to `tailFrameTime` so it isn't blank.
+ * - With --at: the user's exact times are honoured, plus a guaranteed
+ *   end-of-timeline frame appended (unless `includeEnd` is false), so the tail
+ *   is never silently skipped. A near-duplicate of the tail is not added twice.
+ *
+ * `appendedTail` flags that the readable-tail frame was added on top of the
+ * caller's request — used to warn that short sub-interval beats between samples
+ * may still be missed and need explicit --at.
+ */
+export function computeSnapshotTimes(
+  duration: number,
+  opts: { frames: number; at?: number[]; includeEnd?: boolean },
+): { times: number[]; appendedTail: boolean } {
+  const includeEnd = opts.includeEnd !== false;
+  const tail = tailFrameTime(duration);
+  const round = (t: number) => Math.round(t * 1000) / 1000;
+
+  if (opts.at?.length) {
+    const times = opts.at.map(round);
+    // Only append if the user didn't already sample at/near the readable tail.
+    const hasTail = times.some((t) => Math.abs(t - tail) < 0.05 || t >= duration);
+    if (includeEnd && duration > 0 && !hasTail) {
+      return { times: [...times, round(tail)], appendedTail: true };
+    }
+    return { times, appendedTail: false };
+  }
+
+  const n = opts.frames;
+  if (n <= 1) return { times: [round(duration / 2)], appendedTail: false };
+  const times = Array.from({ length: n }, (_, i) => (i / (n - 1)) * duration);
+  // Replace the final (exact-duration, blank) point with the readable tail.
+  if (includeEnd) times[times.length - 1] = tail;
+  return { times: times.map(round), appendedTail: false };
+}
 
 /**
  * Render key frames from a composition as PNG screenshots.
@@ -94,7 +183,14 @@ export const examples: Example[] = [
  */
 async function captureSnapshots(
   projectDir: string,
-  opts: { frames?: number; timeout?: number; at?: number[] },
+  opts: {
+    frames?: number;
+    timeout?: number;
+    at?: number[];
+    outputDir?: string;
+    angle?: Camera;
+    includeEnd?: boolean;
+  },
 ): Promise<string[]> {
   const { bundleToSingleHtml } = await import("@hyperframes/core/compiler");
   const { ensureBrowser } = await import("../browser/manager.js");
@@ -176,26 +272,37 @@ async function captureSnapshots(
       // Extra settle time for media and animations to initialize
       await new Promise((r) => setTimeout(r, 1500));
 
-      // Font verification — report which fonts loaded vs fell back
+      // Font verification — split into loaded / errored / unused. Only status
+      // "error" is a real failure; a face still "unloaded"/"loading" after
+      // document.fonts.ready + the settle wait was simply never requested by any
+      // rendered text (an unused @font-face), so it is reported as "unused", not
+      // FAILED — printing it as FAILED alongside "loaded" read as a contradiction.
       const fontReport = await page
         .evaluate(() => {
           const loaded: string[] = [];
-          const failed: string[] = [];
+          const errored: string[] = [];
+          const unused: string[] = [];
           (document as any).fonts.forEach((f: any) => {
             const entry = `${f.family} (${f.weight} ${f.style})`;
             if (f.status === "loaded") loaded.push(entry);
-            else failed.push(entry + ` [${f.status}]`);
+            else if (f.status === "error") errored.push(entry);
+            else unused.push(entry);
           });
-          return { loaded, failed };
+          return { loaded, errored, unused };
         })
-        .catch(() => ({ loaded: [] as string[], failed: [] as string[] }));
+        .catch(() => ({ loaded: [] as string[], errored: [] as string[], unused: [] as string[] }));
 
-      if (fontReport.loaded.length > 0 || fontReport.failed.length > 0) {
-        console.log(
-          `\n   ${c.dim("Fonts loaded:")} ${fontReport.loaded.length > 0 ? fontReport.loaded.join(", ") : "none"}`,
-        );
-        if (fontReport.failed.length > 0) {
-          console.log(`   ${c.error("Fonts FAILED:")} ${fontReport.failed.join(", ")}`);
+      if (
+        fontReport.loaded.length > 0 ||
+        fontReport.errored.length > 0 ||
+        fontReport.unused.length > 0
+      ) {
+        const parts = [`${fontReport.loaded.length} loaded`];
+        if (fontReport.errored.length > 0) parts.push(`${fontReport.errored.length} failed`);
+        if (fontReport.unused.length > 0) parts.push(`${fontReport.unused.length} unused`);
+        console.log(`\n   ${c.dim("Fonts:")} ${parts.join(", ")}`);
+        if (fontReport.errored.length > 0) {
+          console.log(`   ${c.error("Fonts FAILED:")} ${fontReport.errored.join(", ")}`);
         }
       }
 
@@ -214,14 +321,27 @@ async function captureSnapshots(
         return [];
       }
 
-      // Calculate seek positions — explicit timestamps or evenly spaced
-      const positions: number[] = opts.at?.length
-        ? opts.at
-        : numFrames === 1
-          ? [duration / 2]
-          : Array.from({ length: numFrames }, (_, i) => (i / (numFrames - 1)) * duration);
+      // Calculate seek positions — explicit timestamps or evenly spaced, always
+      // including a readable end-of-timeline frame (FINDING [7]).
+      const { times: positions, appendedTail } = computeSnapshotTimes(duration, {
+        frames: numFrames,
+        at: opts.at,
+        includeEnd: opts.includeEnd,
+      });
+      if (appendedTail) {
+        console.log(
+          `   ${c.dim(`Note: added an end-of-timeline frame at ${positions[positions.length - 1]!.toFixed(2)}s. Short beats between your --at times may still be skipped — pass them explicitly.`)}`,
+        );
+      }
 
-      const snapshotDir = join(projectDir, "snapshots");
+      // Orthogonal camera (FINDING [10]) — re-applied after each seek inside the
+      // loop, since renderSeek may touch the stage's inline transform.
+      const cameraExpr =
+        opts.angle && (opts.angle.yaw !== 0 || opts.angle.pitch !== 0)
+          ? `(${orbitStageSource()})(${JSON.stringify(opts.angle)})`
+          : null;
+
+      const snapshotDir = opts.outputDir ?? join(projectDir, "snapshots");
       mkdirSync(snapshotDir, { recursive: true });
       try {
         const { readdirSync } = await import("node:fs");
@@ -307,6 +427,8 @@ async function captureSnapshots(
           requestAnimationFrame(function() { requestAnimationFrame(finish); });
         })`);
 
+        if (cameraExpr) await page.evaluate(cameraExpr);
+
         if (injectVideoFramesBatch && syncVideoFrameVisibility) {
           const active = await page.evaluate((t: number) => {
             return Array.from(document.querySelectorAll("video[data-start]"))
@@ -343,23 +465,41 @@ async function captureSnapshots(
 
           const updates: Array<{ videoId: string; dataUri: string }> = [];
           for (const v of active) {
-            let filePath: string | null = null;
+            // Resolve the <video> src to an FFmpeg input. Prefer a project-local
+            // file (fast, sandboxed); fall back to the absolute http(s) URL for
+            // remote assets (e.g. an S3-hosted clip embedded by an upstream agent)
+            // — FFmpeg reads http(s) input directly, and Chrome-headless can't seek
+            // it either, so without this those videos render blank in snapshots.
+            let ffmpegInput: string | null = null;
+            let inputIsLocal = false;
             try {
               const url = new URL(v.src);
               const decodedPath = decodeURIComponent(url.pathname).replace(/^\//, "");
               const candidate = resolve(projectDir, decodedPath);
               const rel = relative(projectDir, candidate);
               if (!rel.startsWith("..") && !isAbsolute(rel) && existsSync(candidate)) {
-                filePath = candidate;
+                ffmpegInput = candidate;
+                inputIsLocal = true;
+              } else if (url.protocol === "http:" || url.protocol === "https:") {
+                ffmpegInput = url.href;
               }
             } catch {
               /* unresolvable src (e.g. blob:, data:) — skip */
             }
-            if (!filePath) continue;
+            if (!ffmpegInput) continue;
+            // VP9-alpha detection shells out to ffprobe, which has no timeout.
+            // Only probe local files (filesystem-bounded); for remote URLs skip it
+            // (pass false) so a stalled host can't wedge snapshot in ffprobe before
+            // the bounded extractVideoFrameToBuffer below ever runs. Remote
+            // VP9-alpha overlays aren't a current path — revisit with a bounded
+            // ffprobe if one appears.
+            const useVp9AlphaDecoder = inputIsLocal
+              ? await shouldUseVp9AlphaDecoder(ffmpegInput)
+              : false;
             const png = await extractVideoFrameToBuffer(
-              filePath,
+              ffmpegInput,
               Math.max(0, v.relTime),
-              await shouldUseVp9AlphaDecoder(filePath),
+              useVp9AlphaDecoder,
             );
             if (!png) continue;
             updates.push({
@@ -387,7 +527,8 @@ async function captureSnapshots(
         const framePath = join(snapshotDir, filename);
 
         await page.screenshot({ path: framePath, type: "png" });
-        savedPaths.push(`snapshots/${filename}`);
+        const rel = relative(projectDir, framePath);
+        savedPaths.push(rel.startsWith("..") || isAbsolute(rel) ? framePath : rel);
       }
     } finally {
       await chromeBrowser.close();
@@ -410,6 +551,11 @@ export default defineCommand({
       description: "Project directory",
       required: false,
     },
+    output: {
+      type: "string",
+      alias: "o",
+      description: "Directory to write snapshots into (default: <project>/snapshots)",
+    },
     frames: {
       type: "string",
       description: "Number of evenly-spaced frames to capture (default: 5)",
@@ -423,6 +569,17 @@ export default defineCommand({
       type: "string",
       description: "Ms to wait for runtime to initialize (default: 5000)",
       default: "5000",
+    },
+    angle: {
+      type: "string",
+      description:
+        "Orthogonal 3D camera for depth/occlusion checks: a preset (front|iso|top|side) or 'yaw,pitch' degrees. Tilts the whole stage before screenshotting (real pixels, not bbox markers).",
+    },
+    end: {
+      type: "boolean",
+      description:
+        "Always include a readable end-of-timeline frame (default: true). Pass --no-end to capture only your exact --at times.",
+      default: true,
     },
     describe: {
       type: "string",
@@ -451,13 +608,29 @@ export default defineCommand({
           ? null
           : String(args.describe);
 
+    const camera = args.angle ? parseAngle(String(args.angle)) : undefined;
+
     const label = atTimestamps
       ? `${atTimestamps.length} frames at [${atTimestamps.map((t) => t.toFixed(1) + "s").join(", ")}]`
       : `${frames} frames`;
-    console.log(`${c.accent("◆")}  Capturing ${label} from ${c.accent(project.name)}`);
+    const angleLabel =
+      camera && (camera.yaw !== 0 || camera.pitch !== 0)
+        ? ` ${c.dim(`(angle yaw ${camera.yaw}° pitch ${camera.pitch}°)`)}`
+        : "";
+    console.log(`${c.accent("◆")}  Capturing ${label} from ${c.accent(project.name)}${angleLabel}`);
 
     try {
-      const paths = await captureSnapshots(project.dir, { frames, timeout, at: atTimestamps });
+      const snapshotDir = args.output
+        ? resolve(String(args.output))
+        : join(project.dir, "snapshots");
+      const paths = await captureSnapshots(project.dir, {
+        frames,
+        timeout,
+        at: atTimestamps,
+        outputDir: snapshotDir,
+        angle: camera,
+        includeEnd: args.end !== false,
+      });
 
       if (paths.length === 0) {
         console.log(
@@ -466,7 +639,9 @@ export default defineCommand({
         process.exit(1);
       }
 
-      console.log(`\n${c.success("◇")}  ${paths.length} snapshots saved to snapshots/`);
+      console.log(
+        `\n${c.success("◇")}  ${paths.length} snapshots saved to ${args.output ? snapshotDir : "snapshots/"}`,
+      );
       for (const p of paths) {
         console.log(`   ${p}`);
       }
@@ -474,7 +649,6 @@ export default defineCommand({
       // Generate contact sheet for quick AI review
       try {
         const { createSnapshotContactSheet } = await import("../capture/contactSheet.js");
-        const snapshotDir = join(project.dir, "snapshots");
         const sheets = await createSnapshotContactSheet(
           snapshotDir,
           join(snapshotDir, "contact-sheet.jpg"),
@@ -501,8 +675,6 @@ export default defineCommand({
             const { GoogleGenAI } = await import("@google/genai");
             const ai = new GoogleGenAI({ apiKey: geminiKey });
             const model = process.env.HYPERFRAMES_GEMINI_MODEL || "gemini-3.1-flash-lite-preview";
-            const snapshotDir = join(project.dir, "snapshots");
-
             const customQuestion =
               describeArg === "true"
                 ? "Describe this video composition frame in 1-2 sentences. Be specific and factual: what elements are visible, what text appears, is the frame blank/black/loading, what is the composition. Flag any obvious problems."
@@ -533,7 +705,7 @@ export default defineCommand({
 
             const results = await Promise.allSettled(
               paths.map(async (p) => {
-                const filename = p.replace("snapshots/", "");
+                const filename = basename(p);
                 const filePath = join(snapshotDir, filename);
                 if (!existsSync(filePath)) return { filename, desc: "file not found" };
                 const raw = readFileSync(filePath);
@@ -570,8 +742,7 @@ export default defineCommand({
                 descriptions.push(`## ${result.value.filename}`, `${result.value.desc}`, ``);
               } else {
                 // Log first failure so Gemini issues are visible rather than silent
-                const errMsg =
-                  result.reason instanceof Error ? result.reason.message : String(result.reason);
+                const errMsg = normalizeErrorMessage(result.reason);
                 descriptions.push(`## (error)`, `Gemini call failed: ${errMsg.slice(0, 120)}`, ``);
               }
             }
@@ -581,12 +752,12 @@ export default defineCommand({
             console.log(`   ${c.dim("descriptions.md")} (Gemini frame analysis)`);
           }
         } catch (descErr) {
-          const msg = descErr instanceof Error ? descErr.message : String(descErr);
+          const msg = normalizeErrorMessage(descErr);
           console.log(`   ${c.dim(`--describe failed: ${msg.slice(0, 80)}`)}`);
         }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = normalizeErrorMessage(err);
       console.error(`\n${c.error("✗")} Snapshot failed: ${msg}`);
       process.exit(1);
     }

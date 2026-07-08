@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <img src="https://static.heygen.ai/hyperframes-oss/docs/images/hyperframes-logo-motion-1280.webp" alt="HyperFrames demo: HTML code on the left transforms into a rendered video on the right" width="800">
+  <img src="docs/public/images/hyperframes-logo-motion-1280-trimmed.webp" alt="HyperFrames demo: HTML code on the left transforms into a rendered video on the right" width="800">
 </p>
 
 HyperFrames is an open-source framework for turning HTML, CSS, media, and seekable animations into deterministic MP4 videos. Use it locally with the CLI, from AI coding agents with skills, or as the rendering core behind hosted authoring workflows.
@@ -38,8 +38,10 @@ HyperFrames is an open-source framework for turning HTML, CSS, media, and seekab
 Install the HyperFrames skills, then describe the video you want:
 
 ```bash
-npx skills add heygen-com/hyperframes
+npx skills add heygen-com/hyperframes --full-depth --yes
 ```
+
+> `--full-depth` does a full clone of the repo's current `main`. Without it, `skills add` fetches the skills.sh registry blob, which lags `main` by hours — you'd get an older copy of a skill. (`hyperframes skills update` already installs full-depth.)
 
 Try a prompt like:
 
@@ -49,9 +51,9 @@ The skills teach agents the HyperFrames production loop: plan the video, write v
 
 ## Skills
 
-HyperFrames ships 19 skills agents load on demand. Read `/hyperframes` first — it's the router and capability map; it picks a workflow for any "make me a video" request and points to the domain skills below.
+HyperFrames ships 20 skills agents load on demand. Read `/hyperframes` first — it's the router and capability map; it picks a workflow for any "make me a…" request — video, deck, or composition port — and points to the domain skills below.
 
-Run `npx skills add heygen-com/hyperframes` for the interactive picker, `npx skills add heygen-com/hyperframes --all` to install all 19 at once (skips the picker), or `npx skills add heygen-com/hyperframes --skill <name>` for just one (bare name, no leading `/`).
+Run `npx skills add heygen-com/hyperframes --full-depth` for the interactive picker, `npx skills add heygen-com/hyperframes --all --full-depth` to install all 20 at once (skips the picker), or `npx skills add heygen-com/hyperframes --skill <name> --full-depth` for just one (bare name, no leading `/`). Keep `--full-depth` — it installs the current `main`; without it `skills add` fetches the skills.sh blob, which lags by hours.
 
 ### Router
 
@@ -79,15 +81,16 @@ Run `npx skills add heygen-com/hyperframes` for the interactive picker, `npx ski
 
 Atomic capabilities the creation workflows compose against — pull one when you need that specific layer.
 
-| Skill                    | Covers                                                                                                                                                                 |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/hyperframes-core`      | The composition contract — `data-*` timing attributes, `class="clip"`, tracks, sub-compositions, variables, framework-owned media playback, determinism rules.         |
-| `/hyperframes-animation` | All animation knowledge — atomic motion rules, scene blueprints, transitions, runtime adapters (GSAP / Lottie / Three.js / Anime.js / CSS / WAAPI / TypeGPU).          |
-| `/hyperframes-creative`  | Non-animation creative direction — `frame.md` / `design.md`, palettes, typography, narration, beat planning, audio-reactive visuals, composition patterns.             |
-| `/hyperframes-media`     | Audio + media — TTS voiceover, background music, sound effects, Whisper transcription, background removal, caption authoring (one shared audio engine).                |
-| `/media-use`             | Resolve any media need (BGM, SFX, image, icon) into a frozen local file + ledger record. One verb (`resolve`) over the HeyGen catalog with manifest tracking.          |
-| `/hyperframes-cli`       | CLI dev loop — `init`, `lint`, `validate`, `inspect`, `preview`, `render`, `publish`, `doctor`, plus AWS Lambda cloud rendering (`lambda deploy / render / progress`). |
-| `/hyperframes-registry`  | Install and wire registry blocks and components into compositions via `hyperframes add`. Authoring a new block or component to contribute upstream.                    |
+| Skill                    | Covers                                                                                                                                                                                                                                                                                              |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/hyperframes-core`      | The composition contract — `data-*` timing attributes, `class="clip"`, tracks, sub-compositions, variables, framework-owned media playback, determinism rules.                                                                                                                                      |
+| `/hyperframes-animation` | All animation knowledge — atomic motion rules, scene blueprints, transitions, runtime adapters (GSAP / Lottie / Three.js / Anime.js / CSS / WAAPI / TypeGPU).                                                                                                                                       |
+| `/hyperframes-keyframes` | Seek-safe keyframe authoring across runtimes — GSAP timelines, CSS keyframes, Anime.js, WAAPI, FLIP, paths, masks, SVG morph/draw, 3D depth — plus `hyperframes keyframes` diagnostics for rendered motion.                                                                                         |
+| `/hyperframes-creative`  | Non-animation creative direction — `frame.md` / `design.md`, palettes, typography, narration, beat planning, audio-reactive visuals, composition patterns.                                                                                                                                          |
+| `/media-use`             | The media OS — resolve any media need (BGM, SFX, image, icon, voice) into a frozen local file + ledger record, generate via TTS/music/image models when the catalog misses, transcribe, caption, remove backgrounds, and reuse assets across projects. One shared audio engine + manifest tracking. |
+| `/hyperframes-cli`       | CLI dev loop — `init`, `lint`, `validate`, `inspect`, `preview`, `render`, `publish`, `doctor`, plus AWS Lambda cloud rendering (`lambda deploy / render / progress`).                                                                                                                              |
+| `/hyperframes-registry`  | Install and wire registry blocks and components into compositions via `hyperframes add`. Authoring a new block or component to contribute upstream.                                                                                                                                                 |
+| `/figma`                 | Import Figma assets, tokens, components, and storyboard sections → reconstructed motion (frames read as states, not slides) (REST/CLI) plus Motion animations (MCP) and shaders (MCP source / native export) into a composition.                                                                    |
 
 For visual design handoff workflows, see the [Claude Design guide](https://hyperframes.heygen.com/guides/claude-design) and [Open Design guide](https://hyperframes.heygen.com/guides/open-design).
 

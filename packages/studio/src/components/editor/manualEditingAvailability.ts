@@ -64,12 +64,6 @@ export const STUDIO_GSAP_PANEL_ENABLED = resolveStudioBooleanEnvFlag(
   true,
 );
 
-export const STUDIO_COLOR_GRADING_ENABLED = resolveStudioBooleanEnvFlag(
-  env,
-  ["VITE_STUDIO_ENABLE_COLOR_GRADING", "VITE_STUDIO_COLOR_GRADING_ENABLED"],
-  false,
-);
-
 export const STUDIO_KEYFRAMES_ENABLED = resolveStudioBooleanEnvFlag(
   env,
   ["VITE_STUDIO_ENABLE_KEYFRAMES", "VITE_STUDIO_KEYFRAMES_ENABLED"],
@@ -80,16 +74,6 @@ export const STUDIO_RAZOR_TOOL_ENABLED = resolveStudioBooleanEnvFlag(
   env,
   ["VITE_STUDIO_ENABLE_RAZOR_TOOL", "VITE_STUDIO_RAZOR_TOOL_ENABLED"],
   true,
-);
-
-// Storyboard view: a top-level, toggleable view that renders STORYBOARD.md as a
-// contact sheet of live HTML frame tiles, replacing the timeline/preview stage.
-// Opt-in / off by default until the experience is ready for broad exposure.
-//   VITE_STUDIO_ENABLE_STORYBOARD=1 npx hyperframes preview
-export const STUDIO_STORYBOARD_ENABLED = resolveStudioBooleanEnvFlag(
-  env,
-  ["VITE_STUDIO_ENABLE_STORYBOARD", "VITE_STUDIO_STORYBOARD_ENABLED"],
-  false,
 );
 
 export const STUDIO_PREVIEW_SELECTION_ENABLED = STUDIO_INSPECTOR_PANELS_ENABLED;

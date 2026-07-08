@@ -121,6 +121,7 @@ const commandLoaders = {
   lint: () => import("./commands/lint.js").then((m) => m.default),
   beats: () => import("./commands/beats.js").then((m) => m.default),
   inspect: () => import("./commands/inspect.js").then((m) => m.default),
+  keyframes: () => import("./commands/keyframes.js").then((m) => m.default),
   layout: () => import("./commands/layout.js").then((m) => m.default),
   info: () => import("./commands/info.js").then((m) => m.default),
   compositions: () => import("./commands/compositions.js").then((m) => m.default),
@@ -143,6 +144,7 @@ const commandLoaders = {
   cloudrun: () => import("./commands/cloudrun.js").then((m) => m.default),
   cloud: () => import("./commands/cloud.js").then((m) => m.default),
   auth: () => import("./commands/auth.js").then((m) => m.default),
+  figma: () => import("./commands/figma.js").then((m) => m.default),
 };
 
 // Wrap each command's run() so a thrown failure reports its reason to telemetry

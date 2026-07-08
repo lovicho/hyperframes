@@ -1,9 +1,10 @@
 // fallow-ignore-file code-duplication
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { normalizeErrorMessage } from "../utils/errorMessage.js";
 
 type PuppeteerBrowsers = typeof import("@puppeteer/browsers");
 
@@ -11,7 +12,7 @@ async function loadPuppeteerBrowsers(): Promise<PuppeteerBrowsers> {
   try {
     return await import("@puppeteer/browsers");
   } catch (err) {
-    const cause = err instanceof Error ? err.message : String(err);
+    const cause = normalizeErrorMessage(err);
     throw new Error(
       `Failed to load @puppeteer/browsers: ${cause}\n` +
         `Fix: run \`npm install\` or \`bun install\` to restore missing packages, then retry.`,
@@ -20,12 +21,105 @@ async function loadPuppeteerBrowsers(): Promise<PuppeteerBrowsers> {
 }
 
 const CHROME_VERSION = "131.0.6778.85";
+const CACHE_ROOT_DIR = join(homedir(), ".cache", "hyperframes");
 const CACHE_DIR = join(homedir(), ".cache", "hyperframes", "chrome");
 // Puppeteer's managed cache — where `@puppeteer/browsers install
 // chrome-headless-shell` (and `puppeteer install`) drop binaries. The engine's
 // `resolveHeadlessShellPath` scans the same directory; the CLI must look here
 // too or it silently picks system Chrome over a perfectly good headless-shell.
 const PUPPETEER_CACHE_DIR = join(homedir(), ".cache", "puppeteer", "chrome-headless-shell");
+
+// `@puppeteer/browsers`' install() has no concurrency guard of its own — two
+// CLI invocations that both miss the cache at the same time both extract into
+// the same target directory simultaneously. A killed/interrupted extraction
+// from that race can leave a binary that merely *exists* (so doctor/lint/
+// validate all report healthy) while missing bits a clean install sets (e.g.
+// macOS Gatekeeper/quarantine + GPU/Metal entitlements) — reported as headless
+// GPU frame capture silently returning all-black frames despite --browser-gpu
+// auto/hardware, invisible until someone inspects the actual pixels.
+//
+// mkdirSync is atomic (EEXIST if another process already holds it), so it
+// doubles as a zero-dependency cross-process mutex — no lockfile library needed.
+const INSTALL_LOCK_DIR = join(CACHE_ROOT_DIR, ".chrome.install.lock");
+const INSTALL_RECLAIM_LOCK_DIR = join(CACHE_ROOT_DIR, ".chrome.install.reclaim.lock");
+const INSTALL_LOCK_TIMEOUT_MS = 120_000; // generous: a real download+extract can take a while
+const INSTALL_LOCK_POLL_MS = 200;
+
+function isErrno(err: unknown, code: string): boolean {
+  return (err as NodeJS.ErrnoException).code === code;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tryAcquireDirLock(lockDir: string): boolean {
+  try {
+    // recursive:false is load-bearing: it's what makes this throw EEXIST
+    // (and therefore act as a mutex) instead of silently no-op'ing like
+    // `mkdir -p` when the lock dir already exists.
+    mkdirSync(lockDir, { recursive: false });
+    return true;
+  } catch (err) {
+    if (!isErrno(err, "EEXIST")) throw err;
+    return false;
+  }
+}
+
+function reclaimStaleInstallLock(timeoutMs: number): void {
+  if (!tryAcquireDirLock(INSTALL_RECLAIM_LOCK_DIR)) return;
+  try {
+    const mtimeMs = statSync(INSTALL_LOCK_DIR).mtimeMs;
+    if (Date.now() - mtimeMs > timeoutMs) {
+      rmSync(INSTALL_LOCK_DIR, { recursive: true, force: true });
+    }
+  } catch (err) {
+    if (!isErrno(err, "ENOENT")) throw err;
+  } finally {
+    rmSync(INSTALL_RECLAIM_LOCK_DIR, { recursive: true, force: true });
+  }
+}
+
+// timeoutMs/pollMs are parameters (not just the module constants) so tests can
+// exercise the reclaim-on-timeout branch with real but tiny waits instead of
+// mocking Date.now()/setTimeout through the full ensureBrowser call graph.
+export async function withInstallLock<T>(
+  fn: () => Promise<T>,
+  timeoutMs = INSTALL_LOCK_TIMEOUT_MS,
+  pollMs = INSTALL_LOCK_POLL_MS,
+): Promise<T> {
+  // recursive:false below needs the parent to already exist (unlike `mkdir -p`).
+  // Keep lock dirs outside CACHE_DIR so force-clearing the Chrome cache cannot
+  // delete another installer's in-flight lock.
+  if (!existsSync(CACHE_ROOT_DIR)) mkdirSync(CACHE_ROOT_DIR, { recursive: true });
+  let deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (existsSync(INSTALL_RECLAIM_LOCK_DIR)) {
+      await sleep(pollMs);
+      continue;
+    }
+    if (tryAcquireDirLock(INSTALL_LOCK_DIR)) {
+      rmSync(INSTALL_RECLAIM_LOCK_DIR, { recursive: true, force: true });
+      break;
+    }
+    if (Date.now() > deadline) {
+      // The reclaim gate matters when multiple waiters cross the timeout at
+      // once: without it, waiter A can delete the stale lock and acquire a
+      // fresh one, then waiter B (whose old deadline also expired) can delete
+      // A's fresh lock. The gate serializes reclaimers, and the mtime re-check
+      // after the gate prevents deleting a fresh lock another waiter just won.
+      reclaimStaleInstallLock(timeoutMs);
+      deadline = Date.now() + timeoutMs;
+      continue;
+    }
+    await sleep(pollMs);
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(INSTALL_LOCK_DIR, { recursive: true, force: true });
+  }
+}
 
 export type BrowserSource = "env" | "cache" | "system" | "download";
 
@@ -36,11 +130,31 @@ export interface BrowserResult {
 
 export interface EnsureBrowserOptions {
   onProgress?: (downloadedBytes: number, totalBytes: number) => void;
+  // Purge any cached HF-managed download before resolving, so a stale or
+  // partially-extracted install can't make the retry look like a no-op.
+  force?: boolean;
 }
 
 interface CacheLookupResult {
   result?: BrowserResult;
   staleHyperframesCachePath?: string;
+  // Root install-folder path for the stale entry (InstalledBrowser#path), NOT
+  // the missing executablePath above — this is what actually needs deleting.
+  staleInstallPath?: string;
+}
+
+/**
+ * Remove one browser version's install directory (not the whole CACHE_DIR).
+ * @puppeteer/browsers' install() treats an existing-but-incomplete directory
+ * as already installed and throws "folder exists but executable is missing"
+ * rather than re-extracting — so an extraction interrupted by a Windows AV
+ * lock, a sleep/wake cycle, or ctrl-C (left with only alphabetically-early
+ * files like ABOUT/LICENSE, no exe) wedges every subsequent ensure/render
+ * with the same error until someone manually deletes the directory. Purging
+ * it first makes the retry actually retry.
+ */
+function purgeStaleInstall(installPath: string): void {
+  rmSync(installPath, { recursive: true, force: true });
 }
 
 // --- Internal helpers -------------------------------------------------------
@@ -104,13 +218,27 @@ async function findFromCache(): Promise<CacheLookupResult> {
   // no puppeteer-cache binary exists.
   if (existsSync(CACHE_DIR)) {
     const { Browser, getInstalledBrowsers } = await loadPuppeteerBrowsers();
-    const installed = await getInstalledBrowsers({ cacheDir: CACHE_DIR });
+    // A corrupt cache (stub file where a browser dir is expected, malformed
+    // metadata) makes getInstalledBrowsers throw. Treat that as "no cached
+    // browser" so resolution falls through to system/download instead of
+    // crashing every caller.
+    let installed: Awaited<ReturnType<typeof getInstalledBrowsers>>;
+    try {
+      installed = await getInstalledBrowsers({ cacheDir: CACHE_DIR });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      const suffix = code ? ` (${code})` : "";
+      console.warn(
+        `[hyperframes] Browser cache read failed${suffix}: ${normalizeErrorMessage(err)}. Falling back to system Chrome or a fresh download.`,
+      );
+      installed = [];
+    }
     const match = installed.find((b) => b.browser === Browser.CHROMEHEADLESSSHELL);
     if (match && existsSync(match.executablePath)) {
       return { result: { executablePath: match.executablePath, source: "cache" } };
     }
     if (match) {
-      return { staleHyperframesCachePath: match.executablePath };
+      return { staleHyperframesCachePath: match.executablePath, staleInstallPath: match.path };
     }
   }
 
@@ -266,9 +394,12 @@ export async function findBrowser(): Promise<BrowserResult | undefined> {
       `[browser] Cached binary missing at ${fromCache.staleHyperframesCachePath} — re-downloading...`,
     );
     try {
-      return await downloadBrowser();
+      return await withInstallLock(async () => {
+        if (fromCache.staleInstallPath) purgeStaleInstall(fromCache.staleInstallPath);
+        return downloadBrowser();
+      });
     } catch (err) {
-      const cause = err instanceof Error ? err.message : String(err);
+      const cause = normalizeErrorMessage(err);
       throw new Error(
         `Cached Chrome binary was missing at ${fromCache.staleHyperframesCachePath}, and re-download failed: ${cause}\n` +
           `Run \`hyperframes browser ensure --force\` to re-download.`,
@@ -340,22 +471,88 @@ export async function ensureBrowser(options?: EnsureBrowserOptions): Promise<Bro
   const fromEnv = findFromEnv();
   if (fromEnv) return fromEnv;
 
-  const fromCache = await findFromCache();
-  if (fromCache.result) return fromCache.result;
-  if (fromCache.staleHyperframesCachePath) {
-    console.warn(
-      `[browser] Cached binary missing at ${fromCache.staleHyperframesCachePath} — re-downloading...`,
-    );
+  if (!options?.force) {
+    const fromCache = await findFromCache();
+    if (fromCache.result) return fromCache.result;
+    if (fromCache.staleHyperframesCachePath) {
+      console.warn(
+        `[browser] Cached binary missing at ${fromCache.staleHyperframesCachePath} — re-downloading...`,
+      );
+      return withInstallLock(async () => {
+        if (fromCache.staleInstallPath) purgeStaleInstall(fromCache.staleInstallPath);
+        return downloadBrowser(options);
+      });
+    }
+
+    const fromSystem = findFromSystem();
+    if (fromSystem) {
+      warnSystemFallbackOnce(fromSystem.executablePath);
+      return fromSystem;
+    }
+  }
+
+  return withInstallLock(async () => {
+    if (options?.force) {
+      // `--force` means "always get a fresh managed download" — purging the
+      // whole HF-managed cache after acquiring the install lock keeps two
+      // concurrent force retries from deleting each other's in-flight lock or
+      // partially extracted install.
+      clearBrowser();
+    }
+
+    // Re-check after acquiring the lock: a concurrent invocation may have
+    // finished installing while we were waiting, in which case reuse its
+    // result instead of downloading and extracting a second time. Skipped
+    // under --force, which already purged and always wants a fresh download.
+    if (!options?.force) {
+      const afterLock = await findFromCache();
+      if (afterLock.result) return afterLock.result;
+      if (afterLock.staleInstallPath) purgeStaleInstall(afterLock.staleInstallPath);
+    }
     return downloadBrowser(options);
-  }
+  });
+}
 
-  const fromSystem = findFromSystem();
-  if (fromSystem) {
-    warnSystemFallbackOnce(fromSystem.executablePath);
-    return fromSystem;
-  }
+/**
+ * True when `err` is a corrupt/truncated-archive extraction failure, as opposed
+ * to a network error or a genuine platform problem. A partially-downloaded or
+ * interrupted browser archive left in the cache makes `install()`'s extraction
+ * throw "invalid end-of-central-directory" (a zip whose central directory is
+ * missing/truncated). Left unhandled, that hard-blocks every render on the box
+ * until the user manually clears the cache — so we detect it and re-download.
+ */
+export function isCorruptArchiveError(err: unknown): boolean {
+  const msg = normalizeErrorMessage(err).toLowerCase();
+  return (
+    msg.includes("end of central directory") ||
+    msg.includes("end-of-central-directory") ||
+    msg.includes("invalid or corrupt") ||
+    msg.includes("corrupt zip") ||
+    msg.includes("not a zip") ||
+    msg.includes("unexpected end of") ||
+    msg.includes("corrupted")
+  );
+}
 
-  return downloadBrowser(options);
+/**
+ * Run a browser install; if it fails because the cached archive is corrupt,
+ * clear the cache (dropping the bad archive) and retry the download exactly
+ * once. Non-corruption errors propagate unchanged, and a second corruption
+ * propagates too (no infinite retry).
+ */
+export async function installWithCorruptArchiveRecovery<T>(
+  runInstall: () => Promise<T>,
+  clearCache: () => void,
+  onRecover?: (err: unknown) => void,
+): Promise<T> {
+  try {
+    return await runInstall();
+  } catch (err) {
+    if (!isCorruptArchiveError(err)) throw err;
+    onRecover?.(err);
+    clearCache();
+    return await runInstall();
+  }
 }
 
 async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserResult> {
@@ -370,13 +567,26 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
     throw new Error(`Unsupported platform: ${process.platform} ${process.arch}`);
   }
 
-  const installed = await install({
-    cacheDir: CACHE_DIR,
-    browser: Browser.CHROMEHEADLESSSHELL,
-    buildId: CHROME_VERSION,
-    platform,
-    downloadProgressCallback: options?.onProgress,
-  });
+  const runInstall = () =>
+    install({
+      cacheDir: CACHE_DIR,
+      browser: Browser.CHROMEHEADLESSSHELL,
+      buildId: CHROME_VERSION,
+      platform,
+      downloadProgressCallback: options?.onProgress,
+    });
+
+  const installed = await installWithCorruptArchiveRecovery(
+    runInstall,
+    () => {
+      rmSync(CACHE_DIR, { recursive: true, force: true });
+      mkdirSync(CACHE_DIR, { recursive: true });
+    },
+    (err) =>
+      console.warn(
+        `[hyperframes] Cached browser archive was corrupt (${normalizeErrorMessage(err)}); clearing the cache and re-downloading.`,
+      ),
+  );
 
   return { executablePath: installed.executablePath, source: "download" };
 }

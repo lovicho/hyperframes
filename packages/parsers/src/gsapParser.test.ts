@@ -20,6 +20,7 @@ import {
   addMotionPathToScript,
   convertToKeyframesInScript,
   removeAllKeyframesFromScript,
+  dedupePositionWritesInScript,
   addAnimationWithKeyframesToScript,
   splitAnimationsInScript,
   splitIntoPropertyGroups,
@@ -1655,6 +1656,26 @@ describe("keyframe mutations", () => {
     expect(kfs[1].properties.x).toBe(999);
   });
 
+  it("addKeyframeToScript — preserves exactly one ease when updating an eased keyframe", () => {
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#hero", {
+        keyframes: { "0%": { scale: 1 }, "60%": { scale: 1.18, ease: "power2.out" }, "100%": { scale: 1 } },
+        duration: 2
+      }, 0);
+    `;
+    const id = getAnimId(script);
+    const updated = addKeyframeToScript(script, id, 60, { scale: 1.18, x: 10, y: 20 });
+    const reparsed = parseGsapScript(updated);
+    const keyframe = reparsed.animations[0].keyframes!.keyframes.find(
+      (kf) => kf.percentage === 60,
+    )!;
+
+    expect((updated.match(/ease:\s*"power2\.out"/g) ?? []).length).toBe(1);
+    expect(keyframe.ease).toBe("power2.out");
+    expect(keyframe.properties).toMatchObject({ scale: 1.18, x: 10, y: 20 });
+  });
+
   // ── backfillDefaults: editing one keyframe must not move the others ──────
   // UX invariant (CapCut/AE): keyframes are independent. Introducing a property
   // to one keyframe (e.g. `y` on an x-only tween) must backfill the other
@@ -2192,6 +2213,10 @@ describe("keyframe mutations", () => {
     expect(anim.keyframes).toBeUndefined();
     expect(anim.properties.x).toBe(200);
     expect(anim.properties.opacity).toBe(1);
+    // Removing all keyframes must HOLD statically (gsap.set equivalent): zero
+    // duration + immediateRender so the element does not re-animate.
+    expect(anim.duration).toBe(0);
+    expect(anim.extras?.immediateRender).toBe("__raw:true");
   });
 });
 
@@ -2923,5 +2948,81 @@ describe("base gsap.set (off-timeline global hold)", () => {
     `;
     const sets = parseGsapScript(script).animations.filter((a) => a.method === "set");
     expect(sets).toHaveLength(0);
+  });
+});
+
+describe("single position write per element (consolidation)", () => {
+  const posWritesFor = (script: string, selector: string) =>
+    parseGsapScript(script).animations.filter(
+      (a) => a.targetSelector === selector && a.propertyGroup === "position",
+    );
+
+  // The real corruption: a degenerate `tl.to(...,{duration:0,x,y})` AND a stray
+  // `gsap.set(...,{x,y})` for the same element. The later write overrides the
+  // earlier, so the element "can't move".
+  const CORRUPTED = `
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#box", { duration: 0, x: -766, y: 314, immediateRender: true }, 1.333);
+    gsap.set("#box", { x: -520, y: 170 });
+    gsap.set("#box", { rotation: 45 });
+    tl.to("#box", { opacity: 1, duration: 1 }, 0);
+  `;
+
+  it("dedupe collapses 2+ position writes to exactly one (keeping keepId)", () => {
+    expect(posWritesFor(CORRUPTED, "#box")).toHaveLength(2);
+    const keepId = posWritesFor(CORRUPTED, "#box").find((a) => a.method === "to")!.id;
+    const out = dedupePositionWritesInScript(CORRUPTED, "#box", keepId);
+    const kept = posWritesFor(out, "#box");
+    expect(kept).toHaveLength(1);
+    // Kept the tl.to; stray gsap.set position is gone.
+    expect(kept[0].method).toBe("to");
+    expect(out).not.toMatch(/gsap\.set\("#box",\s*\{\s*x:/);
+  });
+
+  it("dedupe leaves non-position writes for the selector untouched", () => {
+    const out = dedupePositionWritesInScript(CORRUPTED, "#box", undefined);
+    const anims = parseGsapScript(out).animations;
+    // rotation set + opacity tween survive (separate animations, not position).
+    expect(anims.some((a) => a.targetSelector === "#box" && "rotation" in a.properties)).toBe(true);
+    expect(anims.some((a) => a.targetSelector === "#box" && "opacity" in a.properties)).toBe(true);
+    expect(posWritesFor(out, "#box")).toHaveLength(1);
+  });
+
+  it("dedupe keeps the LAST position write when keepId is stale", () => {
+    const out = dedupePositionWritesInScript(CORRUPTED, "#box", "does-not-exist");
+    const kept = posWritesFor(out, "#box");
+    expect(kept).toHaveLength(1);
+    // Last in source order is the gsap.set(x:-520) — runtime-effective one.
+    expect(kept[0].method).toBe("set");
+    expect(kept[0].properties.x).toBe(-520);
+  });
+
+  it("dedupe + update yields exactly one position write with the NEW value", () => {
+    const keepId = posWritesFor(CORRUPTED, "#box").find((a) => a.method === "to")!.id;
+    let out = dedupePositionWritesInScript(CORRUPTED, "#box", keepId);
+    const surviving = posWritesFor(out, "#box")[0];
+    out = updateAnimationInScript(out, surviving.id, { properties: { x: 99, y: 42 } });
+    const kept = posWritesFor(out, "#box");
+    expect(kept).toHaveLength(1);
+    expect(kept[0].properties.x).toBe(99);
+    expect(kept[0].properties.y).toBe(42);
+  });
+
+  it("remove-all-keyframes strips position residue, leaving one held set", () => {
+    const script = `
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#box", { keyframes: { "0%": { x: 0 }, "100%": { x: 200 } }, duration: 2 }, 0);
+      gsap.set("#box", { x: -520, y: 170 });
+      tl.to("#box", { opacity: 1, duration: 1 }, 0);
+    `;
+    const kfTween = posWritesFor(script, "#box").find((a) => a.keyframes)!;
+    const out = removeAllKeyframesFromScript(script, kfTween.id);
+    const kept = posWritesFor(out, "#box");
+    expect(kept).toHaveLength(1);
+    expect(kept[0].keyframes).toBeUndefined();
+    expect(kept[0].duration).toBe(0);
+    // The stray gsap.set position residue is gone; opacity tween survives.
+    expect(out).not.toMatch(/gsap\.set\("#box",\s*\{\s*x:/);
+    expect(parseGsapScript(out).animations.some((a) => "opacity" in a.properties)).toBe(true);
   });
 });

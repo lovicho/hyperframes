@@ -26,6 +26,7 @@ import { createRequire } from "node:module";
 import * as clack from "@clack/prompts";
 import { c } from "../ui/colors.js";
 import { isDevMode } from "../utils/env.js";
+import { normalizeErrorMessage as errorMessage } from "../utils/errorMessage.js";
 import { buildNpxCommand } from "../utils/npxCommand.js";
 import type { StudioSelectionSnapshot } from "@hyperframes/studio-server";
 import {
@@ -283,13 +284,15 @@ export default defineCommand({
   },
 });
 
-function previewBaseUrl(port: number): string {
-  return `http://127.0.0.1:${port}`;
+// `host` is the loopback the server actually bound (Vite binds `[::1]`, embedded
+// binds `127.0.0.1`); default to IPv4 for the embedded/legacy callers.
+function previewBaseUrl(port: number, host = "127.0.0.1"): string {
+  return `http://${host}:${port}`;
 }
 
-function absolutePreviewUrl(port: number, path: string): string {
+function absolutePreviewUrl(port: number, path: string, host = "127.0.0.1"): string {
   if (/^https?:\/\//.test(path)) return path;
-  return `${previewBaseUrl(port)}${path.startsWith("/") ? path : `/${path}`}`;
+  return `${previewBaseUrl(port, host)}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 function hasExplicitPreviewPort(argv: string[]): boolean {
@@ -305,11 +308,12 @@ function printSelectionFailure(code: string, message: string, json: boolean): vo
   process.exitCode = 1;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function previewServerPayload(server: { port: number; projectName: string; projectDir: string }): {
+function previewServerPayload(server: {
+  port: number;
+  host?: string;
+  projectName: string;
+  projectDir: string;
+}): {
   port: number;
   projectName: string;
   projectDir: string;
@@ -319,7 +323,7 @@ function previewServerPayload(server: { port: number; projectName: string; proje
     port: server.port,
     projectName: server.projectName,
     projectDir: server.projectDir,
-    url: previewBaseUrl(server.port),
+    url: previewBaseUrl(server.port, server.host),
   };
 }
 
@@ -415,7 +419,7 @@ async function printCurrentSelection(
 
   const selection = {
     ...response.selection,
-    thumbnailUrl: absolutePreviewUrl(server.port, response.selection.thumbnailUrl),
+    thumbnailUrl: absolutePreviewUrl(server.port, response.selection.thumbnailUrl, server.host),
   };
 
   if (json) {
@@ -464,11 +468,7 @@ async function printCurrentContext(
   try {
     fields = parseContextFields(options.fields);
   } catch (err) {
-    printSelectionFailure(
-      "invalid-context-fields",
-      err instanceof Error ? err.message : String(err),
-      options.json,
-    );
+    printSelectionFailure("invalid-context-fields", errorMessage(err), options.json);
     return;
   }
   const fullDetail = options.detail === "full";
@@ -597,7 +597,7 @@ async function printCurrentContext(
   console.log(`${c.success("◇")}  Studio context`);
   if (contextIncludes(fields, "server")) {
     console.log(`  ${c.dim("Project")}   ${server.projectName}`);
-    console.log(`  ${c.dim("Studio")}    ${previewBaseUrl(server.port)}`);
+    console.log(`  ${c.dim("Studio")}    ${previewBaseUrl(server.port, server.host)}`);
   }
   if (contextIncludes(fields, "selection")) {
     if (selection.ok) {

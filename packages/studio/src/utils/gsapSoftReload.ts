@@ -175,6 +175,7 @@ export function applySoftReload(
   iframe: HTMLIFrameElement | null,
   scriptText: string,
   onAsyncFailure?: () => void,
+  currentTimeOverride?: number,
 ): SoftReloadResult {
   if (!iframe || !scriptText) return "cannot-soft-reload";
 
@@ -210,7 +211,14 @@ export function applySoftReload(
   // rather than killing the target timeline and appending an orphan script.
   if (gsapScripts.length > 1 && staleScripts.length === 0) return "cannot-soft-reload";
 
-  const currentTime = win.__player?.getTime?.() ?? 0;
+  // Prefer the caller-supplied scrub position (the studio's own authoritative
+  // currentTime, e.g. usePlayerStore) over the iframe's raw `__player.getTime()`:
+  // the two can desync (a keyframe-node drag parks the playhead via the store
+  // BEFORE this reload's async commit resolves, and the iframe's own GSAP clock
+  // doesn't reliably reflect that yet), which re-seeks the freshly rebuilt
+  // timeline to the wrong frame and leaves the element (and its overlay)
+  // rendered at a stale/unrelated position.
+  const currentTime = currentTimeOverride ?? win.__player?.getTime?.() ?? 0;
 
   // Track whether the MotionPath async path was taken. When it is, the script
   // executes inside pluginScript.onload — after applySoftReload has already
@@ -251,6 +259,25 @@ export function applySoftReload(
       }
     }
 
+    // Also reset elements carrying a GSAP-applied inline `transform` that the
+    // timeline-children sweep above missed — a dragged element whose position
+    // was a standalone `gsap.set` (never a timeline child), or one whose
+    // keyframes were just removed (no longer in any timeline). Their last
+    // `gsap.set` transform is otherwise orphaned: the re-run won't re-set it
+    // and the sweep above can't see it, so the element renders offset from its
+    // source position (matching the overlay) until a full reload. The clear
+    // below runs BEFORE the re-run, which re-applies the transform for any
+    // element the new script still animates.
+    const seenTargets = new Set<Element>(allTargets);
+    for (const el of doc.querySelectorAll<HTMLElement>("[style*='transform']")) {
+      // Gate on the GSAP cache (`_gsap`) so we only reset transforms GSAP owns —
+      // never strip an authored, non-GSAP inline transform.
+      if (el.style.transform && "_gsap" in el && !seenTargets.has(el)) {
+        seenTargets.add(el);
+        allTargets.push(el);
+      }
+    }
+
     // Reset GSAP's internal transform cache so from() tweens don't read stale
     // end values. `clearProps: "all"` is needed to flush the cache, but it also
     // nukes the element's CSS base (position, width, height, etc.) from the
@@ -281,8 +308,13 @@ export function applySoftReload(
       const s = doc.createElement("script");
       s.textContent = `(function(){${scriptText}\n})();`;
       doc.body.appendChild(s);
-      win.__hfForceTimelineRebind?.();
+      // Seek BEFORE rebind: __hfForceTimelineRebind's own internal force-render
+      // (see init.ts) renders the freshly-created timeline at whatever the
+      // runtime's internal scrub position already is, not at whatever we pass
+      // here afterward — a redundant seek() call after rebind can be a GSAP
+      // no-op if the timeline already reports being at that time internally.
       win.__player?.seek?.(currentTime);
+      win.__hfForceTimelineRebind?.();
       win.__hfStudioManualEditsApply?.();
     };
 

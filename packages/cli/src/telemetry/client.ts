@@ -92,6 +92,10 @@ export function trackEvent(
       is_tty: sys.is_tty,
       sandbox_runtime: sys.sandbox_runtime ?? undefined,
       agent_runtime: sys.agent_runtime ?? undefined,
+      // New-agent discovery signals — populated only when agent_runtime is null.
+      agent_hint: sys.agent_hint ?? undefined,
+      term_program: sys.term_program ?? undefined,
+      agent_env_hints: sys.agent_env_hints ?? undefined,
     },
     timestamp: new Date().toISOString(),
   });
@@ -187,7 +191,10 @@ export function showTelemetryNotice(): boolean {
 
   console.log();
   console.log(`  ${c.dim("Hyperframes collects anonymous usage data to improve the tool.")}`);
-  console.log(`  ${c.dim("No personal info, file paths, or content is collected.")}`);
+  console.log(`  ${c.dim("File paths and composition content are never collected.")}`);
+  console.log(
+    `  ${c.dim("If you sign in to HeyGen, your account (email, or username) is linked to your usage.")}`,
+  );
   console.log();
   console.log(`  ${c.dim("Disable anytime:")} ${c.accent("hyperframes telemetry disable")}`);
   console.log();
