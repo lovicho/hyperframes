@@ -1214,18 +1214,24 @@ export async function pollSubCompositionTimelines(
     })()`);
     return "ready";
   }
-  if (!scriptFailureBail) {
-    const missing = await page.evaluate(`(function() {
-      var hosts = document.querySelectorAll("[data-composition-id]");
-      var timelines = window.__timelines || {};
-      var m = [];
-      for (var i = 0; i < hosts.length; i++) {
-        if (hosts[i].hasAttribute("data-no-timeline")) continue;
-        var id = hosts[i].getAttribute("data-composition-id");
-        if (id && !timelines[id]) m.push(id);
-      }
-      return m.join(", ");
-    })()`);
+  // Enumerate the still-unregistered composition ids regardless of bail
+  // reason — a script-failure bail used to skip this entirely, so a render
+  // with multiple sub-compositions only named the failed script URL(s), not
+  // which composition(s) it was still waiting on (review).
+  const missing = await page.evaluate(`(function() {
+    var hosts = document.querySelectorAll("[data-composition-id]");
+    var timelines = window.__timelines || {};
+    var m = [];
+    for (var i = 0; i < hosts.length; i++) {
+      if (hosts[i].hasAttribute("data-no-timeline")) continue;
+      var id = hosts[i].getAttribute("data-composition-id");
+      if (id && !timelines[id]) m.push(id);
+    }
+    return m.join(", ");
+  })()`);
+  if (scriptFailureBail) {
+    console.warn(`[FrameCapture] Composition(s) still waiting on the failed script: ${missing}.`);
+  } else {
     console.warn(
       `[FrameCapture] Sub-composition timelines not registered after ${timeoutMs}ms: ${missing}. ` +
         `Compositions that load data asynchronously (e.g. fetch) must register window.__timelines[id] after setup completes. ` +
