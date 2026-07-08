@@ -32,7 +32,9 @@ export {
   type BundleOptions,
   prepareFlattenedInnerRoot,
   FLATTENED_INNER_ROOT_STRIP_ATTRS,
+  emitRootCompositionVariableStyles,
 } from "./htmlBundler";
+export { readDeclaredDefaults, parseHostVariableValues } from "../runtime/getVariables";
 
 export {
   RUNTIME_BOOTSTRAP_ATTR,
@@ -50,7 +52,11 @@ export {
 } from "./staticGuard";
 
 // Composition isolation helpers
-export { scopeCssToComposition, wrapScopedCompositionScript } from "./compositionScoping";
+export {
+  buildVariablesByCompScript,
+  scopeCssToComposition,
+  wrapScopedCompositionScript,
+} from "./compositionScoping";
 
 // Sub-composition inlining (shared between bundler and producer)
 export {
