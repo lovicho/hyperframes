@@ -24,13 +24,14 @@ import {
   applyTimelineStackingReorder,
   buildPatchTarget,
   patchIframeDomTiming,
-  resolveResizePlaybackStart,
   persistTimelineEdit,
   readFileContent,
-  applyPatchByTarget,
   formatTimelineAttributeNumber,
   shiftGsapPositions,
   scaleGsapPositions,
+  extendRootDurationIfNeeded,
+  buildTimelineMoveTimingPatch,
+  buildTimelineResizeTimingPatch,
 } from "./timelineEditingHelpers";
 import type { PersistTimelineEditInput } from "./timelineEditingHelpers";
 import type { TimelineStackingReorderIntent } from "../player/components/timelineEditing";
@@ -145,11 +146,7 @@ export function useTimelineEditing({
       if (!startChanged) return;
 
       const buildMovePatches: PersistTimelineEditInput["buildPatches"] = (original, target) => {
-        return applyPatchByTarget(original, target, {
-          type: "attribute",
-          property: "start",
-          value: formatTimelineAttributeNumber(updates.start),
-        });
+        return buildTimelineMoveTimingPatch(original, target, updates.start, element.duration);
       };
       // Server-path fallback (no SDK session): persist the attr patch, then
       // shift GSAP tween positions on the server and reload the preview — the
@@ -169,7 +166,8 @@ export function useTimelineEditing({
           }
           return reloadPreview();
         });
-      if (sdkSession && element.hfId) {
+      const needsExtension = extendRootDurationIfNeeded(updates.start + element.duration);
+      if (sdkSession && element.hfId && !needsExtension) {
         return sdkTimingPersist(
           element.hfId,
           targetPath,
@@ -230,25 +228,7 @@ export function useTimelineEditing({
       patchIframeDomTiming(previewIframeRef.current, element, liveAttrs);
       const targetPath = element.sourceFile || activeCompPath || "index.html";
       const buildResizePatches: PersistTimelineEditInput["buildPatches"] = (original, target) => {
-        const pbs = resolveResizePlaybackStart(original, target, element, updates);
-        let patched = applyPatchByTarget(original, target, {
-          type: "attribute",
-          property: "start",
-          value: formatTimelineAttributeNumber(updates.start),
-        });
-        patched = applyPatchByTarget(patched, target, {
-          type: "attribute",
-          property: "duration",
-          value: formatTimelineAttributeNumber(updates.duration),
-        });
-        if (pbs) {
-          patched = applyPatchByTarget(patched, target, {
-            type: "attribute",
-            property: pbs.attrName,
-            value: formatTimelineAttributeNumber(pbs.value),
-          });
-        }
-        return patched;
+        return buildTimelineResizeTimingPatch(original, target, element, updates);
       };
       // SDK path: skip when a playback-start adjustment is needed (setTiming has no pbs field).
       // The second clause fires because trimming the start of a clip that has a
@@ -265,6 +245,7 @@ export function useTimelineEditing({
       const coalesceKey = `timeline-resize:${element.hfId ?? element.id}`;
       const timingChanged =
         updates.start !== element.start || updates.duration !== element.duration;
+      const needsExtension = extendRootDurationIfNeeded(updates.start + updates.duration);
       const resizeFallback = () =>
         enqueueEdit(element, "Resize timeline clip", buildResizePatches, coalesceKey).then(() => {
           const pid = projectIdRef.current;
@@ -283,7 +264,7 @@ export function useTimelineEditing({
           }
           return reloadPreview();
         });
-      if (sdkSession && element.hfId && !hasPbsAdjustment) {
+      if (sdkSession && element.hfId && !hasPbsAdjustment && !needsExtension) {
         return sdkTimingPersist(
           element.hfId,
           targetPath,

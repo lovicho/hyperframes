@@ -2,8 +2,9 @@
 
 import React, { act, useRef } from "react";
 import { createRoot } from "react-dom/client";
+import { openComposition } from "@hyperframes/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { TimelineElement } from "../player";
+import { usePlayerStore, type TimelineElement } from "../player";
 import { useElementLifecycleOps } from "./useElementLifecycleOps";
 import { useTimelineEditing } from "./useTimelineEditing";
 
@@ -20,6 +21,7 @@ type ZIndexEntry = {
 
 afterEach(() => {
   document.body.innerHTML = "";
+  usePlayerStore.getState().reset();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -85,11 +87,15 @@ function renderTimelineEditingHook(input: {
     files: Record<string, { before: string; after: string }>;
   }) => Promise<void>;
   reloadPreview?: () => void;
+  sdkSession?: Awaited<ReturnType<typeof openComposition>> | null;
+  forceReloadSdkSession?: () => void;
 }): {
   move: ReturnType<typeof useTimelineEditing>["handleTimelineElementMove"];
+  resize: ReturnType<typeof useTimelineEditing>["handleTimelineElementResize"];
   unmount: () => void;
 } {
   let move: ReturnType<typeof useTimelineEditing>["handleTimelineElementMove"] | null = null;
+  let resize: ReturnType<typeof useTimelineEditing>["handleTimelineElementResize"] | null = null;
 
   function Harness() {
     const commitRef = useRef(input.onZIndexCommit);
@@ -106,9 +112,12 @@ function renderTimelineEditingHook(input: {
       previewIframeRef: { current: input.iframe },
       pendingTimelineEditPathRef: { current: new Set<string>() },
       uploadProjectFiles: vi.fn(),
+      sdkSession: input.sdkSession,
+      forceReloadSdkSession: input.forceReloadSdkSession,
       handleDomZIndexReorderCommitRef: commitRef,
     });
     move = hook.handleTimelineElementMove;
+    resize = hook.handleTimelineElementResize;
     return null;
   }
 
@@ -120,8 +129,10 @@ function renderTimelineEditingHook(input: {
   });
 
   if (!move) throw new Error("Expected hook to expose move handler");
+  if (!resize) throw new Error("Expected hook to expose resize handler");
   return {
     move,
+    resize,
     unmount: () => {
       act(() => root.unmount());
     },
@@ -206,6 +217,104 @@ async function flushAsyncWork(): Promise<void> {
 }
 
 describe("useTimelineEditing timeline z-index reorder", () => {
+  it("extends root duration through the fallback path when an SDK-backed move passes the end", async () => {
+    const source = [
+      `<div data-composition-id="main" data-duration="4">`,
+      `  <div id="clip" data-hf-id="hf-clip" data-start="0" data-duration="2"></div>`,
+      `</div>`,
+    ].join("\n");
+    const iframe = createPreviewIframe([{ id: "clip", track: 0 }]);
+    const clip = timelineElement({ id: "clip", track: 0, zIndex: 0 });
+    const sdkSession = await openComposition(source);
+    const setTimingSpy = vi.spyOn(sdkSession, "setTiming");
+    const writeProjectFile = vi.fn<(...args: unknown[]) => Promise<void>>(async () => {});
+    const recordEdit = vi.fn(async () => {});
+    const forceReloadSdkSession = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: Parameters<typeof fetch>[0]): Promise<Response> => {
+        const url = requestUrl(input);
+        if (url.includes("/api/projects/p1/files/")) return jsonResponse({ content: source });
+        if (url.includes("/api/projects/p1/gsap-mutations/")) return jsonResponse({ ok: true });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+    usePlayerStore.getState().setDuration(4);
+    const { move, unmount } = renderTimelineEditingHook({
+      timelineElements: [clip],
+      iframe,
+      onZIndexCommit: vi.fn(),
+      projectId: "p1",
+      writeProjectFile,
+      recordEdit,
+      sdkSession,
+      forceReloadSdkSession,
+    });
+
+    await act(async () => {
+      await move(clip, { start: 3, track: clip.track });
+    });
+
+    expect(setTimingSpy).not.toHaveBeenCalled();
+    expect(writeProjectFile.mock.calls[0]![1]).toContain(
+      'data-composition-id="main" data-duration="5"',
+    );
+    expect(writeProjectFile.mock.calls[0]![1]).toContain('data-start="3"');
+    expect(usePlayerStore.getState().duration).toBe(5);
+    expect(forceReloadSdkSession).toHaveBeenCalledTimes(1);
+
+    unmount();
+  });
+
+  it("extends root duration through the fallback path when an SDK-backed resize passes the end", async () => {
+    const source = [
+      `<div data-composition-id="main" data-duration="4">`,
+      `  <div id="clip" data-hf-id="hf-clip" data-start="0" data-duration="2"></div>`,
+      `</div>`,
+    ].join("\n");
+    const iframe = createPreviewIframe([{ id: "clip", track: 0 }]);
+    const clip = timelineElement({ id: "clip", track: 0, zIndex: 0 });
+    const sdkSession = await openComposition(source);
+    const setTimingSpy = vi.spyOn(sdkSession, "setTiming");
+    const writeProjectFile = vi.fn<(...args: unknown[]) => Promise<void>>(async () => {});
+    const recordEdit = vi.fn(async () => {});
+    const forceReloadSdkSession = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: Parameters<typeof fetch>[0]): Promise<Response> => {
+        const url = requestUrl(input);
+        if (url.includes("/api/projects/p1/files/")) return jsonResponse({ content: source });
+        if (url.includes("/api/projects/p1/gsap-mutations/")) return jsonResponse({ ok: true });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+    usePlayerStore.getState().setDuration(4);
+    const { resize, unmount } = renderTimelineEditingHook({
+      timelineElements: [clip],
+      iframe,
+      onZIndexCommit: vi.fn(),
+      projectId: "p1",
+      writeProjectFile,
+      recordEdit,
+      sdkSession,
+      forceReloadSdkSession,
+    });
+
+    await act(async () => {
+      await resize(clip, { start: 0, duration: 5, playbackStart: undefined });
+    });
+
+    expect(setTimingSpy).not.toHaveBeenCalled();
+    expect(writeProjectFile.mock.calls[0]![1]).toContain(
+      'data-composition-id="main" data-duration="5"',
+    );
+    expect(writeProjectFile.mock.calls[0]![1]).toContain('data-duration="5"></div>');
+    expect(usePlayerStore.getState().duration).toBe(5);
+    expect(forceReloadSdkSession).toHaveBeenCalledTimes(1);
+
+    unmount();
+  });
+
   it("routes a vertical drag through the shared z-index commit without writing track-index", async () => {
     const iframe = createPreviewIframe([
       { id: "front", track: 0, style: "position: relative; z-index: 10" },

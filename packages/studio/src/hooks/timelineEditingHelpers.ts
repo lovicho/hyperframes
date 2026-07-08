@@ -10,6 +10,7 @@ import { saveProjectFilesWithHistory } from "../utils/studioFileHistory";
 import { selectedKeyframePercentagesForElement } from "../utils/keyframeSelection";
 import type { EditHistoryKind } from "../utils/editHistory";
 import type { TimelineZIndexReorderCommit } from "./useTimelineEditingTypes";
+import { extendRootDurationInSource } from "../utils/rootDuration";
 
 function isHTMLElement(element: Element | null): element is HTMLElement {
   if (!element) return false;
@@ -114,6 +115,13 @@ export function deleteSelectedKeyframes(session: {
   }
 }
 
+export function extendRootDurationIfNeeded(newEnd: number): boolean {
+  const store = usePlayerStore.getState();
+  if (newEnd <= store.duration) return false;
+  store.setDuration(newEnd);
+  return true;
+}
+
 // ── Types ──
 
 export interface RecordEditInput {
@@ -183,7 +191,7 @@ export function patchIframeDomTiming(
 }
 
 // fallow-ignore-next-line complexity
-export function resolveResizePlaybackStart(
+function resolveResizePlaybackStart(
   original: string,
   target: PatchTarget,
   element: TimelineElement,
@@ -207,6 +215,47 @@ export function resolveResizePlaybackStart(
     attrName,
     value: Math.max(0, current + trimDelta * Math.max(element.playbackRate ?? 1, 0.1)),
   };
+}
+
+export function buildTimelineMoveTimingPatch(
+  original: string,
+  target: PatchTarget,
+  start: number,
+  duration: number,
+): string {
+  const patched = applyPatchByTarget(original, target, {
+    type: "attribute",
+    property: "start",
+    value: formatTimelineAttributeNumber(start),
+  });
+  return extendRootDurationInSource(patched, start + duration);
+}
+
+export function buildTimelineResizeTimingPatch(
+  original: string,
+  target: PatchTarget,
+  element: TimelineElement,
+  updates: Pick<TimelineElement, "start" | "duration" | "playbackStart">,
+): string {
+  const pbs = resolveResizePlaybackStart(original, target, element, updates);
+  let patched = applyPatchByTarget(original, target, {
+    type: "attribute",
+    property: "start",
+    value: formatTimelineAttributeNumber(updates.start),
+  });
+  patched = applyPatchByTarget(patched, target, {
+    type: "attribute",
+    property: "duration",
+    value: formatTimelineAttributeNumber(updates.duration),
+  });
+  if (pbs) {
+    patched = applyPatchByTarget(patched, target, {
+      type: "attribute",
+      property: pbs.attrName,
+      value: formatTimelineAttributeNumber(pbs.value),
+    });
+  }
+  return extendRootDurationInSource(patched, updates.start + updates.duration);
 }
 
 export interface PersistTimelineEditInput {

@@ -7,18 +7,26 @@ import type { TimelineElement } from "../store/playerStore";
 import { usePlayerStore } from "../store/playerStore";
 import { TRACK_H } from "./timelineLayout";
 import { buildStackingTimelineLayers } from "./timelineTrackOrder";
-import type { DraggedClipState } from "./useTimelineClipDrag";
+import type { DraggedClipState, ResizingClipState } from "./useTimelineClipDrag";
 import { useTimelineClipDrag } from "./useTimelineClipDrag";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function timelineElement(input: { id: string; track: number; zIndex: number }): TimelineElement {
+function timelineElement(input: {
+  id: string;
+  track: number;
+  zIndex: number;
+  start?: number;
+  duration?: number;
+  sourceDuration?: number;
+}): TimelineElement {
   return {
     id: input.id,
     domId: input.id,
     tag: "div",
-    start: 0,
-    duration: 2,
+    start: input.start ?? 0,
+    duration: input.duration ?? 2,
+    sourceDuration: input.sourceDuration,
     track: input.track,
     zIndex: input.zIndex,
     stackingContextId: "root",
@@ -39,23 +47,25 @@ function renderDragHarness(elements: TimelineElement[]) {
   const scroll = document.createElement("div");
   document.body.append(scroll);
   const onMoveElement = vi.fn();
+  const onResizeElement = vi.fn();
   let setDraggedClip: ((state: DraggedClipState | null) => void) | null = null;
+  let setResizingClip: ((state: ResizingClipState | null) => void) | null = null;
 
   function Harness() {
     const hook = useTimelineClipDrag({
       scrollRef: { current: scroll },
       ppsRef: { current: 100 },
-      durationRef: { current: 10 },
       trackOrderRef: { current: layers.map((layer) => layer.id) },
       timelineLayersRef: { current: layers },
       timelineElementsRef: { current: elements },
       onMoveElement,
-      onResizeElement: vi.fn(),
+      onResizeElement,
       onBlockedEditAttempt: vi.fn(),
       setShowPopover: vi.fn(),
       setRangeSelectionRef: { current: vi.fn() },
     });
     setDraggedClip = hook.setDraggedClip;
+    setResizingClip = hook.setResizingClip;
     return null;
   }
 
@@ -66,11 +76,14 @@ function renderDragHarness(elements: TimelineElement[]) {
     root.render(<Harness />);
   });
   if (!setDraggedClip) throw new Error("Expected drag setter");
+  if (!setResizingClip) throw new Error("Expected resize setter");
   const applyDraggedClip: (state: DraggedClipState | null) => void = setDraggedClip;
+  const applyResizingClip: (state: ResizingClipState | null) => void = setResizingClip;
 
   return {
     layers,
     onMoveElement,
+    onResizeElement,
     startDrag(element: TimelineElement, layerIndex: number) {
       act(() => {
         applyDraggedClip({
@@ -89,6 +102,19 @@ function renderDragHarness(elements: TimelineElement[]) {
           previewLayerIndex: layerIndex,
           previewStackingReorder: null,
           snapBeatTime: null,
+          started: false,
+        });
+      });
+    },
+    startResize(element: TimelineElement, edge: "start" | "end") {
+      act(() => {
+        applyResizingClip({
+          element,
+          edge,
+          originClientX: 0,
+          previewStart: element.start,
+          previewDuration: element.duration,
+          previewPlaybackStart: element.playbackStart,
           started: false,
         });
       });
@@ -116,6 +142,38 @@ function renderDragHarness(elements: TimelineElement[]) {
 }
 
 describe("useTimelineClipDrag", () => {
+  it("allows moving a clip past the current composition duration", async () => {
+    const clip = timelineElement({ id: "clip", track: 0, zIndex: 1 });
+    const harness = renderDragHarness([clip]);
+
+    harness.startDrag(clip, 0);
+    harness.movePointer(1100, 0);
+    await harness.dropPointer();
+
+    expect(harness.onMoveElement).toHaveBeenCalledWith(
+      clip,
+      expect.objectContaining({ start: 11 }),
+    );
+
+    harness.unmount();
+  });
+
+  it("allows right-edge resize past the current composition duration", async () => {
+    const clip = timelineElement({ id: "clip", track: 0, zIndex: 1, start: 6, duration: 2 });
+    const harness = renderDragHarness([clip]);
+
+    harness.startResize(clip, "end");
+    harness.movePointer(400, 0);
+    await harness.dropPointer();
+
+    expect(harness.onResizeElement).toHaveBeenCalledWith(
+      clip,
+      expect.objectContaining({ start: 6, duration: 6 }),
+    );
+
+    harness.unmount();
+  });
+
   it("passes a new-lane stacking intent when a vertical drag targets an overlapping lane", async () => {
     const front = timelineElement({ id: "front", track: 0, zIndex: 3 });
     const middle = timelineElement({ id: "middle", track: 1, zIndex: 2 });

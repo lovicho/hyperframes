@@ -180,14 +180,6 @@ export const Timeline = memo(function Timeline({
     if (shortcutHintRafRef.current) cancelAnimationFrame(shortcutHintRafRef.current);
   });
 
-  const effectiveDuration = useMemo(() => {
-    const safeDur = Number.isFinite(duration) ? duration : 0;
-    if (rawElements.length === 0) return safeDur;
-    const maxEnd = Math.max(...rawElements.map((el) => el.start + el.duration));
-    const result = Math.max(safeDur, maxEnd);
-    return Number.isFinite(result) ? result : safeDur;
-  }, [rawElements, duration]);
-
   const tracks = useMemo(
     () => buildStackingTimelineLayers(expandedElements).rows,
     [expandedElements],
@@ -210,8 +202,7 @@ export const Timeline = memo(function Timeline({
   expandedElementsRef.current = expandedElements;
 
   const ppsRef = useRef(100);
-  const durationRef = useRef(effectiveDuration);
-  durationRef.current = effectiveDuration;
+  const durationRef = useRef(Number.isFinite(duration) ? duration : 0);
 
   // Stable ref so useTimelineClipDrag can clear rangeSelection without circular dep
   const setRangeSelectionRef = useRef<((sel: null) => void) | null>(null);
@@ -227,7 +218,6 @@ export const Timeline = memo(function Timeline({
   } = useTimelineClipDrag({
     scrollRef,
     ppsRef,
-    durationRef,
     trackOrderRef,
     timelineLayersRef,
     timelineElementsRef: expandedElementsRef,
@@ -237,6 +227,22 @@ export const Timeline = memo(function Timeline({
     setShowPopover,
     setRangeSelectionRef,
   });
+
+  const effectiveDuration = useMemo(() => {
+    const safeDur = Number.isFinite(duration) ? duration : 0;
+    let maxEnd = safeDur;
+    if (rawElements.length > 0) {
+      maxEnd = Math.max(maxEnd, ...rawElements.map((el) => el.start + el.duration));
+    }
+    if (draggedClip?.started) {
+      maxEnd = Math.max(maxEnd, draggedClip.previewStart + draggedClip.element.duration);
+    }
+    if (resizingClip?.started) {
+      maxEnd = Math.max(maxEnd, resizingClip.previewStart + resizingClip.previewDuration);
+    }
+    return Number.isFinite(maxEnd) ? maxEnd : safeDur;
+  }, [rawElements, duration, draggedClip, resizingClip]);
+  durationRef.current = effectiveDuration;
 
   const displayTrackOrder = useMemo(() => {
     if (

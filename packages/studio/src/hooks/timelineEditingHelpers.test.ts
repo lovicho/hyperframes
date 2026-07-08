@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
-import { applyTimelineStackingReorder } from "./timelineEditingHelpers";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { applyTimelineStackingReorder, extendRootDurationIfNeeded } from "./timelineEditingHelpers";
 import type { TimelineElement } from "../player/store/playerStore";
+import { usePlayerStore } from "../player/store/playerStore";
+
+afterEach(() => {
+  usePlayerStore.getState().reset();
+});
 
 function makeIframeWith(html: string): HTMLIFrameElement {
   const iframe = document.createElement("iframe");
@@ -84,5 +89,18 @@ describe("applyTimelineStackingReorder", () => {
     });
 
     expect(commit).not.toHaveBeenCalled();
+  });
+});
+
+describe("extendRootDurationIfNeeded", () => {
+  it("extends the player duration only when the new end is larger", () => {
+    usePlayerStore.getState().setDuration(4);
+
+    expect(extendRootDurationIfNeeded(5)).toBe(true);
+    expect(usePlayerStore.getState().duration).toBe(5);
+
+    expect(extendRootDurationIfNeeded(5)).toBe(false);
+    expect(extendRootDurationIfNeeded(3)).toBe(false);
+    expect(usePlayerStore.getState().duration).toBe(5);
   });
 });

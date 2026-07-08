@@ -114,7 +114,6 @@ export interface BlockedClipState {
 interface UseTimelineClipDragInput {
   scrollRef: React.RefObject<HTMLDivElement | null>;
   ppsRef: React.RefObject<number>;
-  durationRef: React.RefObject<number>;
   trackOrderRef: React.RefObject<TimelineLayerId[]>;
   timelineLayersRef: React.RefObject<StackingTimelineLayer[]>;
   timelineElementsRef: React.RefObject<TimelineElement[]>;
@@ -137,7 +136,6 @@ interface UseTimelineClipDragInput {
 export function useTimelineClipDrag({
   scrollRef,
   ppsRef,
-  durationRef,
   trackOrderRef,
   timelineLayersRef,
   timelineElementsRef,
@@ -214,7 +212,7 @@ export function useTimelineClipDrag({
           currentScrollTop: scroll?.scrollTop ?? drag.originScrollTop,
           pixelsPerSecond: ppsRef.current,
           trackHeight: TRACK_H,
-          maxStart: Math.max(0, durationRef.current - drag.element.duration),
+          maxStart: Number.POSITIVE_INFINITY,
           trackOrder: timelineLayersRef.current.map((layer) => layer.placementTrack),
           layerOrder: trackOrderRef.current,
           timelineLayers: timelineLayersRef.current,
@@ -232,7 +230,7 @@ export function useTimelineClipDrag({
             drag.element.duration,
             beatTimesRef.current,
             ppsRef.current,
-            durationRef.current,
+            Number.POSITIVE_INFINITY,
           );
       return {
         ...drag,
@@ -247,7 +245,7 @@ export function useTimelineClipDrag({
         snapBeatTime: snap.beat,
       };
     },
-    [scrollRef, ppsRef, durationRef, trackOrderRef, timelineLayersRef, timelineElementsRef],
+    [scrollRef, ppsRef, trackOrderRef, timelineLayersRef, timelineElementsRef],
   );
 
   const stopClipDragAutoScroll = useCallback(() => {
@@ -342,7 +340,7 @@ export function useTimelineClipDrag({
         const normalizedTag = resize.element.tag.toLowerCase();
         const canSeedPlaybackStart = normalizedTag === "audio" || normalizedTag === "video";
         const playbackRate = Math.max(resize.element.playbackRate ?? 1, 0.1);
-        const maxEnd = Math.min(durationRef.current, resize.element.start + sourceRemaining);
+        const maxEnd = resize.element.start + sourceRemaining;
         let nextResize = resolveTimelineResize(
           {
             start: resize.element.start,
