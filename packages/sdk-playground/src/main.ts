@@ -85,6 +85,10 @@ class PlaygroundPreview implements PreviewAdapter {
       this.handlers = this.handlers.filter((h) => h !== handler);
     };
   }
+
+  attachSync(_comp: Composition): () => void {
+    return () => {};
+  }
 }
 
 // ── Preview iframe ────────────────────────────────────────────────────────────
