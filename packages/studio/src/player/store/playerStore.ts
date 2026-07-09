@@ -146,7 +146,6 @@ interface PlayerState {
   addSelectedElementId: (id: string) => void;
   toggleSelectedElementId: (id: string) => void;
   clearSelection: () => void;
-  clearSelectedElementIds: () => void;
 
   /** Keyframe data per element id, populated from parsed GSAP animations. */
   keyframeCache: Map<string, KeyframeCacheEntry>;
@@ -300,7 +299,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       return resolveElementSelection(next, s.selectedElementId);
     }),
   clearSelection: () => set({ selectedElementId: null, selectedElementIds: new Set() }),
-  clearSelectedElementIds: () => set({ selectedElementId: null, selectedElementIds: new Set() }),
 
   keyframeCache: new Map(),
   setKeyframeCache: (elementId, data) =>
@@ -412,20 +410,30 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setBeatDragging: (dragging) => set({ beatDragging: dragging }),
   setElements: (elements) => set({ elements }),
   setSelectedElementId: (id) =>
-    set((s) =>
+    set((s) => {
+      // Re-selecting an element that is already part of an active multi-selection
+      // (e.g. a DOM->selection sync echo while a group drag re-patches the preview)
+      // updates the anchor WITHOUT collapsing the set. A genuinely new element
+      // (not currently in the set) replaces the whole selection with itself.
+      const keepSet = id != null && s.selectedElementIds.size > 1 && s.selectedElementIds.has(id);
+      const selectedElementIds = keepSet
+        ? s.selectedElementIds
+        : id
+          ? new Set([id])
+          : new Set<string>();
       // Selecting a different element drops any active keyframe selection — otherwise
       // a stale activeKeyframePct from a prior diamond click would force the next drag
       // to "modify" a keyframe on the new element. A diamond click sets the pct AFTER
       // calling setSelectedElementId, so this never clobbers a genuine keyframe select.
-      id !== s.selectedElementId
+      return id !== s.selectedElementId
         ? {
             selectedElementId: id,
-            selectedElementIds: id ? new Set([id]) : new Set(),
+            selectedElementIds,
             activeKeyframePct: null,
             motionPathArmed: false,
           }
-        : { selectedElementId: id, selectedElementIds: id ? new Set([id]) : new Set() },
-    ),
+        : { selectedElementId: id, selectedElementIds };
+    }),
   updateElement: (elementId, updates) =>
     set((state) => ({
       elements: state.elements.map((el) =>

@@ -231,7 +231,7 @@ export function useTimelineMarqueeSelection({
       setMarqueeRect(null);
 
       if (!active.started) {
-        usePlayerStore.getState().setSelection([]);
+        usePlayerStore.getState().clearSelection();
         return true;
       }
 

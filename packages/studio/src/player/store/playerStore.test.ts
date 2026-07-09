@@ -249,6 +249,18 @@ describe("usePlayerStore", () => {
       expect(state.selectedElementId).toBe("el-3");
     });
 
+    it("re-selecting a current member keeps the multi-selection and moves the anchor", () => {
+      const store = usePlayerStore.getState();
+      store.setSelection(["el-1", "el-2", "el-3"], "el-1");
+      // A DOM->selection sync echo during a group drag re-selects the grabbed
+      // member; this must NOT collapse the set to that single element.
+      store.setSelectedElementId("el-2");
+
+      const state = usePlayerStore.getState();
+      expect([...state.selectedElementIds]).toEqual(["el-1", "el-2", "el-3"]);
+      expect(state.selectedElementId).toBe("el-2");
+    });
+
     it("clearing single selection empties the set", () => {
       const store = usePlayerStore.getState();
       store.setSelection(["el-1", "el-2"], "el-2");
@@ -275,19 +287,12 @@ describe("usePlayerStore", () => {
       expect(state.selectedElementId).toBe("el-2");
     });
 
-    it("clearSelection and clearSelectedElementIds empty the set and anchor", () => {
+    it("clearSelection empties the set and the anchor", () => {
       const store = usePlayerStore.getState();
       store.setSelection(["el-1", "el-2"], "el-2");
       store.clearSelection();
 
-      let state = usePlayerStore.getState();
-      expect([...state.selectedElementIds]).toEqual([]);
-      expect(state.selectedElementId).toBeNull();
-
-      store.setSelection(["el-3"], "el-3");
-      store.clearSelectedElementIds();
-
-      state = usePlayerStore.getState();
+      const state = usePlayerStore.getState();
       expect([...state.selectedElementIds]).toEqual([]);
       expect(state.selectedElementId).toBeNull();
     });
