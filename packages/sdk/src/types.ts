@@ -1,3 +1,5 @@
+import type { CompositionVariable } from "@hyperframes/core";
+
 // ─── Document model ───────────────────────────────────────────────────────────
 
 /** Full DOM-level view of one editable element. Built by the SDK adaptation layer. */
@@ -115,6 +117,8 @@ export type EditOp =
       id: string;
       value: string | number | boolean | FontValue | ImageValue;
     }
+  | { type: "declareVariable"; decl: CompositionVariable }
+  | { type: "removeVariable"; id: string }
   | { type: "addGsapTween"; target: HfId; tween: GsapTweenSpec }
   | { type: "setGsapTween"; animationId: string; properties: Partial<GsapTweenSpec> }
   | {
@@ -405,6 +409,19 @@ export interface Composition {
    */
   addElement(parent: HfId | null, index: number, html: string): HfId;
   setVariableValue(id: string, value: string | number | boolean | FontValue | ImageValue): void;
+  /** Current `default` value for a declared variable, or undefined if undeclared/unset. */
+  getVariableValue(id: string): string | number | boolean | FontValue | ImageValue | undefined;
+  /** Every declared variable's full schema (id/type/label/default/…), or [] when none. */
+  listVariables(): CompositionVariable[];
+  /**
+   * Create a new variable declaration, or fully replace an existing one (type/
+   * label/default/etc, not just the value — use setVariableValue for that).
+   * The path setVariableValue can't take: it refuses to create undeclared
+   * variables by design, keeping the schema authoritative.
+   */
+  declareVariable(decl: CompositionVariable): void;
+  /** Remove a variable's declaration. Live `var.{id}` overrides are untouched. */
+  removeVariable(id: string): void;
   /**
    * Read enter/exit times and GSAP labels for every timed element (WS-C).
    * Derives enterAt/exitAt using the same data-duration vs data-end preference

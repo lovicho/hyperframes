@@ -110,6 +110,65 @@ comp.setVariableValue("brandFont", { name: "Inter", source: "https://fonts.googl
 comp.setVariableValue("heroImage", { url: "/assets/hero.jpg", fit: "cover" });
 ```
 
+<Note>
+  `setVariableValue` only updates a variable's current value — it refuses to create an undeclared variable. Use `declareVariable` to create one.
+</Note>
+
+### `getVariableValue`
+
+```typescript
+getVariableValue(id: string): string | number | boolean | FontValue | ImageValue | undefined
+```
+
+Return a declared variable's current `default` value, or `undefined` if the id is undeclared or has no value set.
+
+```typescript
+const color = comp.getVariableValue("brandColor"); // "#6C5CE7"
+```
+
+### `listVariables`
+
+```typescript
+listVariables(): CompositionVariable[]
+```
+
+Return every declared variable's full schema — `id`, `type`, `label`, `default`, and any type-specific fields (`min`/`max`/`step` for numbers, `options` for enums, `source` for fonts, etc). Returns `[]` when the composition declares no variables.
+
+```typescript
+for (const v of comp.listVariables()) {
+  console.log(v.id, v.type, v.default);
+}
+```
+
+### `declareVariable`
+
+```typescript
+declareVariable(decl: CompositionVariable): void
+```
+
+Create a new variable declaration, or fully replace an existing one (type, label, default, and all other schema fields — not just the value). This is the only path that creates the schema entry from scratch; `setVariableValue` intentionally refuses to.
+
+```typescript
+comp.declareVariable({
+  id: "brandColor",
+  type: "color",
+  label: "Brand color",
+  default: "#6C5CE7",
+});
+```
+
+### `removeVariable`
+
+```typescript
+removeVariable(id: string): void
+```
+
+Remove a variable's declaration entirely. Any live `var.{id}` overrides and `data-var-*` DOM references are left untouched — this only removes the schema entry.
+
+```typescript
+comp.removeVariable("brandColor");
+```
+
 ### `getElementTimings`
 
 ```typescript
@@ -300,6 +359,18 @@ const images = elements.filter((el) => el.tag === "img");
   For elements inside inlined sub-compositions, use `scopedId` (e.g. `"hf-host/hf-leaf"`) as the dispatch target, not `id`. Top-level elements have `scopedId === id`.
 </Note>
 
+### `getRootElements`
+
+```typescript
+getRootElements(): ElementSnapshot[]
+```
+
+Return only top-level elements, each carrying its full subtree — no id appears twice (unlike `getElements`, which flattens every nested element into the same array). Use this when you need one entry per top-level clip rather than every element in the tree.
+
+```typescript
+const roots = comp.getRootElements();
+```
+
 ### `getElement`
 
 ```typescript
@@ -335,6 +406,18 @@ Search elements by structured query. Returns an array of `scopedId` strings for 
 const headlineIds = comp.find({ name: "headline" });
 const allImages   = comp.find({ tag: "img" });
 const track1Ids   = comp.find({ track: 1 });
+```
+
+### `getAllAnimationIds`
+
+```typescript
+getAllAnimationIds(): Set<string>
+```
+
+Return every GSAP tween id parsed from the composition's script, regardless of whether its target selector currently matches a live DOM element. This differs from a given `ElementSnapshot`'s own `animationIds` field, which only lists tweens whose selector resolves to that specific element.
+
+```typescript
+const allIds = comp.getAllAnimationIds();
 ```
 
 ---

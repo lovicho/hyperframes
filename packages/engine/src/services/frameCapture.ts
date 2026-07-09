@@ -1960,7 +1960,7 @@ async function computeClipBoundaryFrames(page: Page, fps: number): Promise<Set<n
  * comp on any signal the tween-walker can't see: video / canvas / webgl (redraw without
  * a tween), zero tweens (non-GSAP animation), or a running CSS/WAAPI animation.
  */
-async function computeStaticFrameSet(
+export async function computeStaticFrameSet(
   page: Page,
   fps: number,
 ): Promise<{
@@ -1979,11 +1979,25 @@ async function computeStaticFrameSet(
       duration(): number;
       totalDuration?(): number;
       getChildren?(nested: boolean, tweens: boolean, timelines: boolean): AnyTween[];
+      vars?: Record<string, unknown>;
     };
     const intervals: Array<{ start: number; end: number }> = [];
     let tweenCount = 0;
     // totalDuration() (NOT duration()): a repeat/yoyo tween animates past one iteration;
     // a repeating timeline is marked opaque over its whole span (conservative).
+    // A GSAP tl.call() is a zero-duration tween whose vars wire the callback as
+    // onComplete (and onReverseComplete, fired on backward crossing — GSAP has
+    // no separate "undo" callback, so both directions invoke the SAME forward
+    // side effect). A one-shot DOM mutation driven this way (e.g. a counter's
+    // textContent) is not seek-idempotent: crossing it during the static-dedup
+    // verifier's own arm-time seeking permanently mutates the page, and that
+    // corruption can leak into a LATER, unrelated static run's real capture
+    // (the verifier's mismatch check only catches drift within the run being
+    // checked, not contamination from a run checked afterward). No reliable
+    // way to tell a DOM-mutating call() from a harmless one (analytics ping,
+    // class toggle with no visual effect) without executing it, so disqualify
+    // the whole comp on ANY call() rather than risk shipping wrong pixels.
+    let hasTimelineCall = false;
     function walk(tl: AnyTween, offset: number): void {
       if (typeof tl.getChildren !== "function") return;
       for (const child of tl.getChildren(false, true, true)) {
@@ -1991,11 +2005,28 @@ async function computeStaticFrameSet(
         const single = typeof child.duration === "function" ? child.duration() : 0;
         const total = typeof child.totalDuration === "function" ? child.totalDuration() : single;
         if (typeof child.getChildren === "function") {
-          if (total > single + 1e-6) intervals.push({ start, end: start + total });
-          else walk(child, start);
+          if (total > single + 1e-6) {
+            intervals.push({ start, end: start + total });
+            // Still descend for hasTimelineCall even though the repeating
+            // span is already opaque (its frames are excluded from dedup
+            // regardless): a call() inside it is a review-flagged detection
+            // gap otherwise — the arm-time verifier can still forward-seek
+            // through this span while checking a LATER static run, firing
+            // the call() and corrupting the page (review).
+            walk(child, start);
+          } else {
+            walk(child, start);
+          }
         } else {
           tweenCount++;
           intervals.push({ start, end: start + total });
+          if (
+            total <= 1e-6 &&
+            (typeof child.vars?.onComplete === "function" ||
+              typeof child.vars?.onReverseComplete === "function")
+          ) {
+            hasTimelineCall = true;
+          }
         }
       }
     }
@@ -2039,6 +2070,7 @@ async function computeStaticFrameSet(
       hasCanvas,
       hasNonGsapAnim,
       hasUnresolvableClipStart,
+      hasTimelineCall,
     };
   });
 
@@ -2050,6 +2082,7 @@ async function computeStaticFrameSet(
     hasCanvas,
     hasNonGsapAnim,
     hasUnresolvableClipStart,
+    hasTimelineCall,
   } = result as {
     intervals: Array<{ start: number; end: number }>;
     tweenCount: number;
@@ -2058,6 +2091,7 @@ async function computeStaticFrameSet(
     hasCanvas: boolean;
     hasNonGsapAnim: boolean;
     hasUnresolvableClipStart: boolean;
+    hasTimelineCall: boolean;
   };
   const totalFrames = Math.max(1, Math.ceil(duration * fps));
   const animated = new Set<number>();
@@ -2073,6 +2107,12 @@ async function computeStaticFrameSet(
   if (hasCanvas) reasons.push("canvas/webgl");
   if (tweenCount === 0) reasons.push("no GSAP tweens (non-GSAP animation)");
   if (hasNonGsapAnim) reasons.push("running CSS/WAAPI animation");
+  // tl.call() side effects are not seek-idempotent (see hasTimelineCall detection
+  // above) — the arm-time verifier's own forward-seeking can permanently fire
+  // one, corrupting the page for a later, unrelated static run's real capture
+  // even though each run's own verification passes in isolation (HF static-
+  // dedup content-drift report, tools-onboarding FR render).
+  if (hasTimelineCall) reasons.push("tl.call() side effect (not seek-safe)");
   if (hasUnresolvableClipStart) reasons.push("unresolvable clip start (reference expression)");
   const eligible = reasons.length === 0;
   const staticFrameSet = new Set<number>();

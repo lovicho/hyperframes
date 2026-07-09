@@ -152,6 +152,23 @@ function textCss(node: FigmaNodeDocument, styles: string[]): void {
   if (typeof s.lineHeightPx === "number") styles.push(`line-height: ${round(s.lineHeightPx)}px`);
   if (typeof s.letterSpacing === "number" && s.letterSpacing !== 0)
     styles.push(`letter-spacing: ${round(s.letterSpacing)}px`);
+  if (isVerticallyTrimmed(node, s.lineHeightPx)) {
+    styles.push("text-box-trim: trim-both", "text-box-edge: cap alphabetic");
+  }
+}
+
+/**
+ * Vertical trim: a figma text box SHORTER than its line-height is
+ * cap-height-trimmed bounds. Browsers place glyphs with half-leading and
+ * overflow the short box downward (~6px low on a 70px font, measured
+ * against figma's own render). text-box-trim reproduces figma's trim in
+ * the render engine (Chrome). Single-line text only.
+ */
+function isVerticallyTrimmed(node: FigmaNodeDocument, lineHeightPx: unknown): boolean {
+  if (typeof lineHeightPx !== "number") return false;
+  const box = boxOf(node);
+  if (box === null || box.height >= lineHeightPx - 1) return false;
+  return typeof node.characters === "string" && !node.characters.includes("\n");
 }
 
 interface RenderContext {

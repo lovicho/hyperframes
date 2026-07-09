@@ -20,13 +20,17 @@ export type {
   CanResult,
 } from "./types.js";
 
+export type { CompositionVariable } from "@hyperframes/core";
+
 export { ORIGIN_APPLY_PATCHES, ORIGIN_LOCAL } from "./types.js";
 
 export { UnsupportedOpError } from "./engine/mutate.js";
 
 export { buildDocument, buildRoots, flatElements } from "./document.js";
 
-export { isNewHostBoundary, bareId } from "./engine/model.js";
+export { isNewHostBoundary, bareId, resolveScoped, findById, escapeHfId } from "./engine/model.js";
+
+export { readVariableDefault } from "./engine/variableModel.js";
 
 export { openComposition } from "./session.js";
 export type { OpenCompositionOptions } from "./session.js";

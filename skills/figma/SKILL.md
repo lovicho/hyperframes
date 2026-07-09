@@ -78,6 +78,7 @@ hyperframes figma component '<url-or-fileKey:nodeId>'
 
 Node tree → editable HTML at exact figma geometry, packaged as a registry item under `compositions/components/<name>/`. Vectors/boolean-ops auto-rasterize via Phase-1 export. Binding pass (spec §7.1, exact-ID only — never value matching):
 
+- **Static fidelity self-check (mandatory for hero content)**: after importing, render the fragment and compare against figma's own pixels — `figma asset <same node> --format png` is the ground truth. Text is the known drift axis: a figma text box shorter than its line-height is vertically-trimmed bounds (the mapper emits `text-box-trim` for these; measured drift without it was ~6px on a 70px font). If the comparison shows drift the mapper doesn't cover, report it — don't hand-tweak the fragment silently.
 - Fill bound to an **imported** token → `var(--slug, #literal)` — brand refresh propagates.
 - Bound to an **unknown** token → literal + `data-figma-unresolved` flag. The command tells you; offer the user: run `tokens` on the source (or library) file, then re-import the component to link them. Ask **once** per unknown library which file it is — never guess, never match by hex.
 

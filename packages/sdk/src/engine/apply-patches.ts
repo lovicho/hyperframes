@@ -19,7 +19,13 @@ import {
   setStyleSheet,
 } from "./model.js";
 import { keyToPath, stylePath } from "./patches.js";
-import { writeVariableDefault, clearVariableDefault } from "./variableModel.js";
+import {
+  writeVariableDefault,
+  clearVariableDefault,
+  declareVariableDecl,
+  removeVariableDecl,
+  type VariableDecl,
+} from "./variableModel.js";
 
 // ─── Path parser ────────────────────────────────────────────────────────────
 
@@ -32,6 +38,7 @@ interface ParsedPath {
     | "hold"
     | "element"
     | "variable"
+    | "variable-decl"
     | "metadata"
     | "script"
     | "stylesheet";
@@ -67,6 +74,9 @@ function parsePath(path: string): ParsedPath | null {
 
   const varM = /^\/variables\/(.+)$/.exec(path);
   if (varM) return { type: "variable", id: varM[1] };
+
+  const varDeclM = /^\/variable-decls\/(.+)$/.exec(path);
+  if (varDeclM) return { type: "variable-decl", id: varDeclM[1] };
 
   const metaM = /^\/metadata\/(.+)$/.exec(path);
   if (metaM) return { type: "metadata", field: metaM[1] };
@@ -236,6 +246,35 @@ function applyOne(parsed: ParsedDocument, patch: JsonPatchOp, p: ParsedPath): vo
       // CSS compat is handled by explicit style-path patches emitted by mutate.ts,
       // so we do NOT write CSS here — the style case above handles those patches.
       applyVariableDefault(parsed.document, p.id, patch.op === "remove" ? null : patch.value);
+      break;
+    }
+
+    case "variable-decl": {
+      if (!p.id) return;
+      // Distinct from "variable" above: this replays the WHOLE declaration
+      // (declareVariable/removeVariable), not just its default value.
+      if (patch.op === "remove") {
+        removeVariableDecl(parsed.document, p.id);
+      } else {
+        // Undo of removeVariable bundles {__kind: "reinsert", decl, index} to
+        // reinsert at the original array position; a plain declareVariable
+        // forward/replace patch carries the bare decl. Disambiguate on the
+        // __kind tag, not structural "decl"/"index" key presence — VariableDecl
+        // has an open index signature, so a genuine variable schema could
+        // legally declare its own "decl"/"index" fields, and "in" narrowing
+        // alone can't rule that out.
+        const value = patch.value;
+        if (
+          value &&
+          typeof value === "object" &&
+          (value as { __kind?: unknown }).__kind === "reinsert"
+        ) {
+          const wrapped = value as { decl: VariableDecl; index: number };
+          declareVariableDecl(parsed.document, wrapped.decl, { atIndex: wrapped.index });
+        } else {
+          declareVariableDecl(parsed.document, value as VariableDecl);
+        }
+      }
       break;
     }
 

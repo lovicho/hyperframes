@@ -75,6 +75,11 @@ export function variablePath(id: string): string {
   return `/variables/${id}`;
 }
 
+/** Distinct from variablePath — that's the `default` field only; this is the whole decl. */
+export function variableDeclPath(id: string): string {
+  return `/variable-decls/${id}`;
+}
+
 export function metaPath(field: "width" | "height" | "duration"): string {
   return `/metadata/${field}`;
 }

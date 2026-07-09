@@ -102,6 +102,45 @@ describe("nodeToHtml", () => {
     expect(out.html).not.toContain('id="3d-object-headphones"');
   });
 
+  it("emits text-box-trim for vertically trimmed text (box height < line-height)", () => {
+    const out = nodeToHtml(
+      frame([
+        {
+          id: "1:2",
+          name: "Headline",
+          type: "TEXT",
+          absoluteBoundingBox: BOX(140, 260, 304, 51),
+          fills: [SOLID_BLUE],
+          characters: "Unlocked",
+          style: { fontFamily: "Inter", fontWeight: 700, fontSize: 70, lineHeightPx: 66.5 },
+        },
+      ]),
+      { resolved: [], unresolved: [] },
+    );
+    // figma's trimmed bounds (51px box for a 66.5px line) place cap height at
+    // the box top; browsers overflow the glyphs below without text-box-trim
+    expect(out.html).toContain("text-box-trim: trim-both");
+    expect(out.html).toContain("text-box-edge: cap alphabetic");
+  });
+
+  it("does not trim text whose box matches its line-height", () => {
+    const out = nodeToHtml(
+      frame([
+        {
+          id: "1:2",
+          name: "Body",
+          type: "TEXT",
+          absoluteBoundingBox: BOX(140, 260, 304, 39),
+          fills: [SOLID_BLUE],
+          characters: "Subtitle",
+          style: { fontFamily: "Inter", fontWeight: 400, fontSize: 32, lineHeightPx: 38.4 },
+        },
+      ]),
+      { resolved: [], unresolved: [] },
+    );
+    expect(out.html).not.toContain("text-box-trim");
+  });
+
   it("emits var() with literal fallback for resolved bindings", () => {
     const out = nodeToHtml(
       frame([

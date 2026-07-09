@@ -17,6 +17,7 @@ import type {
   JsonPatchOp,
 } from "../types.js";
 import type { ParsedDocument } from "./model.js";
+import type { CompositionVariable } from "@hyperframes/core";
 import {
   resolveScoped,
   escapeHfId,
@@ -40,6 +41,7 @@ import {
   holdPath,
   elementPath,
   variablePath,
+  variableDeclPath,
   metaPath,
   gsapScriptPath,
   styleSheetPath,
@@ -76,7 +78,13 @@ import {
   unrollDynamicAnimations,
 } from "@hyperframes/core/gsap-writer-acorn";
 import { deriveKeyframeBackfillDefaults } from "./keyframeBackfill.js";
-import { readVariableDefault, writeVariableDefault } from "./variableModel.js";
+import {
+  readVariableDefault,
+  writeVariableDefault,
+  declareVariableDecl,
+  removeVariableDecl,
+  type VariableDecl,
+} from "./variableModel.js";
 import {
   URI_BEARING_ATTRS,
   DANGEROUS_URI_SCHEMES,
@@ -288,6 +296,10 @@ export function applyOp(parsed: ParsedDocument, op: EditOp): MutationResult {
       return handleSetCompositionMetadata(parsed, op);
     case "setVariableValue":
       return handleSetVariableValue(parsed, op.id, op.value);
+    case "declareVariable":
+      return handleDeclareVariable(parsed, op.decl);
+    case "removeVariable":
+      return handleRemoveVariable(parsed, op.id);
     case "setClassStyle":
       return handleSetClassStyle(parsed, op.selector, op.styles);
     case "addLabel":
@@ -883,6 +895,52 @@ function handleSetVariableValue(
   }
 
   return { forward, inverse };
+}
+
+/**
+ * Declare (create or fully replace) a variable's schema entry — id/type/label/
+ * default/etc. Unlike setVariableValue, this creates the `data-composition-
+ * variables` attribute from scratch when the composition has none yet, and
+ * replaces the whole decl (not just `default`) when the id already exists —
+ * the path a variables panel needs to add or edit a declaration, since
+ * setVariableValue intentionally refuses to create undeclared variables.
+ */
+function handleDeclareVariable(parsed: ParsedDocument, decl: CompositionVariable): MutationResult {
+  const root = findRoot(parsed.document);
+  if (!root) return EMPTY;
+  // The storage layer treats a decl as an untyped JSON bag (VariableDecl has an
+  // index signature so it can round-trip arbitrary extra keys); CompositionVariable
+  // is a closed union with no index signature, so TS won't structurally widen it
+  // automatically — this is the exact boundary readDecls' own `as VariableDecl[]`
+  // cast already crosses for the read side.
+  const storageDecl = decl as unknown as VariableDecl;
+  const previous = declareVariableDecl(parsed.document, storageDecl);
+  const path = variableDeclPath(decl.id);
+  const p = valueChange(path, previous, storageDecl);
+  return { forward: [p.forward], inverse: [p.inverse] };
+}
+
+/**
+ * Remove a variable's declaration entirely. Live `var.{id}` overrides and any
+ * data-var-* DOM references are left untouched — this only removes the schema
+ * entry, mirroring removeVariableDecl's contract.
+ */
+function handleRemoveVariable(parsed: ParsedDocument, id: string): MutationResult {
+  const root = findRoot(parsed.document);
+  if (!root) return EMPTY;
+  const removed = removeVariableDecl(parsed.document, id);
+  if (!removed) return EMPTY;
+  const path = variableDeclPath(id);
+  // Bundle the original array index so undo reinserts at the same position
+  // instead of appending — mirrors handleRemoveElement's {html, parentId,
+  // siblingIndex} inverse value. Tagged with __kind (rather than relying on
+  // structural "decl"/"index" key presence) because VariableDecl has an open
+  // index signature — a genuine variable schema could legally declare its own
+  // "decl"/"index" fields, which a structural check alone can't rule out.
+  return {
+    forward: [patchRemove(path)],
+    inverse: [patchAdd(path, { __kind: "reinsert", decl: removed.decl, index: removed.index })],
+  };
 }
 
 // ─── GSAP selector helpers ───────────────────────────────────────────────────
@@ -1491,6 +1549,8 @@ export function validateOp(parsed: ParsedDocument, op: EditOp): CanResult {
       return CAN_OK;
     }
     case "setVariableValue":
+    case "declareVariable":
+    case "removeVariable":
       if (findRoot(parsed.document) === null)
         return canErr("E_NO_ROOT", "Composition root element not found.");
       return CAN_OK;
