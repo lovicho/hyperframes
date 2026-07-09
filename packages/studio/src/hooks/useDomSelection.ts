@@ -24,6 +24,7 @@ import {
   type DomEditSelection,
 } from "../components/editor/domEditing";
 import { reapplyPositionEditsAfterSeek } from "../components/editor/manualEdits";
+import { usePlayerStore } from "../player/store/playerStore";
 
 // ── Types ──
 
@@ -537,7 +538,22 @@ export function useDomSelection({
           timelineElements,
           nextSelection.sourceFile || "index.html",
         );
-      setSelectedTimelineElementId(nextTimelineId);
+      const nextTimelineIds = nextGroup
+        .map(
+          (selection) =>
+            findMatchingTimelineElementId(selection, timelineElements) ??
+            findTimelineIdByAncestor(
+              selection.element,
+              timelineElements,
+              selection.sourceFile || "index.html",
+            ),
+        )
+        .filter((id): id is string => Boolean(id));
+      if (nextTimelineIds.length > 0) {
+        usePlayerStore.getState().setSelection(nextTimelineIds, nextTimelineId);
+      } else {
+        setSelectedTimelineElementId(null);
+      }
     },
     [applyDomSelection, timelineElements, setSelectedTimelineElementId],
   );

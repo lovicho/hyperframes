@@ -25,6 +25,7 @@ import { TimelineEditProvider } from "../contexts/TimelineEditContext";
 import type { BlockPreviewInfo } from "./sidebar/BlocksTab";
 import { readStudioUiPreferences } from "../utils/studioUiPreferences";
 import type { GestureRecordingState } from "./editor/GestureRecordControl";
+import { useTimelineSelectionPreviewSync } from "../hooks/useTimelineSelectionPreviewSync";
 
 export interface StudioPreviewAreaProps {
   timelineToolbar: ReactNode;
@@ -148,6 +149,9 @@ export function StudioPreviewArea({
     buildDomSelectionForTimelineElement,
     applyMarqueeSelection,
   } = useDomEditActionsContext();
+  const selectedElementId = usePlayerStore((s) => s.selectedElementId);
+  const selectedElementIds = usePlayerStore((s) => s.selectedElementIds);
+  const timelineElements = usePlayerStore((s) => s.elements);
 
   // fallow-ignore-next-line complexity
   const [snapPrefs, setSnapPrefs] = useState(() => {
@@ -158,6 +162,18 @@ export function StudioPreviewArea({
       gridSpacing: p.gridSpacing ?? 50,
       snapToGrid: p.snapToGrid ?? false,
     };
+  });
+
+  useTimelineSelectionPreviewSync({
+    selectedElementId,
+    selectedElementIds,
+    timelineElements,
+    domEditSelection,
+    domEditGroupSelections,
+    activeCompPath,
+    buildDomSelectionForTimelineElement,
+    applyDomSelection,
+    applyMarqueeSelection,
   });
 
   // Resolve a timeline-diamond callback's clip-% to the keyframe's anim id + its

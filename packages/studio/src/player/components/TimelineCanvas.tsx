@@ -158,6 +158,7 @@ export const TimelineCanvas = memo(function TimelineCanvas({
     onRazorSplitAll,
   } = useTimelineEditContextOptional();
   const beatDragging = usePlayerStore((s) => s.beatDragging);
+  const selectedElementIds = usePlayerStore((s) => s.selectedElementIds);
   const activeSnapGuideTime = draggedClip?.started
     ? (draggedClip.snapBeatTime ?? draggedClip.snapGuideTime)
     : resizingClip?.started
@@ -359,7 +360,7 @@ export const TimelineCanvas = memo(function TimelineCanvas({
                       const clipStyle = getTrackStyle(el.tag);
                       const elementKey = el.key ?? el.id;
                       const capabilities = getTimelineEditCapabilities(el);
-                      const isSelected = selectedElementId === elementKey;
+                      const isSelected = selectedElementIds.has(elementKey);
                       const isComposition = !!el.compositionSrc;
                       // elementKey (el.key ?? el.id) is already unique per clip; do NOT
                       // fold in the map index, or a splice/reorder remounts every clip

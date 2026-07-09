@@ -2,7 +2,9 @@
 
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { TimelineElement } from "../player";
+import { usePlayerStore } from "../player/store/playerStore";
 import { installReactActEnvironment, makeSelection } from "./domSelectionTestHarness";
 import { useDomSelection } from "./useDomSelection";
 
@@ -12,6 +14,7 @@ interface HarnessProps {
   activeCompPath: string | null;
   projectId: string | null;
   refreshKey: number;
+  timelineElements?: TimelineElement[];
 }
 
 function renderHarness(initialProps: HarnessProps): {
@@ -32,7 +35,7 @@ function renderHarness(initialProps: HarnessProps): {
       compIdToSrc: new Map(),
       captionEditMode: false,
       previewIframeRef: { current: null },
-      timelineElements: [],
+      timelineElements: props.timelineElements ?? [],
       setSelectedTimelineElementId: vi.fn(),
       setRightCollapsed: vi.fn(),
       setRightPanelTab: vi.fn(),
@@ -63,6 +66,10 @@ function renderHarness(initialProps: HarnessProps): {
     },
   };
 }
+
+afterEach(() => {
+  usePlayerStore.getState().reset();
+});
 
 function setupSelectedHarness() {
   const element = document.createElement("div");
@@ -129,6 +136,33 @@ describe("useDomSelection", () => {
     act(() => harness.current().setActiveGroupElement(group));
 
     expect(harness.current().domEditSelection).toBe(selection);
+    harness.cleanup();
+  });
+
+  it("keeps preview marquee selections mirrored to the full timeline selection set", () => {
+    const first = document.createElement("div");
+    first.id = "clip-1";
+    const second = document.createElement("div");
+    second.id = "clip-2";
+    const firstSelection = makeSelection("First", first);
+    const secondSelection = makeSelection("Second", second);
+    const harness = renderHarness({
+      activeCompPath: "intro.html",
+      projectId: "project-1",
+      refreshKey: 0,
+      timelineElements: [
+        { id: "clip-1", domId: "clip-1", tag: "div", start: 0, duration: 1, track: 0 },
+        { id: "clip-2", domId: "clip-2", tag: "div", start: 1, duration: 1, track: 1 },
+      ],
+    });
+
+    act(() => harness.current().applyMarqueeSelection([secondSelection, firstSelection], false));
+
+    const state = usePlayerStore.getState();
+    expect([...state.selectedElementIds]).toEqual(["clip-2", "clip-1"]);
+    expect(state.selectedElementId).toBe("clip-2");
+    expect(harness.current().domEditGroupSelections).toHaveLength(2);
+    expect(harness.current().domEditSelection).toBe(secondSelection);
     harness.cleanup();
   });
 });
