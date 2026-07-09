@@ -4,7 +4,11 @@ import type { StackingTimelineLayer, TimelineLayerId } from "./timelineTrackOrde
 import { resolveTimelineLayerStackingMove } from "./timelineLayerDrag";
 import type { TimelineStackingElement, TimelineStackingReorderIntent } from "./timelineStacking";
 
-import { resolveTimelineMinDuration } from "./timelineGroupEditing";
+import {
+  applyClipStartTrimDelta,
+  clipStartTrimDeltaBounds,
+  resolveTimelineMinDuration,
+} from "./timelineGroupEditing";
 
 export {
   clampTimelineGroupResizeDelta,
@@ -220,23 +224,15 @@ export function resolveTimelineResize(
     };
   }
 
-  const playbackRate = Math.max(0.1, input.playbackRate ?? 1);
-  const maxLeftExtensionFromMedia =
-    input.playbackStart != null ? input.playbackStart / playbackRate : Number.POSITIVE_INFINITY;
-  const minDelta = -Math.min(input.start - input.minStart, maxLeftExtensionFromMedia);
-  const maxDelta = input.duration - minDuration;
+  const { minDelta, maxDelta } = clipStartTrimDeltaBounds(input, input.minStart, minDuration);
   const clampedDelta = clamp(deltaTime, minDelta, maxDelta);
-  const nextStart = roundToCentiseconds(input.start + clampedDelta);
-  const nextDuration = roundToCentiseconds(input.duration - clampedDelta);
-  const nextPlaybackStart =
-    input.playbackStart != null
-      ? roundToCentiseconds(Math.max(0, input.playbackStart + clampedDelta * playbackRate))
-      : undefined;
+  const trimmed = applyClipStartTrimDelta(input, clampedDelta);
 
   return {
-    start: nextStart,
-    duration: nextDuration,
-    playbackStart: nextPlaybackStart,
+    start: roundToCentiseconds(trimmed.start),
+    duration: roundToCentiseconds(trimmed.duration),
+    playbackStart:
+      trimmed.playbackStart != null ? roundToCentiseconds(trimmed.playbackStart) : undefined,
   };
 }
 

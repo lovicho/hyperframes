@@ -209,6 +209,28 @@ export function findTimelineIdByAncestor(
   return null;
 }
 
+/**
+ * Resolve the timeline element id for a DOM selection: direct match first, then
+ * nearest clip ancestor. The ancestor lookup resolves against the selection's own
+ * source file, falling back to the active composition path, then index.html — so a
+ * sub-composition selection with no explicit sourceFile resolves against the comp
+ * currently open, not always the root file.
+ */
+export function resolveTimelineIdForSelection(
+  selection: DomEditSelection,
+  elements: TimelineElement[],
+  activeCompPath: string | null,
+): string | null {
+  return (
+    findMatchingTimelineElementId(selection, elements) ??
+    findTimelineIdByAncestor(
+      selection.element,
+      elements,
+      selection.sourceFile || activeCompPath || "index.html",
+    )
+  );
+}
+
 export function resolveTimelineSelectionSeekTime(
   currentTime: number,
   element: Pick<TimelineElement, "start" | "duration"> | null | undefined,

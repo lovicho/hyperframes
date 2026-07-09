@@ -4,11 +4,7 @@ import {
   getAllPreviewTargetsFromPointer,
   getPreviewTargetFromPointer,
 } from "../utils/studioPreviewHelpers";
-import {
-  findMatchingTimelineElementId,
-  findTimelineIdByAncestor,
-  type RightPanelTab,
-} from "../utils/studioHelpers";
+import { resolveTimelineIdForSelection, type RightPanelTab } from "../utils/studioHelpers";
 import {
   domEditSelectionsTargetSame,
   domEditSelectionInGroup,
@@ -96,7 +92,6 @@ export interface UseDomSelectionReturn {
   ) => Promise<DomEditSelection | null>;
   handleTimelineElementSelect: (element: TimelineElement | null) => Promise<void>;
   refreshDomEditSelectionFromPreview: (selection: DomEditSelection) => Promise<void>;
-  refreshDomEditGroupSelectionsFromPreview: (selections: DomEditSelection[]) => Promise<void>;
   applyMarqueeSelection: (selections: DomEditSelection[], additive: boolean) => void;
 }
 
@@ -208,20 +203,24 @@ export function useDomSelection({
           setRightCollapsed(false);
           setRightPanelTab("design");
         }
-        const nextSelectedTimelineId =
-          findMatchingTimelineElementId(nextSelection, timelineElements) ??
-          findTimelineIdByAncestor(
-            nextSelection.element,
-            timelineElements,
-            nextSelection.sourceFile || "index.html",
-          );
+        const nextSelectedTimelineId = resolveTimelineIdForSelection(
+          nextSelection,
+          timelineElements,
+          activeCompPath,
+        );
         setSelectedTimelineElementId(nextSelectedTimelineId);
         return;
       }
 
       setSelectedTimelineElementId(null);
     },
-    [setSelectedTimelineElementId, timelineElements, setRightCollapsed, setRightPanelTab],
+    [
+      setSelectedTimelineElementId,
+      timelineElements,
+      setRightCollapsed,
+      setRightPanelTab,
+      activeCompPath,
+    ],
   );
 
   const clearDomSelection = useCallback(() => {
@@ -401,55 +400,6 @@ export function useDomSelection({
     [activeCompPath, applyDomSelection, buildDomSelectionFromTarget, previewIframeRef],
   );
 
-  const refreshDomEditGroupSelectionsFromPreview = useCallback(
-    // fallow-ignore-next-line complexity
-    async (selections: DomEditSelection[]) => {
-      const iframe = previewIframeRef.current;
-      let doc: Document | null = null;
-      try {
-        doc = iframe?.contentDocument ?? null;
-      } catch {
-        return;
-      }
-      if (!doc) return;
-
-      const nextGroup: DomEditSelection[] = [];
-      for (const selection of selections) {
-        const element = findElementForSelection(doc, selection, activeCompPath);
-        if (!element) continue;
-        const nextSelection = await buildDomSelectionFromTarget(element);
-        if (nextSelection) nextGroup.push(nextSelection);
-      }
-      if (nextGroup.length === 0) return;
-
-      const currentSelection = domEditSelectionRef.current;
-      const nextSelection =
-        nextGroup.find((selection) => domEditSelectionsTargetSame(selection, currentSelection)) ??
-        nextGroup[0] ??
-        null;
-
-      domEditSelectionRef.current = nextSelection;
-      domEditGroupSelectionsRef.current = nextGroup;
-      setDomEditSelection(nextSelection);
-      setDomEditGroupSelections(nextGroup);
-
-      if (nextSelection) {
-        setSelectedTimelineElementId(
-          findMatchingTimelineElementId(nextSelection, timelineElements),
-        );
-      } else {
-        setSelectedTimelineElementId(null);
-      }
-    },
-    [
-      activeCompPath,
-      buildDomSelectionFromTarget,
-      setSelectedTimelineElementId,
-      timelineElements,
-      previewIframeRef,
-    ],
-  );
-
   // ── Effects ──
 
   // Clear hover unconditionally on composition/project/preview change
@@ -531,22 +481,14 @@ export function useDomSelection({
       domEditGroupSelectionsRef.current = nextGroup;
       setDomEditSelection(nextSelection);
       setDomEditGroupSelections(nextGroup);
-      const nextTimelineId =
-        findMatchingTimelineElementId(nextSelection, timelineElements) ??
-        findTimelineIdByAncestor(
-          nextSelection.element,
-          timelineElements,
-          nextSelection.sourceFile || "index.html",
-        );
+      const nextTimelineId = resolveTimelineIdForSelection(
+        nextSelection,
+        timelineElements,
+        activeCompPath,
+      );
       const nextTimelineIds = nextGroup
-        .map(
-          (selection) =>
-            findMatchingTimelineElementId(selection, timelineElements) ??
-            findTimelineIdByAncestor(
-              selection.element,
-              timelineElements,
-              selection.sourceFile || "index.html",
-            ),
+        .map((selection) =>
+          resolveTimelineIdForSelection(selection, timelineElements, activeCompPath),
         )
         .filter((id): id is string => Boolean(id));
       if (nextTimelineIds.length > 0) {
@@ -555,7 +497,7 @@ export function useDomSelection({
         setSelectedTimelineElementId(null);
       }
     },
-    [applyDomSelection, timelineElements, setSelectedTimelineElementId],
+    [applyDomSelection, timelineElements, setSelectedTimelineElementId, activeCompPath],
   );
 
   // Disabled inspector effect
@@ -592,7 +534,6 @@ export function useDomSelection({
     buildDomSelectionForTimelineElement,
     handleTimelineElementSelect,
     refreshDomEditSelectionFromPreview,
-    refreshDomEditGroupSelectionsFromPreview,
     applyMarqueeSelection,
   };
 }

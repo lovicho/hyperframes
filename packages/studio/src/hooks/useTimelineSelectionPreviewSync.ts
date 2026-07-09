@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import type { TimelineElement } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
-import { findMatchingTimelineElementId, findTimelineIdByAncestor } from "../utils/studioHelpers";
+import { resolveTimelineIdForSelection } from "../utils/studioHelpers";
 
 interface UseTimelineSelectionPreviewSyncParams {
   selectedElementId: string | null;
@@ -24,21 +24,6 @@ function orderSelectedIds(ids: Set<string>, anchor: string | null): string[] {
   const ordered = [...ids];
   if (!anchor || !ids.has(anchor)) return ordered;
   return [anchor, ...ordered.filter((id) => id !== anchor)];
-}
-
-function selectionTimelineId(
-  selection: DomEditSelection,
-  timelineElements: TimelineElement[],
-  activeCompPath: string | null,
-): string | null {
-  return (
-    findMatchingTimelineElementId(selection, timelineElements) ??
-    findTimelineIdByAncestor(
-      selection.element,
-      timelineElements,
-      selection.sourceFile || activeCompPath || "index.html",
-    )
-  );
 }
 
 function selectionIdsMatch(currentIds: string[], selectedIds: string[]): boolean {
@@ -72,7 +57,9 @@ export function useTimelineSelectionPreviewSync({
           ? [domEditSelection]
           : [];
     const currentIds = currentSelections
-      .map((selection) => selectionTimelineId(selection, timelineElements, activeCompPath))
+      .map((selection) =>
+        resolveTimelineIdForSelection(selection, timelineElements, activeCompPath),
+      )
       .filter((id): id is string => Boolean(id));
 
     if (selectedIds.length === 0) {
