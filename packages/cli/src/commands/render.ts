@@ -1688,6 +1688,8 @@ function trackRenderMetrics(
     deClampReason: perf?.drawElement?.clampReason,
     deWorkerInversion: perf?.drawElement?.workerInversion,
     dePreInversionWorkers: perf?.drawElement?.preInversionWorkers,
+    deParallelRouter: perf?.drawElement?.parallelRouter,
+    dePreRouterWorkers: perf?.drawElement?.preRouterWorkers,
     deGateReason: perf?.drawElement?.gateReason,
     deWorkerEncode: perf?.drawElement?.workerEncode,
     deVerifyArmed: perf?.drawElement?.verifyArmed,

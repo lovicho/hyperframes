@@ -67,6 +67,9 @@ export interface DrawElementPerfInput {
   workerInversion?: "inverted" | "reverted";
   /** Auto-resolved worker count before the inversion pinned it to 1 (set only when the inversion fired). */
   preInversionWorkers?: number;
+  parallelRouter?: "routed" | "reverted";
+  /** Auto-resolved worker count before the router pinned it to 3 (set only when the router fired). */
+  preRouterWorkers?: number;
   selfVerifyFallback: boolean;
   fallbackReason?: string;
   drainStats?: {
@@ -96,6 +99,8 @@ function aggregateDrawElement(
     clampReason: de.clampReason,
     workerInversion: de.workerInversion ?? "none",
     preInversionWorkers: de.preInversionWorkers,
+    parallelRouter: de.parallelRouter ?? "none",
+    preRouterWorkers: de.preRouterWorkers,
     gateReason: gateReasons.length > 0 ? gateReasons.join("|") : undefined,
     workerEncode: perfs.some((p) => p.deWorkerEncode),
     verifyArmed: perfs.reduce((sum, p) => sum + (p.deVerifyArmed ?? 0), 0),

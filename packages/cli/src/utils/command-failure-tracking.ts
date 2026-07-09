@@ -54,7 +54,23 @@ function wrapCommand(
         // Reject unknown flags before the command body: citty silently ignores
         // them otherwise, dropping the value (e.g. `render --out x` fell back to
         // the default output path). Inside the try so the rejection is reported.
-        assertKnownFlags(cmd, ctx?.rawArgs ?? []);
+        //
+        // A command group (subCommands + fallback-help run) delegating to a
+        // subcommand must NOT assert here: the flags belong to the subcommand's
+        // table, not the group's, and would be falsely rejected (e.g.
+        // `figma component <ref> --name x`). The wrapped subcommand loaders
+        // below assert the leaf's own table, so typo protection is preserved.
+        // Heuristic caveat: "first non-dash token names a subcommand" is sound
+        // only while command groups declare no flags of their own — if a group
+        // grows a flag whose value could match a subcommand name, replace this
+        // with a real argv parse.
+        const rawArgs = ctx?.rawArgs ?? [];
+        const firstPositional = rawArgs.find((tok) => tok && !tok.startsWith("-"));
+        const delegatesToSub =
+          cmd.subCommands != null &&
+          firstPositional != null &&
+          Object.prototype.hasOwnProperty.call(cmd.subCommands, firstPositional);
+        if (!delegatesToSub) assertKnownFlags(cmd, rawArgs);
         return await run(ctx);
       } catch (err) {
         try {

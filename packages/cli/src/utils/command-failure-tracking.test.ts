@@ -39,6 +39,60 @@ describe("trackCommandFailures", () => {
     expect(onFailure).not.toHaveBeenCalled();
   });
 
+  it("rejects an unknown flag on a leaf command", async () => {
+    const wrapped = trackCommandFailures(
+      () =>
+        Promise.resolve({
+          meta: { name: "leaf" },
+          args: { out: { type: "string" } },
+          run: () => Promise.resolve(),
+        } as CommandDef),
+      vi.fn(),
+    );
+    const cmd = await wrapped();
+    await expect(
+      (cmd.run as (ctx: unknown) => Promise<unknown>)({ rawArgs: ["--bogus", "x"] }),
+    ).rejects.toThrow(/--bogus/);
+  });
+
+  it("skips the unknown-flag check when a command group delegates to a subcommand", async () => {
+    // `figma component <ref> --name x`: --name belongs to the subcommand's
+    // table; the group (subCommands + fallback-help run) must not reject it.
+    const run = vi.fn(() => Promise.resolve());
+    const wrapped = trackCommandFailures(
+      () =>
+        Promise.resolve({
+          meta: { name: "figma" },
+          subCommands: { component: () => Promise.resolve({ meta: { name: "component" } }) },
+          run,
+        } as unknown as CommandDef),
+      vi.fn(),
+    );
+    const cmd = await wrapped();
+    await expect(
+      (cmd.run as (ctx: unknown) => Promise<unknown>)({
+        rawArgs: ["component", "KEY:1-2", "--name", "hero"],
+      }),
+    ).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalled();
+  });
+
+  it("still rejects an unknown flag when the group is NOT delegating", async () => {
+    const wrapped = trackCommandFailures(
+      () =>
+        Promise.resolve({
+          meta: { name: "figma" },
+          subCommands: { component: () => Promise.resolve({ meta: { name: "component" } }) },
+          run: () => Promise.resolve(),
+        } as unknown as CommandDef),
+      vi.fn(),
+    );
+    const cmd = await wrapped();
+    await expect(
+      (cmd.run as (ctx: unknown) => Promise<unknown>)({ rawArgs: ["--bogus"] }),
+    ).rejects.toThrow(/--bogus/);
+  });
+
   it("passes through a command with no run() untouched", async () => {
     const onFailure = vi.fn();
     const parent: CommandDef = { meta: { name: "parent" } };

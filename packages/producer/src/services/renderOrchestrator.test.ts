@@ -29,6 +29,8 @@ import {
   resolveCaptureForceScreenshotForPageSideCompositing,
   shouldDiscardProbeSessionForPageSideCompositing,
   resolveInversionRetryPlan,
+  resolveParallelRouterRetryPlan,
+  shouldPreferParallelDrawElement,
   shouldPreferSingleWorkerDrawElement,
   shouldUseStreamingEncode,
 } from "./renderOrchestrator.js";
@@ -400,6 +402,14 @@ describe("shouldUseStreamingEncode", () => {
   it("keeps png-sequence and parallel capture on the non-streaming path", () => {
     expect(shouldUseStreamingEncode(streamingEnabledConfig, "png-sequence", 1, 240)).toBe(false);
     expect(shouldUseStreamingEncode(streamingEnabledConfig, "mp4", 2, 240)).toBe(false);
+  });
+
+  it("forceParallelStream overrides the parallel-capture clamp for verified multi-worker streaming", () => {
+    expect(shouldUseStreamingEncode(streamingEnabledConfig, "mp4", 3, 240, true)).toBe(true);
+    expect(shouldUseStreamingEncode(streamingEnabledConfig, "mp4", 3, 240, false)).toBe(false);
+    expect(shouldUseStreamingEncode(streamingEnabledConfig, "png-sequence", 3, 240, true)).toBe(
+      false,
+    );
   });
 
   it("keeps renders over the configured max duration on normal encoding", () => {
@@ -1699,6 +1709,126 @@ describe("resolveInversionRetryPlan (self-verify retry rollback)", () => {
       workerCount: 1,
       useStreamingEncode: true,
       deWorkerInversion: "reverted",
+    });
+  });
+});
+
+describe("shouldPreferParallelDrawElement (DE parallel router)", () => {
+  const eligible = {
+    workerCount: 5,
+    requestedWorkers: "auto" as const,
+    useDrawElement: true,
+    deCompileGate: undefined,
+    forceScreenshot: false,
+    outputFormat: "mp4" as const,
+    totalFrames: 2381,
+    minFrames: 2000,
+    layeredOrEffectRoute: false,
+    supersampling: false,
+    probeDeGated: false,
+    experimentalParallelDeOptIn: false,
+    routerEnabled: true,
+  };
+
+  it("routes an auto-resolved multi-worker render for an eligible long comp", () => {
+    expect(shouldPreferParallelDrawElement(eligible)).toBe(true);
+  });
+
+  it("is disabled by default (routerEnabled: false is the shipped default)", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, routerEnabled: false })).toBe(false);
+  });
+
+  it("honors explicitly requested workers", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, requestedWorkers: 3 })).toBe(false);
+  });
+
+  it("routes for requestedWorkers undefined — the value production actually passes for auto", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, requestedWorkers: undefined })).toBe(
+      true,
+    );
+  });
+
+  it("skips comps routed to layered/HDR/shader paths (drawElement never runs there)", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, layeredOrEffectRoute: true })).toBe(
+      false,
+    );
+  });
+
+  it("skips supersampled renders (engine init-time DE gate)", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, supersampling: true })).toBe(false);
+  });
+
+  it("skips when the probe session already shows DE gated out", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, probeDeGated: true })).toBe(false);
+  });
+
+  it("honors the explicit experimental parallel-DE opt-in (already parallel, router is a no-op)", () => {
+    expect(
+      shouldPreferParallelDrawElement({ ...eligible, experimentalParallelDeOptIn: true }),
+    ).toBe(false);
+  });
+
+  it("skips below the amortization threshold (benchmark: real-work comps clear 1.25x at ~2,000+ frames)", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, totalFrames: 915 })).toBe(false);
+    expect(shouldPreferParallelDrawElement({ ...eligible, totalFrames: 2000 })).toBe(true);
+  });
+
+  it("is disabled by minFrames <= 0 (HF_DE_PARALLEL_MIN_FRAMES=0 kill switch)", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, minFrames: 0 })).toBe(false);
+    expect(shouldPreferParallelDrawElement({ ...eligible, minFrames: -1 })).toBe(false);
+  });
+
+  it("requires drawElement to be enabled and ungated", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, useDrawElement: false })).toBe(false);
+    expect(shouldPreferParallelDrawElement({ ...eligible, deCompileGate: "3d" })).toBe(false);
+    expect(shouldPreferParallelDrawElement({ ...eligible, forceScreenshot: true })).toBe(false);
+  });
+
+  it("only applies to mp4 (the benchmarked configuration)", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, outputFormat: "webm" })).toBe(false);
+  });
+
+  it("is a no-op when workers already resolved to 1", () => {
+    expect(shouldPreferParallelDrawElement({ ...eligible, workerCount: 1 })).toBe(false);
+  });
+});
+
+describe("resolveParallelRouterRetryPlan (self-verify retry rollback)", () => {
+  const cfg = { enableStreamingEncode: true, streamingEncodeMaxDurationSeconds: 240 };
+
+  it("returns null when the render was never router-routed", () => {
+    expect(
+      resolveParallelRouterRetryPlan({
+        deParallelRouter: undefined,
+        preRouterWorkerCount: 5,
+        cfg,
+        outputFormat: "mp4",
+        durationSeconds: 80,
+      }),
+    ).toBe(null);
+    expect(
+      resolveParallelRouterRetryPlan({
+        deParallelRouter: "reverted",
+        preRouterWorkerCount: 5,
+        cfg,
+        outputFormat: "mp4",
+        durationSeconds: 80,
+      }),
+    ).toBe(null);
+  });
+
+  it("restores the pre-router worker count and routes multi-worker retries to disk", () => {
+    const plan = resolveParallelRouterRetryPlan({
+      deParallelRouter: "routed",
+      preRouterWorkerCount: 5,
+      cfg,
+      outputFormat: "mp4",
+      durationSeconds: 80,
+    });
+    expect(plan).toEqual({
+      workerCount: 5,
+      useStreamingEncode: false,
+      deParallelRouter: "reverted",
     });
   });
 });

@@ -126,6 +126,8 @@ export function trackRenderComplete(
     deClampReason?: string;
     deWorkerInversion?: string;
     dePreInversionWorkers?: number;
+    deParallelRouter?: string;
+    dePreRouterWorkers?: number;
     deGateReason?: string;
     deWorkerEncode?: boolean;
     deVerifyArmed?: number;
@@ -204,6 +206,8 @@ export function trackRenderComplete(
       de_clamp_reason: props.deClampReason,
       de_worker_inversion: props.deWorkerInversion,
       de_pre_inversion_workers: props.dePreInversionWorkers,
+      de_parallel_router: props.deParallelRouter,
+      de_pre_router_workers: props.dePreRouterWorkers,
       de_gate_reason: props.deGateReason,
       de_worker_encode: props.deWorkerEncode,
       de_verify_armed: props.deVerifyArmed,

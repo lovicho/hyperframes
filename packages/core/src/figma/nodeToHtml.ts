@@ -162,7 +162,12 @@ interface RenderContext {
 }
 
 function uniqueSlug(ctx: RenderContext, name: string): string {
-  const base = slugify(name);
+  const raw = slugify(name);
+  // A digit-leading id ("3D Object" → "3d-object") is valid HTML but not a
+  // valid CSS selector — querySelector("#3d-object") throws, which breaks
+  // GSAP targeting and figma-motion translation. Prefix so ids stay
+  // selector-safe.
+  const base = /^[0-9]/.test(raw) ? `n${raw}` : raw;
   let slug = base;
   let n = 2;
   while (ctx.usedSlugs.has(slug)) slug = `${base}-${n++}`;
@@ -186,7 +191,7 @@ function unresolvedAttr(node: FigmaNodeDocument, ctx: RenderContext): string {
   return ` data-figma-unresolved="${escapeHtml(props.join(" "))}"`;
 }
 
-function geometryCss(node: FigmaNodeDocument, ctx: RenderContext, isRoot: boolean): string[] {
+function geometryCss(node: FigmaNodeDocument, parentBox: Box, isRoot: boolean): string[] {
   const box = boxOf(node);
   const styles: string[] = [];
   if (!box) return styles;
@@ -197,10 +202,14 @@ function geometryCss(node: FigmaNodeDocument, ctx: RenderContext, isRoot: boolea
       `height: ${round(box.height)}px`,
     );
   } else {
+    // CSS absolute positioning is relative to the nearest positioned
+    // ancestor — the PARENT's box, not the root origin. Subtracting the root
+    // for every depth double-offsets nested children (each level re-adds its
+    // ancestors' offsets), drifting content down-right and off-frame.
     styles.push(
       "position: absolute",
-      `left: ${round(box.x - ctx.origin.x)}px`,
-      `top: ${round(box.y - ctx.origin.y)}px`,
+      `left: ${round(box.x - parentBox.x)}px`,
+      `top: ${round(box.y - parentBox.y)}px`,
       `width: ${round(box.width)}px`,
       `height: ${round(box.height)}px`,
     );
@@ -243,10 +252,15 @@ function decorationCss(node: FigmaNodeDocument, ctx: RenderContext): string[] {
 // instead of a RangeError; real figma frames are nowhere near this deep.
 const MAX_DEPTH = 500;
 
-function renderChildren(node: FigmaNodeDocument, ctx: RenderContext, depth: number): string {
+function renderChildren(
+  node: FigmaNodeDocument,
+  ctx: RenderContext,
+  depth: number,
+  parentBox: Box,
+): string {
   const childHtml: string[] = [];
   for (const child of childDocuments(node)) {
-    const rendered = renderNodeHtml(child, ctx, false, depth + 1);
+    const rendered = renderNodeHtml(child, ctx, false, depth + 1, parentBox);
     if (rendered.length > 0) childHtml.push(rendered);
   }
   return childHtml.length > 0 ? `\n${childHtml.join("\n")}\n` : "";
@@ -257,11 +271,12 @@ function renderNodeHtml(
   ctx: RenderContext,
   isRoot: boolean,
   depth = 0,
+  parentBox: Box = ctx.origin,
 ): string {
   if (node.visible === false || depth > MAX_DEPTH) return "";
   const slug = uniqueSlug(ctx, node.name);
   const style = escapeHtml(
-    [...geometryCss(node, ctx, isRoot), ...decorationCss(node, ctx)].join("; "),
+    [...geometryCss(node, parentBox, isRoot), ...decorationCss(node, ctx)].join("; "),
   );
   // data-hf-snippet marks the file as a mountable fragment, not a standalone
   // composition — the project linter skips composition-root rules for it.
@@ -278,7 +293,7 @@ function renderNodeHtml(
     return `<div ${idAttrs} style="${style}">${text}</div>`;
   }
 
-  return `<div ${idAttrs} style="${style}">${renderChildren(node, ctx, depth)}</div>`;
+  return `<div ${idAttrs} style="${style}">${renderChildren(node, ctx, depth, boxOf(node) ?? parentBox)}</div>`;
 }
 
 export interface NodeToHtmlOptions {

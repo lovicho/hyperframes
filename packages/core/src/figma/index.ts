@@ -59,5 +59,11 @@ export type {
   TokensToVariablesResult,
 } from "./tokensToVariables";
 export { mapEase } from "./motionEase";
+export {
+  motionContextToDocs,
+  type MotionContextResponse,
+  type MotionContextNode,
+  type MotionContextToDocsOptions,
+} from "./motionContextToDocs";
 export { motionToGsap } from "./motionToGsap";
 export { emitTimelineScript } from "./emitTimelineScript";

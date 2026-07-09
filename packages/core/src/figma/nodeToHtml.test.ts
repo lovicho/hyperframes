@@ -52,6 +52,56 @@ describe("nodeToHtml", () => {
     expect(out.html).toContain("background-color: #0066FF");
   });
 
+  it("positions nested children relative to their PARENT, not the root", () => {
+    const out = nodeToHtml(
+      frame([
+        {
+          id: "1:2",
+          name: "Group",
+          type: "FRAME",
+          absoluteBoundingBox: BOX(600, 400, 300, 200),
+          children: [
+            {
+              id: "1:3",
+              name: "Inner",
+              type: "RECTANGLE",
+              absoluteBoundingBox: BOX(620, 440, 100, 40),
+              fills: [SOLID_BLUE],
+            },
+          ],
+        },
+      ]),
+      { resolved: [], unresolved: [] },
+    );
+    // Group at canvas (600,400) inside root (100,200) → left 500, top 200.
+    expect(out.html).toContain("left: 500px");
+    expect(out.html).toContain("top: 200px");
+    // Inner at canvas (620,440) inside Group (600,400) → left 20, top 40 —
+    // NOT root-relative 520/240, which double-offsets when CSS resolves
+    // absolute position against the positioned parent.
+    expect(out.html).toContain("left: 20px");
+    expect(out.html).toContain("top: 40px");
+    expect(out.html).not.toContain("left: 520px");
+  });
+
+  it("prefixes digit-leading slugs so ids stay CSS-selector-safe", () => {
+    const out = nodeToHtml(
+      frame([
+        {
+          id: "1:2",
+          name: "3D Object - Headphones",
+          type: "RECTANGLE",
+          absoluteBoundingBox: BOX(120, 220, 100, 40),
+          fills: [SOLID_BLUE],
+        },
+      ]),
+      { resolved: [], unresolved: [] },
+    );
+    // "#3d-object-headphones" would throw in querySelector/GSAP targeting
+    expect(out.html).toContain('id="n3d-object-headphones"');
+    expect(out.html).not.toContain('id="3d-object-headphones"');
+  });
+
   it("emits var() with literal fallback for resolved bindings", () => {
     const out = nodeToHtml(
       frame([

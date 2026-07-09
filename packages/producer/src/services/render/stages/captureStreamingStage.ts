@@ -113,6 +113,14 @@ export interface CaptureStreamingStageInput {
   log: ProducerLogger;
   workerCount: number;
   probeSession: CaptureSession | null;
+  /**
+   * Per-render override from the DE parallel router — see
+   * deParallelStreamForced's declaration in renderOrchestrator.ts. Distinct
+   * from the `HF_DE_PARALLEL_STREAM` manual opt-in (still read directly by
+   * this stage) because the router's decision must not leak across
+   * concurrently-running renders sharing this process via a global env var.
+   */
+  forceParallelStream?: boolean;
   /** For the spawn-failure log message context only. */
   outputFormat: string;
   /** Pre-built encoder options; passed straight to `spawnStreamingEncoder`. */
@@ -456,6 +464,7 @@ export async function runCaptureStreamingStage(
     assertNotAborted,
     onProgress,
     dedupPerfs,
+    forceParallelStream,
   } = input;
   let { workerCount, probeSession } = input;
   let lastBrowserConsole: string[] = [];
@@ -507,13 +516,14 @@ export async function runCaptureStreamingStage(
 
     if (workerCount > 1) {
       // Parallel capture → streaming encode
-      // HF_DE_PARALLEL_STREAM (opt-in): interleaved distribution — worker i
-      // takes frames i, i+N, i+2N… so the ordered writer's reorder window is
-      // N frames and workers run in lockstep instead of serializing behind
-      // contiguous ranges (see distributeFramesInterleaved). Each worker runs
-      // the depth-2 pipelined drawElement produce when its session initialized
-      // in drawelement mode.
-      const deParallelStream = process.env.HF_DE_PARALLEL_STREAM === "true";
+      // HF_DE_PARALLEL_STREAM (manual opt-in) / forceParallelStream (router):
+      // interleaved distribution — worker i takes frames i, i+N, i+2N… so the
+      // ordered writer's reorder window is N frames and workers run in
+      // lockstep instead of serializing behind contiguous ranges (see
+      // distributeFramesInterleaved). Each worker runs the depth-2 pipelined
+      // drawElement produce when its session initialized in drawelement mode.
+      const deParallelStream =
+        forceParallelStream === true || process.env.HF_DE_PARALLEL_STREAM === "true";
       const tasks = deParallelStream
         ? distributeFramesInterleaved(totalFrames, workerCount, workDir)
         : distributeFrames(totalFrames, workerCount, workDir);
