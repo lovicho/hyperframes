@@ -40,6 +40,7 @@ export type {
   CaptureResult,
   CaptureBufferResult,
   CapturePerfSummary,
+  SubTimelineWaitOutcome,
 } from "./types.js";
 
 // ── Configuration ──────────────────────────────────────────────────────────────
@@ -176,6 +177,7 @@ export type {
 export {
   calculateOptimalWorkers,
   distributeFrames,
+  distributeFramesInterleaved,
   executeParallelCapture,
   mergeWorkerFrames,
   getSystemResources,

@@ -61,6 +61,7 @@ import {
   createCaptureSession,
   createFrameReorderBuffer,
   distributeFrames,
+  distributeFramesInterleaved,
   executeParallelCapture,
   getCapturePerfSummary,
   getFfmpegBinary,
@@ -179,24 +180,19 @@ async function psnrDb(a: Buffer, b: Buffer): Promise<number> {
   }
 }
 
-async function runWorkerEncodePipelineLoop(
-  session: CaptureSession,
-  totalFrames: number,
-  job: CaptureStreamingStageInput["job"],
-  currentEncoder: StreamingEncoder,
-  reorderBuffer: ReturnType<typeof createFrameReorderBuffer>,
-  assertNotAborted: () => void,
-  onProgress: CaptureStreamingStageInput["onProgress"],
-  log: CaptureStreamingStageInput["log"],
-  stats: DeDrainStats,
-): Promise<void> {
-  let prev: { idx: number; encodeResult: Promise<Buffer> } | null = null;
-  const frameTime = (i: number) => (i * job.config.fps.den) / job.config.fps.num;
-
-  // ── drawElement drain-time safety checks (ungated-release safety net) ──
-  // Runs on every drained frame. Drains execute strictly between capture
-  // evaluates (see the batch NOTE below), so a re-seek + recapture here is
-  // safe — nothing else is mutating page time.
+// ── drawElement drain-time safety checks (ungated-release safety net) ──
+// Shared by the sequential worker-encode loop and the interleaved parallel
+// streaming drain (HF_DE_PARALLEL_STREAM): the guard is session-parameterized
+// so each parallel worker's frames verify against ITS OWN session's
+// pre-injection ground truth (all sessions arm the same K sample indices from
+// CaptureOptions.compositionDurationSeconds, so every sample is checked by
+// whichever worker owns that frame).
+function createDrainFrameGuard(args: {
+  log: CaptureStreamingStageInput["log"];
+  stats: DeDrainStats;
+  frameTime: (i: number) => number;
+}): (session: CaptureSession, idx: number, buf: Buffer) => Promise<Buffer> {
+  const { log, stats, frameTime } = args;
   //
   // 1. Blank guard (worker-path analogue of the serial-path guard in
   //    frameCapture): drawElement intermittently returns an anomalously small
@@ -237,7 +233,7 @@ async function runWorkerEncodePipelineLoop(
     return Math.max(absFloor, median * 0.12);
   };
   let acceptedSmall: Buffer | null = null;
-  const guardFrame = async (idx: number, buf: Buffer): Promise<Buffer> => {
+  return async (session: CaptureSession, idx: number, buf: Buffer): Promise<Buffer> => {
     if (process.env.HF_FORCE_DRAWELEMENT !== "1") {
       const floor = blankFloor();
       if (floor > 0 && buf.length < floor && acceptedSmall?.equals(buf)) {
@@ -326,6 +322,23 @@ async function runWorkerEncodePipelineLoop(
     }
     return buf;
   };
+}
+
+async function runWorkerEncodePipelineLoop(
+  session: CaptureSession,
+  totalFrames: number,
+  job: CaptureStreamingStageInput["job"],
+  currentEncoder: StreamingEncoder,
+  reorderBuffer: ReturnType<typeof createFrameReorderBuffer>,
+  assertNotAborted: () => void,
+  onProgress: CaptureStreamingStageInput["onProgress"],
+  log: CaptureStreamingStageInput["log"],
+  stats: DeDrainStats,
+): Promise<void> {
+  let prev: { idx: number; encodeResult: Promise<Buffer> } | null = null;
+  const frameTime = (i: number) => (i * job.config.fps.den) / job.config.fps.num;
+  const guard = createDrainFrameGuard({ log, stats, frameTime });
+  const guardFrame = (idx: number, buf: Buffer): Promise<Buffer> => guard(session, idx, buf);
 
   const drainPrev = async (): Promise<void> => {
     if (!prev) return;
@@ -494,43 +507,127 @@ export async function runCaptureStreamingStage(
 
     if (workerCount > 1) {
       // Parallel capture → streaming encode
-      const tasks = distributeFrames(totalFrames, workerCount, workDir);
+      // HF_DE_PARALLEL_STREAM (opt-in): interleaved distribution — worker i
+      // takes frames i, i+N, i+2N… so the ordered writer's reorder window is
+      // N frames and workers run in lockstep instead of serializing behind
+      // contiguous ranges (see distributeFramesInterleaved). Each worker runs
+      // the depth-2 pipelined drawElement produce when its session initialized
+      // in drawelement mode.
+      const deParallelStream = process.env.HF_DE_PARALLEL_STREAM === "true";
+      const tasks = deParallelStream
+        ? distributeFramesInterleaved(totalFrames, workerCount, workDir)
+        : distributeFrames(totalFrames, workerCount, workDir);
 
-      const onFrameBuffer = async (frameIndex: number, buffer: Buffer): Promise<void> => {
-        await reorderBuffer.waitForFrame(frameIndex);
-        ensureFrameWritten(await currentEncoder.writeFrame(buffer), frameIndex, currentEncoder);
-        reorderBuffer.advanceTo(frameIndex + 1);
+      // Drain-time safety net for parallel drawElement frames: the SAME
+      // blank-guard + PSNR self-verify the sequential worker-encode drain
+      // runs, session-parameterized so each frame verifies against its
+      // owning worker's pre-injection ground truth. A verification failure
+      // rejects the worker, executeParallelCapture rethrows, and the
+      // orchestrator's DrawElementVerificationError handler re-renders via
+      // screenshot (post-#2026 it also reverts any worker inversion).
+      // Intentionally ONE guard shared by all workers rather than one per
+      // worker, so the rolling median it tracks is computed across every
+      // worker's interleaved frames together — a better signal than
+      // per-worker medians would be. This IS touched from concurrent workers
+      // across real await points (recapture, PSNR), so the shared
+      // `sizes`/`absFloor`/`acceptedSmall` state can interleave — safe by
+      // construction rather than by single-threadedness: `absFloor` only
+      // ratchets down (order-independent min), `sizes` is append-only (order
+      // doesn't affect the median once ≥12 samples exist), and
+      // `acceptedSmall`'s fast path only ever fires on exact byte-equality
+      // against a buffer some worker already re-verified deterministic — so
+      // whichever worker's buffer lands there, the equality check itself is
+      // what re-validates it, not which worker wrote it (review).
+      const parallelStats: DeDrainStats = {
+        verifyChecked: 0,
+        blankSuspects: 0,
+        blankDeterministicAccepts: 0,
+        blankRecaptures: 0,
+      };
+      const parallelGuard = createDrainFrameGuard({
+        log,
+        stats: parallelStats,
+        frameTime: (i: number) => (i * job.config.fps.den) / job.config.fps.num,
+      });
+      let parallelGuardRan = false;
+      // First guard/write failure aborts the reorder buffer so peer workers
+      // parked in waitForFrame reject instead of deadlocking the pool (the
+      // pool awaits ALL workers before surfacing errors). The original error
+      // is rethrown below so DrawElementVerificationError keeps its type —
+      // executeParallelCapture flattens worker errors to strings.
+      let parallelDrainError: Error | null = null;
+      const onFrameBuffer = async (
+        frameIndex: number,
+        buffer: Buffer,
+        workerSession: CaptureSession,
+      ): Promise<void> => {
+        try {
+          if (deParallelStream && workerSession.captureMode === "drawelement") {
+            parallelGuardRan = true;
+            buffer = await parallelGuard(workerSession, frameIndex, buffer);
+          }
+          await reorderBuffer.waitForFrame(frameIndex);
+          ensureFrameWritten(await currentEncoder.writeFrame(buffer), frameIndex, currentEncoder);
+          reorderBuffer.advanceTo(frameIndex + 1);
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err));
+          if (!parallelDrainError) {
+            parallelDrainError = e;
+            reorderBuffer.abort(e);
+          }
+          throw e;
+        }
       };
 
-      const workerResults = await executeParallelCapture(
-        fileServer.url,
-        workDir,
-        tasks,
-        buildCaptureOptions(),
-        createRenderVideoFrameInjector,
-        abortSignal,
-        (progress) => {
-          job.framesRendered = progress.capturedFrames;
-          const frameProgress = progress.capturedFrames / progress.totalFrames;
-          const progressPct = 25 + frameProgress * 55;
+      let workerResults;
+      try {
+        workerResults = await executeParallelCapture(
+          fileServer.url,
+          workDir,
+          tasks,
+          buildCaptureOptions(),
+          createRenderVideoFrameInjector,
+          abortSignal,
+          (progress) => {
+            job.framesRendered = progress.capturedFrames;
+            const frameProgress = progress.capturedFrames / progress.totalFrames;
+            const progressPct = 25 + frameProgress * 55;
 
-          if (
-            progress.capturedFrames % 30 === 0 ||
-            progress.capturedFrames === progress.totalFrames
-          ) {
-            updateJobStatus(
-              job,
-              "rendering",
-              `Streaming frame ${progress.capturedFrames}/${progress.totalFrames} (${workerCount} workers)`,
-              Math.round(progressPct),
-              onProgress,
-            );
-          }
-        },
-        onFrameBuffer,
-        captureCfg,
-      );
+            if (
+              progress.capturedFrames % 30 === 0 ||
+              progress.capturedFrames === progress.totalFrames
+            ) {
+              updateJobStatus(
+                job,
+                "rendering",
+                `Streaming frame ${progress.capturedFrames}/${progress.totalFrames} (${workerCount} workers)`,
+                Math.round(progressPct),
+                onProgress,
+              );
+            }
+          },
+          onFrameBuffer,
+          // Interleaved DE workers each need their own browser PROCESS:
+          // pages co-tenant in one browser share one compositor, whose
+          // internal frame scheduling deprioritizes non-active pages — their
+          // canvas `paint` events starve and the drawElement paint-wait slows
+          // ~3x (measured: 86s vs 30s on a 3,245-frame rAF comp). This is
+          // Chromium's internal frame-production scheduling on ALL platforms,
+          // NOT the Linux-only HeadlessExperimental.beginFrame capture mode.
+          deParallelStream ? { ...captureCfg, enableBrowserPool: false } : captureCfg,
+        );
+      } catch (err) {
+        // Surface the TYPED drain error (DrawElementVerificationError) so the
+        // orchestrator's verify-retry handler recognizes it — the worker pool
+        // flattens worker errors into a plain message string.
+        if (parallelDrainError) throw parallelDrainError;
+        throw err;
+      }
+      if (parallelDrainError) throw parallelDrainError;
       pushWorkerDedupPerfs(workerResults, dedupPerfs);
+      if (parallelGuardRan) {
+        deDrainStats = parallelStats;
+      }
 
       if (probeSession) {
         captureBeyondViewport = probeSession.options.captureBeyondViewport;

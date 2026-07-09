@@ -67,6 +67,7 @@ import {
   LOW_MEMORY_TOTAL_MB_THRESHOLD,
   assertConfiguredFfmpegBinariesExist,
   type CapturePerfSummary,
+  type SubTimelineWaitOutcome,
   resolveBrowserGpuMode,
   resolveHeadlessShellPath,
   scaleProtocolTimeoutForComposition,
@@ -90,7 +91,11 @@ import { buildRenderErrorDetails, cleanupRenderResources, safeCleanup } from "./
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { formatCaptureFrameName } from "../utils/paths.js";
 import { resolveEffectiveHdrMode } from "./render/hdrMode.js";
-import { buildRenderPerfSummary, pushWorkerDedupPerfs } from "./render/perfSummary.js";
+import {
+  buildRenderPerfSummary,
+  pushWorkerDedupPerfs,
+  worstSubTimelineWaitOutcome,
+} from "./render/perfSummary.js";
 import { getCaptureStageBrowserConsole } from "./render/captureStageError.js";
 import { resolveVideoCaptureBeyondViewport } from "./render/captureBeyondViewport.js";
 import {
@@ -322,6 +327,8 @@ export interface RenderPerfSummary {
    * captured the most frames when parallel workers report separately.
    */
   captureP50Ms?: number;
+  /** Worst sub-composition timeline wait outcome across sessions. */
+  subTimelineWait?: SubTimelineWaitOutcome;
   capturePeakMs?: number;
   captureCalibration?: {
     sampledFrames: number[];
@@ -455,6 +462,8 @@ export interface RenderJob {
     perfStages?: Record<string, number>;
     hdrDiagnostics?: HdrDiagnostics;
     observability?: RenderObservabilitySummary;
+    /** Worst sub-composition timeline wait outcome across sessions captured before the failure. */
+    subTimelineWait?: SubTimelineWaitOutcome;
   };
 }
 
@@ -954,6 +963,13 @@ export function shouldUseStreamingEncode(
   if (outputFormat === "gif") return false;
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return false;
   if (durationSeconds > cfg.streamingEncodeMaxDurationSeconds) return false;
+  // SPIKE (HF_DE_PARALLEL_STREAM): allow multi-worker streaming for the
+  // interleaved drawElement produce experiment. Contiguous-chunk parallel
+  // streaming stalls (worker k+1's first frame waits for ALL of worker k's),
+  // so this only makes sense with the interleaved distribution the capture
+  // stage selects under the same flag. Explicit opt-in, unverified — do not
+  // ship default-on without threading guardFrame through onFrameBuffer.
+  if (process.env.HF_DE_PARALLEL_STREAM === "true") return true;
   return workerCount === 1;
 }
 
@@ -1187,6 +1203,11 @@ export async function executeRenderJob(
   // can read it — the catch records transient-retry burn on renders that still
   // failed, which is the more actionable signal for tuning the retry cap.
   const captureAttempts: CaptureAttemptSummary[] = [];
+  // Static-dedup perf, appended per sequential session / per parallel worker
+  // by the capture stage. Also function-scoped so the catch block can read
+  // the sub-timeline-wait outcome for a render that fails downstream of a
+  // fail-fast (aggregated into the success-path perf summary below too).
+  const dedupPerfs: CapturePerfSummary[] = [];
   const recordTransientRetryObservability = (): void => {
     const count = captureAttempts.filter((a) => a.reason === "transient-retry").length;
     if (count > 0) updateCaptureObservability({ transientRetries: count });
@@ -1692,7 +1713,10 @@ export async function executeRenderJob(
         probeSession !== null &&
         probeSession.captureMode !== "drawelement" &&
         !probeSession.deInitDeferred,
-      experimentalParallelDeOptIn: process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE === "true",
+      experimentalParallelDeOptIn:
+        process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE === "true" ||
+        // Verified parallel DE streaming (opt-in) wants its parallelism kept.
+        process.env.HF_DE_PARALLEL_STREAM === "true",
     });
     if (
       job.config.workers === undefined &&
@@ -1802,10 +1826,17 @@ export async function executeRenderJob(
     // disk path (png-sequence / over the streaming duration cap) and parallel
     // capture ship frames no drain verifies — route those renders to the
     // screenshot baseline unless drawElement was explicitly opted into.
+    // HF_DE_PARALLEL_STREAM: multi-worker STREAMING renders now carry the
+    // full drain-time self-verification (per-worker ground truth + the shared
+    // drain guard), so the confinement rule is satisfied and the parallel
+    // clamp does not apply. The disk path stays clamped.
+    const deParallelStreamVerified =
+      process.env.HF_DE_PARALLEL_STREAM === "true" && useStreamingEncode && workerCount > 1;
     if (
       cfg.useDrawElement &&
       process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE !== "true" &&
-      (!useStreamingEncode || workerCount > 1)
+      (!useStreamingEncode || workerCount > 1) &&
+      !deParallelStreamVerified
     ) {
       cfg.useDrawElement = false;
       deClampReason = workerCount > 1 ? "parallel" : "disk_path";
@@ -1821,11 +1852,6 @@ export async function executeRenderJob(
         probeSession = null;
       }
     }
-
-    // `captureAttempts` is declared at function scope above (shared with the
-    // catch block). Static-dedup perf, appended per sequential session / per
-    // parallel worker by the capture stage, aggregated into the perf summary below.
-    const dedupPerfs: CapturePerfSummary[] = [];
 
     // png-sequence is "no container" — outputPath is treated as a directory and
     // the encode/mux/faststart stages are skipped entirely. The empty extension
@@ -2432,6 +2458,7 @@ export async function executeRenderJob(
       perfStages,
       hdrDiagnostics,
       observability: observabilitySummary,
+      subTimelineWait: worstSubTimelineWaitOutcome(dedupPerfs),
     });
 
     log.info("[Render] Failure summary", {

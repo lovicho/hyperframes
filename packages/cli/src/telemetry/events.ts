@@ -1,8 +1,11 @@
 import { redactTelemetryString, type OutputResolutionIssueKind } from "@hyperframes/core";
+import type { SubTimelineWaitOutcome } from "@hyperframes/engine";
 import { trackEvent } from "./client.js";
 import { readConfig } from "./config.js";
 
 export interface RenderObservabilityTelemetryPayload {
+  /** Worst sub-composition timeline wait outcome across sessions. */
+  subTimelineWait?: SubTimelineWaitOutcome;
   observabilityRenderJobId?: string;
   observabilityCompositionHash?: string;
   observabilityEventCount?: number;
@@ -47,6 +50,7 @@ export interface RenderObservabilityTelemetryPayload {
 
 function renderObservabilityEventProperties(props: RenderObservabilityTelemetryPayload) {
   return {
+    sub_timeline_wait: props.subTimelineWait,
     observability_render_job_id: props.observabilityRenderJobId,
     observability_composition_hash: props.observabilityCompositionHash,
     observability_event_count: props.observabilityEventCount,
@@ -486,6 +490,25 @@ export function trackCommandFailure(command: string, err: unknown): void {
 // the caller (init / skill pipeline) treated captions as skippable.
 export function trackTranscribeUnavailable(props: { optional: boolean }): void {
   trackEvent("transcribe_unavailable", { optional: props.optional });
+}
+
+// grade-compare / compare stand up headless Chrome and render up to 16 cells.
+// Cell count, truncation-cap hits, and whether the render-ready timeout fired
+// are the signals needed before safely lifting the cap. Low-cardinality only.
+export function trackCompareSheet(props: {
+  command: "grade-compare" | "compare";
+  cells: number;
+  truncated: boolean;
+  total: number;
+  renderReadyTimedOut: boolean;
+}): void {
+  trackEvent("media_use_compare", {
+    command: props.command,
+    cells: props.cells,
+    truncated: props.truncated,
+    total: props.total,
+    render_ready_timed_out: props.renderReadyTimedOut,
+  });
 }
 
 // A skills install was skipped because a required prerequisite binary is

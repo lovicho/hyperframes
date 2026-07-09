@@ -757,6 +757,10 @@ export default defineCommand({
     }
 
     // ── Ensure browser for local renders ────────────────────────────────
+    // Always resolve to our own pinned/managed Chrome, never a
+    // separately-installed puppeteer-cache binary or system Chrome — render
+    // behavior (drawElement support included, HF#2060) shouldn't depend on
+    // whatever arbitrary Chrome version happens to be on the machine.
     let browserPath: string | undefined;
     if (!useDocker) {
       const { ensureBrowser } = await import("../browser/manager.js");
@@ -769,13 +773,14 @@ export default defineCommand({
         | undefined;
       try {
         if (effectiveQuiet) {
-          const info = await ensureBrowser();
+          const info = await ensureBrowser({ preferManagedChrome: true });
           browserPath = info.executablePath;
         } else {
           const clack = await import("@clack/prompts");
           browserSpinner = clack.spinner();
           browserSpinner.start("Checking browser...");
           const info = await ensureBrowser({
+            preferManagedChrome: true,
             onProgress: (downloaded, total) => {
               if (total <= 0) return;
               const pct = Math.floor((downloaded / total) * 100);
@@ -1703,6 +1708,7 @@ function trackRenderMetrics(
     speedRatio,
     captureAvgMs: perf?.captureAvgMs,
     captureP50Ms: perf?.captureP50Ms,
+    subTimelineWait: perf?.subTimelineWait,
     videoCount: perf?.videoCount,
     capturePeakMs: perf?.capturePeakMs,
     tmpPeakBytes: perf?.tmpPeakBytes,

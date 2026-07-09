@@ -20,7 +20,7 @@ async function loadPuppeteerBrowsers(): Promise<PuppeteerBrowsers> {
   }
 }
 
-const CHROME_VERSION = "131.0.6778.85";
+const CHROME_VERSION = "152.0.7928.2";
 const CACHE_ROOT_DIR = join(homedir(), ".cache", "hyperframes");
 const CACHE_DIR = join(homedir(), ".cache", "hyperframes", "chrome");
 // Puppeteer's managed cache — where `@puppeteer/browsers install
@@ -133,6 +133,17 @@ export interface EnsureBrowserOptions {
   // Purge any cached HF-managed download before resolving, so a stale or
   // partially-extracted install can't make the retry look like a no-op.
   force?: boolean;
+  // Always resolve to OUR pinned `CHROME_VERSION` build (cached, or freshly
+  // downloaded) — skip both the shared puppeteer-cache preference (some other
+  // tool's install, arbitrary version) and system Chrome (tracks Stable,
+  // arbitrary version, doesn't get updated in lockstep with this codebase).
+  // Rendering behavior should not vary with whatever Chrome happens to be
+  // sitting on the machine: it's the version we've actually tested against,
+  // and the one that implements `canvas.drawElementImage` (Dev/Canary-only —
+  // Stable doesn't have it, so system Chrome used to crash drawElement-
+  // eligible renders outright; HF#2060). `HYPERFRAMES_BROWSER_PATH` still
+  // wins over this — an explicit override is still an explicit override.
+  preferManagedChrome?: boolean;
 }
 
 interface CacheLookupResult {
@@ -195,6 +206,45 @@ function findFromEnv(): BrowserResult | undefined {
   return undefined;
 }
 
+/**
+ * Hyperframes-managed cache only (populated by `ensureBrowser` as a
+ * download-of-last-resort, pinned to `CHROME_VERSION`).
+ */
+async function findFromHyperframesCache(): Promise<CacheLookupResult> {
+  if (!existsSync(CACHE_DIR)) return {};
+  const { Browser, getInstalledBrowsers } = await loadPuppeteerBrowsers();
+  // A corrupt cache (stub file where a browser dir is expected, malformed
+  // metadata) makes getInstalledBrowsers throw. Treat that as "no cached
+  // browser" so resolution falls through to system/download instead of
+  // crashing every caller.
+  let installed: Awaited<ReturnType<typeof getInstalledBrowsers>>;
+  try {
+    installed = await getInstalledBrowsers({ cacheDir: CACHE_DIR });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const suffix = code ? ` (${code})` : "";
+    console.warn(
+      `[hyperframes] Browser cache read failed${suffix}: ${normalizeErrorMessage(err)}. Falling back to system Chrome or a fresh download.`,
+    );
+    installed = [];
+  }
+  // Match on buildId too, not just browser type — an install left over from
+  // an older hyperframes version (this pin has moved 131 → 151 → 152 across
+  // releases) must NOT satisfy resolution, or an upgrade silently keeps
+  // running whatever build happened to be cached instead of ever fetching
+  // the version this release actually needs (HF#2060 review).
+  const match = installed.find(
+    (b) => b.browser === Browser.CHROMEHEADLESSSHELL && b.buildId === CHROME_VERSION,
+  );
+  if (match && existsSync(match.executablePath)) {
+    return { result: { executablePath: match.executablePath, source: "cache" } };
+  }
+  if (match) {
+    return { staleHyperframesCachePath: match.executablePath, staleInstallPath: match.path };
+  }
+  return {};
+}
+
 async function findFromCache(): Promise<CacheLookupResult> {
   // 1) Puppeteer's managed cache — where `npx @puppeteer/browsers install
   // chrome-headless-shell` lands, and where `puppeteer install` from a project
@@ -204,45 +254,20 @@ async function findFromCache(): Promise<CacheLookupResult> {
   // engine an older binary than the engine itself would pick.
   //
   // We intentionally check puppeteer BEFORE the hyperframes-managed cache:
-  // the HF cache is pinned to `CHROME_VERSION` (above) which lags behind
-  // upstream Chrome by many releases. If a user installed chrome-headless-shell
-  // separately (via `@puppeteer/browsers install`) we want to use that
-  // newer binary, not the pinned-stale fallback.
+  // this is the non-`preferManagedChrome` path, which exists so a user who
+  // installed chrome-headless-shell separately (via `@puppeteer/browsers
+  // install`) keeps using that binary instead of being silently switched to
+  // the HF-pinned one. Note `CHROME_VERSION` (above) is a Dev-channel pin
+  // that may be NEWER than a user's puppeteer-cache Stable build — this is
+  // about respecting an explicit prior choice, not "newest wins".
   const fromPuppeteer = findFromPuppeteerCache();
   if (fromPuppeteer) {
     return { result: fromPuppeteer };
   }
 
-  // 2) Hyperframes-managed cache (populated by `ensureBrowser` below as a
-  // download-of-last-resort). This is the fallback path: only reached when
-  // no puppeteer-cache binary exists.
-  if (existsSync(CACHE_DIR)) {
-    const { Browser, getInstalledBrowsers } = await loadPuppeteerBrowsers();
-    // A corrupt cache (stub file where a browser dir is expected, malformed
-    // metadata) makes getInstalledBrowsers throw. Treat that as "no cached
-    // browser" so resolution falls through to system/download instead of
-    // crashing every caller.
-    let installed: Awaited<ReturnType<typeof getInstalledBrowsers>>;
-    try {
-      installed = await getInstalledBrowsers({ cacheDir: CACHE_DIR });
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException | undefined)?.code;
-      const suffix = code ? ` (${code})` : "";
-      console.warn(
-        `[hyperframes] Browser cache read failed${suffix}: ${normalizeErrorMessage(err)}. Falling back to system Chrome or a fresh download.`,
-      );
-      installed = [];
-    }
-    const match = installed.find((b) => b.browser === Browser.CHROMEHEADLESSSHELL);
-    if (match && existsSync(match.executablePath)) {
-      return { result: { executablePath: match.executablePath, source: "cache" } };
-    }
-    if (match) {
-      return { staleHyperframesCachePath: match.executablePath, staleInstallPath: match.path };
-    }
-  }
-
-  return {};
+  // 2) Hyperframes-managed cache. This is the fallback path: only reached
+  // when no puppeteer-cache binary exists.
+  return findFromHyperframesCache();
 }
 
 /**
@@ -466,13 +491,17 @@ async function ensureLinuxArmBrowser(options?: EnsureBrowserOptions): Promise<Br
 /**
  * Find or download a browser.
  * Resolution: env var -> cached download -> system Chrome -> auto-download.
+ * With `preferManagedChrome`: env var -> OUR pinned cache -> auto-download
+ * (puppeteer-cache preference and system Chrome are both skipped).
  */
 export async function ensureBrowser(options?: EnsureBrowserOptions): Promise<BrowserResult> {
   const fromEnv = findFromEnv();
   if (fromEnv) return fromEnv;
 
   if (!options?.force) {
-    const fromCache = await findFromCache();
+    const fromCache = await (options?.preferManagedChrome
+      ? findFromHyperframesCache()
+      : findFromCache());
     if (fromCache.result) return fromCache.result;
     if (fromCache.staleHyperframesCachePath) {
       console.warn(
@@ -484,10 +513,12 @@ export async function ensureBrowser(options?: EnsureBrowserOptions): Promise<Bro
       });
     }
 
-    const fromSystem = findFromSystem();
-    if (fromSystem) {
-      warnSystemFallbackOnce(fromSystem.executablePath);
-      return fromSystem;
+    if (!options?.preferManagedChrome) {
+      const fromSystem = findFromSystem();
+      if (fromSystem) {
+        warnSystemFallbackOnce(fromSystem.executablePath);
+        return fromSystem;
+      }
     }
   }
 
@@ -505,7 +536,9 @@ export async function ensureBrowser(options?: EnsureBrowserOptions): Promise<Bro
     // result instead of downloading and extracting a second time. Skipped
     // under --force, which already purged and always wants a fresh download.
     if (!options?.force) {
-      const afterLock = await findFromCache();
+      const afterLock = await (options?.preferManagedChrome
+        ? findFromHyperframesCache()
+        : findFromCache());
       if (afterLock.result) return afterLock.result;
       if (afterLock.staleInstallPath) purgeStaleInstall(afterLock.staleInstallPath);
     }

@@ -305,7 +305,7 @@ function uniqueCompositionId(baseId: string, index: number): string {
   return `${baseId}__hf${index}`;
 }
 
-type BundledHostCompositionIdentity = {
+export type BundledHostCompositionIdentity = {
   authoredCompositionId: string | null;
   runtimeCompositionId: string | null;
 };
@@ -351,7 +351,8 @@ function countBundledAuthoredCompositionIds(hosts: Element[]): Map<string, numbe
   return counts;
 }
 
-function assignBundledRuntimeCompositionIds(
+// fallow-ignore-next-line complexity
+export function assignBundledRuntimeCompositionIds(
   hosts: Element[],
   counts: Map<string, number> = countBundledAuthoredCompositionIds(hosts),
 ): Map<Element, BundledHostCompositionIdentity> {
@@ -874,7 +875,11 @@ export async function bundleToSingleHtml(
         for (const styleEl of [...innerRoot.querySelectorAll("style")]) {
           const css = styleEl.textContent || "";
           compStyleChunks.push(
-            compId ? scopeCssToComposition(css, compId, runtimeScope, authoredRootId) : css,
+            compId
+              ? scopeCssToComposition(css, compId, runtimeScope, authoredRootId, {
+                  scopeRootSelectors: true,
+                })
+              : css,
           );
           styleEl.remove();
         }
@@ -900,7 +905,13 @@ export async function bundleToSingleHtml(
         // No matching inner root — inject all template content directly
         for (const styleEl of [...innerDoc.querySelectorAll("style")]) {
           const css = styleEl.textContent || "";
-          compStyleChunks.push(compId ? scopeCssToComposition(css, compId, runtimeScope) : css);
+          compStyleChunks.push(
+            compId
+              ? scopeCssToComposition(css, compId, runtimeScope, undefined, {
+                  scopeRootSelectors: true,
+                })
+              : css,
+          );
           styleEl.remove();
         }
         hoistCompositionScripts(innerDoc, {

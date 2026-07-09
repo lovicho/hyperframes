@@ -905,3 +905,23 @@ describe("spawnStreamingEncoder lifecycle and cleanup", () => {
     }
   });
 });
+
+describe("createFrameReorderBuffer abort (interleaved parallel drain)", () => {
+  it("rejects parked waiters so a failed worker cannot deadlock its peers", async () => {
+    const buf = createFrameReorderBuffer(0, 100);
+    const parked = buf.waitForFrame(5);
+    const err = new Error("verify failed");
+    buf.abort(err);
+    await expect(parked).rejects.toThrow("verify failed");
+    // Future waiters reject immediately too.
+    await expect(buf.waitForFrame(6)).rejects.toThrow("verify failed");
+    await expect(buf.waitForAllDone()).rejects.toThrow("verify failed");
+  });
+
+  it("in-order waiters still resolve before an abort", async () => {
+    const buf = createFrameReorderBuffer(0, 10);
+    await expect(buf.waitForFrame(0)).resolves.toBeUndefined();
+    buf.advanceTo(1);
+    await expect(buf.waitForFrame(1)).resolves.toBeUndefined();
+  });
+});

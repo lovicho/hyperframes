@@ -4,7 +4,7 @@
  */
 
 import { fpsToNumber } from "@hyperframes/core";
-import type { CapturePerfSummary } from "@hyperframes/engine";
+import type { CapturePerfSummary, SubTimelineWaitOutcome } from "@hyperframes/engine";
 import type { CaptureCalibrationSample, CaptureCostEstimate } from "./captureCost.js";
 import type {
   CaptureAttemptSummary,
@@ -14,6 +14,25 @@ import type {
 } from "../renderOrchestrator.js";
 import { type HdrPerfCollector, finalizeHdrPerf } from "./hdrPerf.js";
 import type { RenderObservabilitySummary } from "./observability.js";
+
+/**
+ * Worst sub-composition timeline wait outcome across sessions: script_failure
+ * > timeout > ready. Shared by the success-path perf summary and the error
+ * path (a fail-fast can still be followed by an unrelated downstream
+ * failure, e.g. in `pollVideosReady` or encode — that render fires
+ * `render_error`, not `render_complete`, and should carry this too).
+ */
+export function worstSubTimelineWaitOutcome(
+  perfs: CapturePerfSummary[],
+): SubTimelineWaitOutcome | undefined {
+  const outcomes = perfs
+    .map((p) => p.subTimelineWaitOutcome)
+    .filter((o): o is SubTimelineWaitOutcome => !!o);
+  if (outcomes.length === 0) return undefined;
+  if (outcomes.includes("script_failure")) return "script_failure";
+  if (outcomes.includes("timeout")) return "timeout";
+  return "ready";
+}
 
 /**
  * Append each parallel worker's static-dedup perf into the render-level sink
@@ -189,6 +208,7 @@ export function buildRenderPerfSummary(input: {
               input.totalFrames,
           )
         : undefined,
+    subTimelineWait: worstSubTimelineWaitOutcome(input.dedupPerfs),
     captureP50Ms: (() => {
       // Per-frame median from the engine's samples; when parallel workers
       // report separately, take the busiest session's median.

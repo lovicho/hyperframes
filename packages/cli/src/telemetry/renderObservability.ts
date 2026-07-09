@@ -58,7 +58,10 @@ export function renderObservabilityTelemetryPayload(
 export function renderJobObservabilityTelemetryPayload(
   job: RenderJob | undefined,
 ): RenderObservabilityTelemetryPayload {
-  return renderObservabilityTelemetryPayload(
-    job?.errorDetails?.observability ?? job?.perfSummary?.observability,
-  );
+  return {
+    ...renderObservabilityTelemetryPayload(
+      job?.errorDetails?.observability ?? job?.perfSummary?.observability,
+    ),
+    subTimelineWait: job?.errorDetails?.subTimelineWait ?? job?.perfSummary?.subTimelineWait,
+  };
 }
