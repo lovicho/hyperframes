@@ -131,6 +131,19 @@ async function waitForCompositionSettle(
   return runtimeReady;
 }
 
+// tsx/esbuild-style dev transpilers run with keepNames, which rewrites named
+// inner functions in serialized page closures into __name(...) calls — a
+// helper that exists in the Node bundle but not in the browser realm, so any
+// page.evaluate/waitForFunction whose closure defines a named function throws
+// "__name is not defined" when the CLI runs from source. Defining a no-op in
+// the page before any script runs immunizes every serialized closure, current
+// and future, regardless of how the CLI was built.
+export async function installPageFunctionGuard(page: {
+  evaluateOnNewDocument(source: string): Promise<unknown>;
+}): Promise<void> {
+  await page.evaluateOnNewDocument("self.__name = self.__name || ((fn) => fn);");
+}
+
 export async function openSettledCompositionPage(
   html: string,
   url: string,
@@ -154,6 +167,7 @@ export async function openSettledCompositionPage(
     });
 
     const page = await chromeBrowser.newPage();
+    await installPageFunctionGuard(page);
     await page.setViewport(viewport);
     await options.beforeNavigate?.(page);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10000 });

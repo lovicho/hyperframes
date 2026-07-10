@@ -28,6 +28,7 @@ import {
 import { findMotionSpec, readMotionSpec, type MotionSpec } from "../utils/motionSpec.js";
 import {
   AUDIT_SEEK_OPTIONS,
+  installPageFunctionGuard,
   seekCompositionTimeline,
   waitForCompositionFonts,
   type SeekCompositionTimelineOptions,
@@ -214,6 +215,7 @@ async function runLayoutAudit(
     });
 
     const page = await chromeBrowser.newPage();
+    await installPageFunctionGuard(page);
     await page.setViewport({ width: 1920, height: 1080 });
     await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 10000 });
     await alignViewportToComposition(page, server.url);

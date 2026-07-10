@@ -15,6 +15,7 @@ import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport
 import { c } from "../ui/colors.js";
 import { printDeprecationNotice, withMeta } from "../utils/updateCheck.js";
 import {
+  installPageFunctionGuard,
   resolveCliChromeGpuMode,
   seekCompositionTimeline,
 } from "../capture/captureCompositionFrame.js";
@@ -421,6 +422,7 @@ async function validateInBrowser(
     });
 
     const page = await chromeBrowser.newPage();
+    await installPageFunctionGuard(page);
     await page.setViewport(viewport);
 
     page.on("console", (msg) => {
