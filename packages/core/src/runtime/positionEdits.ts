@@ -175,3 +175,130 @@ export function applyPositionEdits(doc: Document): number {
   }
   return applied;
 }
+
+const SEEK_REAPPLY_WRAPPED = "__hfPositionEditsSeekReapplyWrapped";
+type SeekFunction = (...args: unknown[]) => unknown;
+const wrappedSeekFunctions = new WeakSet<SeekFunction>();
+const observedSeekProperties = new WeakMap<object, Set<string>>();
+const observedGlobalProperties = new WeakMap<object, Set<string>>();
+
+type SeekWindow = Window &
+  typeof globalThis & {
+    __hf?: { seek?: (...args: unknown[]) => unknown };
+    __player?: { renderSeek?: (...args: unknown[]) => unknown };
+  };
+
+/** Reapply SDK position edits after every render seek, including late-bound seeks. */
+export function installPositionEditsSeekReapply(win: Window & typeof globalThis): void {
+  const target = win as SeekWindow;
+  const reapply = (): void => {
+    try {
+      applyPositionEdits(target.document);
+    } catch {
+      // A position edit must never break the render seek path.
+    }
+  };
+
+  const isWrapped = (fn: unknown): fn is SeekFunction =>
+    typeof fn === "function" &&
+    (wrappedSeekFunctions.has(fn as SeekFunction) ||
+      Boolean((fn as { [SEEK_REAPPLY_WRAPPED]?: boolean })[SEEK_REAPPLY_WRAPPED]));
+
+  const markWrapped = (fn: SeekFunction): void => {
+    wrappedSeekFunctions.add(fn);
+    try {
+      Object.defineProperty(fn, SEEK_REAPPLY_WRAPPED, { value: true });
+    } catch {
+      // The WeakSet keeps frozen functions from being wrapped repeatedly.
+    }
+  };
+
+  const wrapFunction = (fn: unknown): unknown => {
+    if (typeof fn !== "function" || isWrapped(fn)) return fn;
+    const wrapped: SeekFunction = function (this: unknown, ...args: unknown[]): unknown {
+      const result = fn.apply(this, args);
+      reapply();
+      return result;
+    };
+    markWrapped(wrapped);
+    return wrapped;
+  };
+
+  const observeSeekProperty = (container: object, property: string): boolean => {
+    let observed = observedSeekProperties.get(container);
+    if (observed?.has(property)) return true;
+    const descriptor = Object.getOwnPropertyDescriptor(container, property);
+    if (descriptor?.configurable === false) {
+      const current = (container as Record<string, unknown>)[property];
+      if (typeof current === "function") {
+        (container as Record<string, unknown>)[property] = wrapFunction(current);
+        reapply();
+      }
+      return false;
+    }
+
+    let current = (container as Record<string, unknown>)[property];
+    const originalSetter = descriptor?.set;
+    Object.defineProperty(container, property, {
+      configurable: true,
+      enumerable: descriptor?.enumerable ?? true,
+      get: () => current,
+      set: (value: unknown) => {
+        current = wrapFunction(value);
+        originalSetter?.call(container, value);
+      },
+    });
+    current = wrapFunction(current);
+    observed ??= new Set<string>();
+    observed.add(property);
+    observedSeekProperties.set(container, observed);
+    reapply();
+    return true;
+  };
+
+  const observeGlobalContainer = (
+    name: "__hf" | "__player",
+    property: "seek" | "renderSeek",
+  ): boolean => {
+    let globals = observedGlobalProperties.get(target);
+    const descriptor = Object.getOwnPropertyDescriptor(target, name);
+    if (!globals?.has(name)) {
+      if (descriptor?.configurable === false) {
+        const current = target[name];
+        return current ? observeSeekProperty(current, property) : false;
+      }
+      let value = target[name];
+      Object.defineProperty(target, name, {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        get: () => value,
+        set: (next: unknown) => {
+          value = next as typeof value;
+          if (value) observeSeekProperty(value, property);
+        },
+      });
+      globals ??= new Set<string>();
+      globals.add(name);
+      observedGlobalProperties.set(target, globals);
+    }
+    const current = target[name];
+    return current ? observeSeekProperty(current, property) : false;
+  };
+
+  const wrapAll = (): boolean => {
+    const hfObserved = observeGlobalContainer("__hf", "seek");
+    const playerObserved = observeGlobalContainer("__player", "renderSeek");
+    return hfObserved && playerObserved;
+  };
+
+  if (wrapAll()) return;
+  let remaining = 120;
+  const interval = target.setInterval(() => {
+    if (wrapAll()) {
+      target.clearInterval(interval);
+      return;
+    }
+    remaining -= 1;
+    if (remaining <= 0) target.clearInterval(interval);
+  }, 50);
+}

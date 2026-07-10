@@ -234,6 +234,47 @@ describe("nodeToHtml", () => {
     expect(out.html).toContain("<img");
   });
 
+  it("routes IMAGE fills to the rasterize list regardless of node.type", () => {
+    const out = nodeToHtml(
+      frame([
+        {
+          id: "1:8",
+          name: "Sneaker Photo",
+          type: "RECTANGLE",
+          absoluteBoundingBox: BOX(120, 220, 200, 200),
+          fills: [{ type: "IMAGE", imageRef: "abc123" }],
+        },
+      ]),
+      { resolved: [], unresolved: [] },
+    );
+    expect(out.rasterize).toEqual([
+      { nodeId: "1:8", name: "Sneaker Photo", slug: "sneaker-photo" },
+    ]);
+    expect(out.html).toContain('data-figma-rasterize="1:8"');
+    expect(out.html).toContain("<img");
+  });
+
+  it("does not double-paint a rasterized node's own fill/corner-radius onto its img", () => {
+    const out = nodeToHtml(
+      frame([
+        {
+          id: "1:9",
+          name: "Blob",
+          type: "VECTOR",
+          absoluteBoundingBox: BOX(120, 220, 64, 64),
+          fills: [SOLID_BLUE],
+          cornerRadius: 12,
+          opacity: 0.5,
+        },
+      ]),
+      { resolved: [], unresolved: [] },
+    );
+    expect(out.html).not.toContain("background-color: #0066FF");
+    expect(out.html).not.toContain("border-radius: 12px");
+    // opacity is compositing, not shape — still applies on top of the export
+    expect(out.html).toContain("opacity: 0.5");
+  });
+
   it("skips invisible nodes and invisible fills (respects visible:false)", () => {
     const out = nodeToHtml(
       frame([

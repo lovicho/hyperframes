@@ -140,34 +140,68 @@ for (const v of comp.listVariables()) {
 }
 ```
 
-### `declareVariable`
+### `declareVariable` / `updateVariableDeclaration` / `removeVariableDeclaration`
 
 ```typescript
-declareVariable(decl: CompositionVariable): void
+declareVariable(declaration: CompositionVariable): void
+updateVariableDeclaration(id: string, declaration: CompositionVariable): void
+removeVariableDeclaration(id: string): void
 ```
 
-Create a new variable declaration, or fully replace an existing one (type, label, default, and all other schema fields — not just the value). This is the only path that creates the schema entry from scratch; `setVariableValue` intentionally refuses to.
+Manage the `data-composition-variables` schema itself. `declareVariable` adds a new
+typed declaration (creating the attribute when the composition has none);
+`updateVariableDeclaration` replaces an existing declaration wholesale — the id is
+immutable, rename by remove + declare; `removeVariableDeclaration` deletes a
+declaration (the last removal drops the whole attribute). All three validate via
+`can()` (`E_DUPLICATE_VARIABLE`, `E_VARIABLE_NOT_FOUND`, `E_INVALID_ARGS`,
+`E_INVALID_VARIABLE_ID` — the id must match `/^[A-Za-z_][A-Za-z0-9_-]*$/` since it
+becomes a CSS custom-property name, `data-var-*` value, and CLI `--variables` key;
+and `E_FRAGMENT_COMPOSITION`). Declarations live on the composition's declaration
+root: the `<html>` element for a full document, or the composition root element
+(`[data-composition-id]`) for a template / fragment sub-composition. Despite its
+name, `E_FRAGMENT_COMPOSITION` now fires only when the source has **no** root
+element at all to carry the schema — a fragment that has a composition root
+accepts declarations. (The code is kept for compatibility; the fix is "add a
+composition root element", not necessarily "add an `<html>`".)
 
 ```typescript
-comp.declareVariable({
-  id: "brandColor",
-  type: "color",
-  label: "Brand color",
-  default: "#6C5CE7",
-});
+comp.declareVariable({ id: "title", type: "string", label: "Title", default: "Hello" });
+comp.updateVariableDeclaration("title", { id: "title", type: "string", label: "Headline", default: "Hello" });
+comp.removeVariableDeclaration("title");
 ```
 
-### `removeVariable`
+<Note>`removeVariable(id)` is a shorthand alias of `removeVariableDeclaration(id)`.</Note>
+
+### `getVariableDeclarations` / `getVariableValues` / `validateVariableValues` / `getVariableUsage`
 
 ```typescript
-removeVariable(id: string): void
+getVariableDeclarations(): CompositionVariable[]
+getVariableValues(overrides?: Record<string, unknown>): Record<string, unknown>
+validateVariableValues(values: Record<string, unknown>): VariableValidationIssue[]
+getVariableUsage(): VariableUsageReport
 ```
 
-Remove a variable's declaration entirely. Any live `var.{id}` overrides and `data-var-*` DOM references are left untouched — this only removes the schema entry.
+Read-only variable APIs (no dispatch). `getVariableDeclarations` returns the typed
+schema (same strict filter the render pipeline uses). `getVariableValues` resolves
+values exactly like the runtime's `getVariables()` — declared defaults merged under
+the given overrides — so callers can predict what a composition script will read for
+a given `--variables` payload. `validateVariableValues` runs the same checks as
+`--strict-variables` (`undeclared` / `type-mismatch` / `enum-out-of-range`).
+`getVariableUsage` statically scans every inline script for `getVariables()` reads
+and cross-references the schema: `{ usedIds, unusedDeclarations, undeclaredReads,
+scanIncomplete }` — `scanIncomplete` flips when scripts access variables dynamically,
+making `usedIds` a lower bound.
+
+### `setPreviewVariables`
 
 ```typescript
-comp.removeVariable("brandColor");
+setPreviewVariables(values: Record<string, unknown> | null): boolean
 ```
+
+Apply ephemeral variable values to the preview surface (never persisted — use
+`setVariableValue` to change a default). Pass `null` to restore declared defaults.
+Delegates to the preview adapter's optional `setPreviewVariables`; returns `false`
+when no adapter support is available.
 
 ### `getElementTimings`
 

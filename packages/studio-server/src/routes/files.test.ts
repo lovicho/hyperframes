@@ -227,16 +227,44 @@ tl.fromTo("#box", { opacity: 0, x: -50 }, { opacity: 1, x: 0, duration: 1.5, eas
     });
     const result = (await res.json()) as {
       ok: boolean;
+      mutated?: boolean;
       after: string;
       parsed: { animations: Array<{ fromProperties?: Record<string, number | string> }> };
     };
 
     expect(res.status).toBe(200);
     expect(result.ok).toBe(true);
+    expect(result.mutated).toBe(true);
     expect(result.after).toContain("opacity: 0.2");
     expect(result.parsed.animations[0].fromProperties?.opacity).toBe(0.2);
     // x unchanged
     expect(result.parsed.animations[0].fromProperties?.x).toBe(-50);
+  });
+
+  it("reports no GSAP mutation when shifting positions in a file with no GSAP script", async () => {
+    const projectDir = createProjectDir();
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+
+    const res = await app.request("http://localhost/projects/demo/gsap-mutations/index.html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "shift-positions",
+        targetSelector: "#box",
+        delta: 1,
+      }),
+    });
+    const result = (await res.json()) as {
+      ok?: boolean;
+      changed?: boolean;
+      mutated?: boolean;
+    };
+
+    expect(res.status).toBe(200);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(false);
+    expect(result.mutated).toBe(false);
   });
 
   it("consolidate-position-writes leaves exactly one position write per selector", async () => {

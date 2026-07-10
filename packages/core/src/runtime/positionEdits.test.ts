@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   EDIT_BASE_X_ATTR,
   EDIT_BASE_Y_ATTR,
@@ -6,6 +6,7 @@ import {
   applyPositionEditToElement,
   applyPositionEdits,
   composeTranslate,
+  installPositionEditsSeekReapply,
 } from "./positionEdits";
 
 function makeElement(attrs: Record<string, string>, style = ""): HTMLElement {
@@ -172,5 +173,69 @@ describe("applyPositionEdits", () => {
     applyPositionEditToElement(el, { force: true });
     expect(el.style.getPropertyValue("translate")).toBe("30px 20px");
     el.remove();
+  });
+});
+
+describe("installPositionEditsSeekReapply", () => {
+  it("wraps __player.renderSeek so each call reapplies position edits", () => {
+    const el = makeElement({ "data-x": "10", "data-y": "0", "data-hf-edit-base-x": "0" });
+    const calls: number[] = [];
+    // @ts-expect-error test global
+    window.__player = { renderSeek: (time: number) => calls.push(time) };
+
+    installPositionEditsSeekReapply(window as Window & typeof globalThis);
+    // @ts-expect-error test global
+    window.__player.renderSeek(1.5);
+
+    expect(calls).toEqual([1.5]);
+    expect(el.style.getPropertyValue("translate")).toBe("10px 0px");
+    // @ts-expect-error test global
+    delete window.__player;
+    el.remove();
+  });
+
+  it("is idempotent when installed twice", () => {
+    const el = makeElement({ "data-x": "5", "data-y": "0", "data-hf-edit-base-x": "0" });
+    const calls: number[] = [];
+    // @ts-expect-error test global
+    window.__player = { renderSeek: (time: number) => calls.push(time) };
+
+    installPositionEditsSeekReapply(window as Window & typeof globalThis);
+    installPositionEditsSeekReapply(window as Window & typeof globalThis);
+    // @ts-expect-error test global
+    window.__player.renderSeek(2);
+
+    expect(calls).toEqual([2]);
+    // @ts-expect-error test global
+    delete window.__player;
+    el.remove();
+  });
+
+  it("wraps __hf.seek and a seek function assigned after installation", () => {
+    vi.useFakeTimers();
+    const el = makeElement({ "data-x": "8", "data-y": "0", "data-hf-edit-base-x": "0" });
+    const calls: number[] = [];
+    // @ts-expect-error test global
+    window.__hf = {};
+
+    installPositionEditsSeekReapply(window as Window & typeof globalThis);
+    // @ts-expect-error test global
+    window.__hf.seek = (time: number) => calls.push(time);
+    vi.advanceTimersByTime(50);
+    // @ts-expect-error test global
+    window.__hf.seek(3);
+
+    expect(calls).toEqual([3]);
+    expect(el.style.getPropertyValue("translate")).toBe("8px 0px");
+    // @ts-expect-error test global
+    delete window.__hf;
+    el.remove();
+    vi.useRealTimers();
+  });
+
+  it("does not throw when neither seek global exists", () => {
+    expect(() =>
+      installPositionEditsSeekReapply(window as Window & typeof globalThis),
+    ).not.toThrow();
   });
 });

@@ -50,14 +50,21 @@ const HF_BINARY = join(
   "chrome-headless-shell",
 );
 const SYSTEM_CHROME = "/usr/bin/google-chrome";
+const TEST_LOCK_TIMINGS = {
+  staleMs: 50,
+  pollMs: 5,
+  heartbeatMs: 10,
+  waitNoticeMs: 1_000,
+};
 
 interface FsMockOptions {
   existing: ReadonlySet<string>;
   /** map of dir path -> entries returned by readdirSync */
   dirs?: Record<string, string[]>;
+  touchError?: Error;
 }
 
-function installFsMocks({ existing, dirs }: FsMockOptions) {
+function installFsMocks({ existing, dirs, touchError }: FsMockOptions) {
   // Mutable, and returned, so tests can pre-seed a "lock already held" path or
   // assert the lock dir doesn't leak after ensureBrowser resolves.
   const paths = new Set(existing);
@@ -96,6 +103,15 @@ function installFsMocks({ existing, dirs }: FsMockOptions) {
         throw err;
       }
       return { mtimeMs: mtimes.get(p) ?? 0 };
+    },
+    utimesSync: (p: string, _atime: Date, mtime: Date) => {
+      if (touchError) throw touchError;
+      if (!paths.has(p)) {
+        const err = new Error(`ENOENT: no such file or directory, utimes '${p}'`);
+        (err as NodeJS.ErrnoException).code = "ENOENT";
+        throw err;
+      }
+      mtimes.set(p, mtime.getTime());
     },
   }));
   vi.doMock("node:os", () => ({
@@ -322,17 +338,10 @@ describe("findBrowser — cache resolution", () => {
   });
 
   it("withInstallLock reclaims a lock held past the timeout instead of hanging forever", async () => {
-    // A crashed/killed process could leave the lock directory behind
-    // permanently. Reclaiming after a timeout (rather than hanging or
-    // refusing forever) is the behavior that makes the lock safe to add at
-    // all — otherwise one bad exit wedges every future render. Exercises
-    // withInstallLock directly with tiny real timeouts (it takes an
-    // injectable timeoutMs/pollMs for exactly this) rather than mocking
-    // Date.now()/setTimeout through the full ensureBrowser call graph.
     const paths = installFsMocks({ existing: new Set([CACHE_ROOT, HF_LOCK]) });
 
     const { withInstallLock } = await import("./manager.js");
-    const result = await withInstallLock(async () => "done", 10, 5);
+    const result = await withInstallLock(async () => "done", TEST_LOCK_TIMINGS);
 
     expect(result).toBe("done");
     expect(paths.has(HF_LOCK)).toBe(false);
@@ -346,19 +355,70 @@ describe("findBrowser — cache resolution", () => {
     const paths = installFsMocks({ existing: new Set([CACHE_ROOT, HF_LOCK]) });
 
     const { withInstallLock } = await import("./manager.js");
-    const first = withInstallLock(
-      async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        return "first";
-      },
-      10,
-      5,
-    );
-    const second = withInstallLock(async () => "second", 10, 5);
+    const reclaimOnlyTimings = { ...TEST_LOCK_TIMINGS, heartbeatMs: 1_000 };
+    const first = withInstallLock(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return "first";
+    }, reclaimOnlyTimings);
+    const second = withInstallLock(async () => "second", reclaimOnlyTimings);
 
     await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
     expect(paths.has(HF_LOCK)).toBe(false);
     expect(paths.has(HF_RECLAIM_LOCK)).toBe(false);
+  });
+
+  it("withInstallLock does not let a second caller run concurrently with a slow-but-alive holder", async () => {
+    const paths = installFsMocks({ existing: new Set([CACHE_ROOT]) });
+
+    const { withInstallLock } = await import("./manager.js");
+
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const trackConcurrency = async (label: string, durationMs: number) => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await new Promise((resolve) => setTimeout(resolve, durationMs));
+      concurrent -= 1;
+      return label;
+    };
+
+    const first = withInstallLock(() => trackConcurrency("first", 120), TEST_LOCK_TIMINGS);
+    await new Promise((resolve) => setTimeout(resolve, 5)); // let `first` acquire the lock
+    const second = withInstallLock(() => trackConcurrency("second", 10), TEST_LOCK_TIMINGS);
+
+    await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
+    expect(maxConcurrent).toBe(1);
+    expect(paths.has(HF_LOCK)).toBe(false);
+  });
+
+  it("withInstallLock reports progress while waiting instead of staying silent", async () => {
+    const paths = installFsMocks({ existing: new Set([CACHE_ROOT, HF_LOCK]) });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { withInstallLock } = await import("./manager.js");
+    await withInstallLock(async () => "done", { ...TEST_LOCK_TIMINGS, waitNoticeMs: 20 });
+
+    expect(paths.has(HF_LOCK)).toBe(false);
+    expect(
+      warnSpy.mock.calls.some(([msg]) =>
+        String(msg).includes("Waiting for another hyperframes process"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the holder running when a heartbeat cannot touch the lock", async () => {
+    installFsMocks({
+      existing: new Set([CACHE_ROOT]),
+      touchError: Object.assign(new Error("EACCES"), { code: "EACCES" }),
+    });
+
+    const { withInstallLock } = await import("./manager.js");
+    await expect(
+      withInstallLock(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return "done";
+      }, TEST_LOCK_TIMINGS),
+    ).resolves.toBe("done");
   });
 
   it("warns and falls through when the hyperframes cache cannot be read", async () => {

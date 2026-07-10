@@ -7,6 +7,7 @@ import { parseHTML } from "linkedom";
 import {
   collectExternalAssets,
   compileForRender,
+  injectSdkPositionEditsRenderScript,
   detectRenderModeHints,
   detectShaderTransitionUsage,
   detectThreeDTransformUsage,
@@ -18,6 +19,28 @@ import {
   recompileWithResolutions,
 } from "./htmlCompiler.js";
 import { validateNoSystemFonts } from "./render/planValidation.js";
+
+describe("injectSdkPositionEditsRenderScript", () => {
+  it("injects before </body> when SDK position-edit markers are present", () => {
+    const html =
+      '<html><body><h1 data-x="-231" data-y="-139" data-hf-edit-base-x="0" data-hf-edit-base-y="0">Hi</h1></body></html>';
+    const out = injectSdkPositionEditsRenderScript(html);
+    expect(out).toContain("<script>");
+    expect(out.indexOf("<script>")).toBeLessThan(out.indexOf("</body>"));
+    expect(out).toContain("data-hf-edit-base-x");
+  });
+
+  it("appends the script when there is no </body> tag", () => {
+    const out = injectSdkPositionEditsRenderScript('<div data-hf-edit-base-y="0"></div>');
+    expect(out.startsWith('<div data-hf-edit-base-y="0"></div>')).toBe(true);
+    expect(out).toContain("<script>");
+  });
+
+  it("is a no-op for style/text-only HTML", () => {
+    const html = '<html><body><h1 style="color:#f00">Hi</h1></body></html>';
+    expect(injectSdkPositionEditsRenderScript(html)).toBe(html);
+  });
+});
 
 // ── collectExternalAssets ──────────────────────────────────────────────────
 

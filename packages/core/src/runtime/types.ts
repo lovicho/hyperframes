@@ -18,6 +18,7 @@ export type RuntimeBridgeControlAction =
   | "set-media-output-muted"
   | "set-native-media-sync-disabled"
   | "set-web-audio-media-disabled"
+  | "set-root-duration"
   | "stop-media"
   | "flash-elements";
 
@@ -28,6 +29,7 @@ export type RuntimeBridgeControlMessage = {
   frame?: number;
   muted?: boolean;
   volume?: number;
+  durationSeconds?: number;
   disabled?: boolean;
   playbackRate?: number;
   target?: HfColorGradingTarget | string | null;
@@ -51,6 +53,8 @@ export type RuntimeTimelineClip = {
   start: number;
   duration: number;
   track: number;
+  zIndex: number;
+  stackingContextId: string | null;
   kind: "video" | "audio" | "image" | "element" | "composition";
   tagName: string | null;
   compositionId: string | null;

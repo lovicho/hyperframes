@@ -29,7 +29,8 @@ import { createRuntimeStartTimeResolver } from "./startResolver";
 import { createClipTree } from "./clipTree";
 import { loadExternalCompositions, loadInlineTemplateCompositions } from "./compositionLoader";
 import { applyCaptionOverrides } from "./captionOverrides";
-import { applyPositionEdits } from "./positionEdits";
+import { applyPositionEdits, installPositionEditsSeekReapply } from "./positionEdits";
+import { applyVariableBindings } from "./applyVariableBindings";
 import { createColorGradingRuntime, type RuntimeColorGradingApi } from "./colorGrading";
 import { TransportClock } from "./clock";
 import { WebAudioTransport } from "./webAudioTransport";
@@ -85,6 +86,10 @@ export function initSandboxRuntimeModular(): void {
   // parsed their tweens, so GSAP (when present) won't fold the translate.
   // Re-applied on every timeline bind for the rebind/soft-reload paths.
   applyPositionEdits(document);
+  // Declarative variable bindings (data-var-src / data-var-text / --{id} CSS
+  // custom props) — values are fixed for the page's lifetime, so applying
+  // once at init keeps renders deterministic and seeks safe.
+  applyVariableBindings(document);
   const exportRenderFps = resolveExportRenderFps();
   state.canonicalFps = exportRenderFps.fps ?? state.canonicalFps;
   if (window.__HF_EXPORT_RENDER_SEEK_CONFIG) {
@@ -1852,6 +1857,7 @@ export function initSandboxRuntimeModular(): void {
   // transport tick. A plain count misses same-count swaps (one sub-comp unloads
   // as another loads), so the signature keys on id+tag in document order.
   let clipTreeSignature = "";
+  let liveRootDurationOverrideSeconds = 0;
   const computeClipTreeSignature = (): string => {
     let sig = "";
     for (const el of document.querySelectorAll("[data-start]")) {
@@ -1902,6 +1908,30 @@ export function initSandboxRuntimeModular(): void {
 
     postRuntimeMessage(payload);
     scheduleRootStageLayoutDiagnostics();
+  };
+
+  const finitePositiveDuration = (value: number): number =>
+    Number.isFinite(value) && value > 0 ? value : 0;
+
+  const growRootDurationLive = (durationSeconds: number) => {
+    const nextDuration = finitePositiveDuration(Number(durationSeconds));
+    if (nextDuration <= 0) return;
+    const rootEl = resolveRootCompositionElement();
+    const rootAttrDuration = finitePositiveDuration(
+      Number.parseFloat(rootEl?.getAttribute("data-duration") ?? ""),
+    );
+    const currentDuration = Math.max(
+      liveRootDurationOverrideSeconds,
+      finitePositiveDuration(clock.getDuration()),
+      rootAttrDuration,
+    );
+    if (nextDuration <= currentDuration) return;
+
+    liveRootDurationOverrideSeconds = nextDuration;
+    rootEl?.setAttribute("data-duration", String(nextDuration));
+    clock.setDuration(nextDuration);
+    postTimeline();
+    postState(true);
   };
 
   const runAdapters = (method: "discover" | "pause" | "play", timeSeconds = 0) => {
@@ -2015,6 +2045,10 @@ export function initSandboxRuntimeModular(): void {
         bindMediaMetadataListeners();
         installAssetFailureDiagnostics();
         applyCaptionOverrides();
+        // Runtime-loaded sub-compositions (and their per-instance scoped
+        // values) don't exist at the init-time binding pass — re-apply so
+        // data-var-* / --{id} bindings inside them resolve. Idempotent.
+        applyVariableBindings(document);
         maybePublishRenderReady();
       });
   } else {
@@ -2193,6 +2227,7 @@ export function initSandboxRuntimeModular(): void {
       if (state.transportClock) state.transportClock.setRate(state.playbackRate);
       applyWebAudioRate();
     },
+    onSetRootDuration: growRootDurationLive,
     onSetColorGrading: (target, grading) => {
       colorGrading.setGrading(target, grading);
     },
@@ -2951,6 +2986,8 @@ export function initSandboxRuntimeModular(): void {
       });
     }
   }
+
+  installPositionEditsSeekReapply(window as Window & typeof globalThis);
 
   // Start the rAF tick loop
   state.transportRafId = window.requestAnimationFrame(transportTick);

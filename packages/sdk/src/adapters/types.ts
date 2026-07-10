@@ -84,4 +84,13 @@ export interface PreviewAdapter {
    * subscription first. Returns an unsubscribe.
    */
   attachSync(comp: Composition): () => void;
+
+  /**
+   * Optional: apply composition-variable values to the preview so it renders
+   * as `window.__hfVariables` injection would at render time (values must be
+   * visible to the runtime BEFORE composition scripts run — typically a
+   * preview reload with injection, not a live poke). Pass null to restore
+   * declared defaults. Values are ephemeral preview state, never persisted.
+   */
+  setPreviewVariables?(values: Record<string, unknown> | null): void;
 }

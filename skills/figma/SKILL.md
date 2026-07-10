@@ -24,14 +24,14 @@ REST is used wherever it can be (usable at volume, headless); MCP only where Fig
 **Preflight — before the first CLI call, check a token exists**: shell env (`[ -n "$FIGMA_TOKEN" ]`) **or** the project `.env` (the CLI auto-loads it — a `.env` entry counts as configured). If neither, do NOT run the command to harvest the error — walk the user through the one-time setup first, then stop and wait:
 
 1. figma.com/settings → **Security** → **Personal access tokens** → Generate new token.
-2. Scopes — read-only is all this integration ever needs (it never writes to Figma): **File content: Read-only** + **File metadata: Read-only**. Optionally **Variables: Read-only** for brand variables — that scope only works on Figma Enterprise; without it `tokens` degrades to published styles automatically (expected behavior, not an error — say so).
+2. Scopes — read-only is all this integration ever needs (it never writes to Figma): **File content: Read-only** + **File metadata: Read-only**. Add **Library content: Read-only** if you'll run `tokens` on a non-Enterprise plan — the published-styles fallback hits `/v1/files/:key/styles`, which 403s without it (a scope the older setup text omitted). Optionally **Variables: Read-only** for brand variables — Enterprise-only; without it `tokens` degrades to published styles automatically (expected, not an error — say so). A 403 now names the exact missing scope; 429s retry automatically (per-minute limit, honors `Retry-After`).
 3. `export FIGMA_TOKEN="figd_…"` — and suggest persisting it (shell profile or project `.env`) so no future session repeats this.
 
 While onboarding, also set expectations in one breath: every import lands as a **local frozen file with recorded provenance** — renders never call Figma, re-running a command re-imports only what changed in Figma, and one token works for assets, brand tokens, and components across every file their Figma account can view.
 
 - **Phases 4–5 (motion/shaders):** the Figma MCP connector (one-click OAuth), a separate credential from the token. If MCP tools error unauthenticated, tell the user to connect the Figma connector and stop.
 - Say exactly which credential a failing phase needs — never present the split as broken.
-- `BAD_TOKEN` (401) mid-flow → the token is expired/revoked; re-mint. `FORBIDDEN` (403) → missing read scope or no access to that file — check scopes + file visibility. `REQUIRES_ENTERPRISE` (403 on variables) → not a failure: styles fallback already ran.
+- `BAD_TOKEN` (401) mid-flow → the token is expired/revoked; re-mint. `FORBIDDEN` (403) → the message names the exact missing scope (e.g. `library_content:read` for the styles fallback) — add it, or the file isn't visible to the account. `REQUIRES_ENTERPRISE` (403 on variables) → not a failure: styles fallback already ran. `RATE_LIMITED` (429) → the client already retried with backoff (this applies to EVERY read — assets, tokens, styles, node trees, versions — the retry lives in the shared request path; `Retry-After` is honored, capped at 60s); if it still surfaces, wait a minute or import fewer nodes per call.
 
 **Rate-limit awareness (spec §2.1):** MCP on a Starter plan is 6 tool calls/**month** (figma plan matrix as of 2026-07 — re-verify if quotas look off) — batch with `recursive:true` on the parent node, skip verification screenshots unless asked, and cache raw MCP responses so re-derivation never spends a second call. REST is per-minute (10+/min, per-endpoint buckets) — fine at volume, back off on 429.
 
@@ -51,10 +51,12 @@ Parse the user's figma link with `parseFigmaRef` (URL, `fileKey:nodeId`, bare `f
 ## Assets (Phase 1 — CLI)
 
 ```bash
-hyperframes figma asset '<url-or-fileKey:nodeId>' [--format svg|png|jpg|pdf] [--scale 2] [--description "..."] [--entity "..."]
+hyperframes figma asset '<url-or-fileKey:nodeId>' [more refs…] [--format svg|png|jpg|pdf] [--scale 2] [--description "..."] [--entity "..."]
 ```
 
 Renders over REST, sanitizes SVG, freezes under `.media/images/`, appends the manifest with provenance, regenerates `.media/index.md` (the shared media-use inventory), prints an `<img>` snippet. Idempotent per `fileKey:nodeId:format:scale:version`. Prefer SVG for vectors/logos (scalable, animatable), PNG `--scale 2` for raster fidelity. **Always pass `--description "<what it is>"`** (it becomes the index row + `<img alt>`); add `--entity "<name>"` for named brand marks so media-use `resolve --entity` finds them later (entity hits match across image/icon).
+
+**Batch many nodes in ONE request** — pass several refs (space-separated or comma-joined) of the SAME file: `hyperframes figma asset 'KEY:1-2' 'KEY:3-4' 'KEY:5-6'`. All render in a single `/v1/images` call, which is figma's own answer to the per-minute rate limit — prefer it over N separate commands when pulling a whole frame's worth of assets. `--description`/`--entity` apply to every node in the batch, so batch nodes that share a purpose. 429s also auto-retry with backoff regardless.
 
 ## Tokens (Phase 2 — CLI)
 

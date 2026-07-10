@@ -7,7 +7,6 @@ import {
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Tooltip } from "./ui";
 import { PropertyPanel } from "./editor/PropertyPanel";
 import { LayersPanel } from "./editor/LayersPanel";
 import { CaptionPropertyPanel } from "../captions/components/CaptionPropertyPanel";
@@ -15,6 +14,9 @@ import { BlockParamsPanel } from "./editor/BlockParamsPanel";
 import { RenderQueue } from "./renders/RenderQueue";
 import { SlideshowPanel } from "./panels/SlideshowPanel";
 import type { SceneInfo } from "./panels/SlideshowPanel";
+import { VariablesPanel } from "./panels/VariablesPanel";
+import { PanelTabButton } from "./PanelTabButton";
+import { usePreviewVariablesStore } from "../hooks/previewVariablesStore";
 import type { RenderJob } from "./renders/useRenderQueue";
 import type { BlockParam } from "@hyperframes/core/registry";
 import type { IframeWindow } from "../player/lib/playbackTypes";
@@ -22,6 +24,7 @@ import { STUDIO_INSPECTOR_PANELS_ENABLED } from "./editor/manualEditingAvailabil
 import type { Composition } from "@hyperframes/sdk";
 import type { EditHistoryKind } from "../utils/editHistory";
 import { useSlideshowPersist } from "../hooks/useSlideshowPersist";
+import { DesignPanelPromoteProvider } from "./DesignPanelPromoteProvider";
 
 import { useStudioPlaybackContext, useStudioShellContext } from "../contexts/StudioContext";
 import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
@@ -340,63 +343,74 @@ export function StudioRightPanel({
   );
 
   const propertyPanel = (
-    <PropertyPanel
+    <DesignPanelPromoteProvider
+      selection={domEditGroupSelections.length > 1 ? null : domEditSelection}
       projectId={projectId}
-      projectDir={projectDir}
-      assets={assets}
-      element={domEditGroupSelections.length > 1 ? null : domEditSelection}
-      multiSelectCount={domEditGroupSelections.length}
-      copiedAgentPrompt={copiedAgentPrompt}
-      onClearSelection={clearDomSelection}
-      onToggleElementHidden={onToggleElementHidden}
-      onUngroup={handleUngroupSelection}
-      onSetStyle={handleDomStyleCommit}
-      onSetAttribute={handleDomAttributeCommit}
-      onSetAttributeLive={handleDomAttributeLiveCommit}
-      onApplyColorGradingScope={handleApplyColorGradingScope}
-      onSetHtmlAttribute={handleDomHtmlAttributeCommit}
-      onRemoveBackground={handleRemoveBackground}
-      onSetManualOffset={handleDomPathOffsetCommit}
-      onSetManualSize={handleDomBoxSizeCommit}
-      onSetManualRotation={handleDomRotationCommit}
-      onSetText={handleDomTextCommit}
-      onSetTextFieldStyle={handleDomTextFieldStyleCommit}
-      onAddTextField={handleDomAddTextField}
-      onRemoveTextField={handleDomRemoveTextField}
-      onAskAgent={handleAskAgent}
-      onImportAssets={handleImportFiles}
-      fontAssets={fontAssets}
-      onImportFonts={handleImportFonts}
-      previewIframeRef={previewIframeRef}
-      gsapAnimations={selectedGsapAnimations}
-      gsapMultipleTimelines={gsapMultipleTimelines}
-      gsapUnsupportedTimelinePattern={gsapUnsupportedTimelinePattern}
-      onUpdateGsapProperty={handleGsapUpdateProperty}
-      onUpdateGsapMeta={handleGsapUpdateMeta}
-      onDeleteGsapAnimation={handleGsapDeleteAnimation}
-      onAddGsapProperty={handleGsapAddProperty}
-      onRemoveGsapProperty={handleGsapRemoveProperty}
-      onUpdateGsapFromProperty={handleGsapUpdateFromProperty}
-      onAddGsapFromProperty={handleGsapAddFromProperty}
-      onRemoveGsapFromProperty={handleGsapRemoveFromProperty}
-      onAddGsapAnimation={handleGsapAddAnimation}
-      onCommitAnimatedProperty={commitAnimatedProperty}
-      onCommitAnimatedProperties={commitAnimatedProperties}
-      onAddKeyframe={handleGsapAddKeyframe}
-      onRemoveKeyframe={handleGsapRemoveKeyframe}
-      onConvertToKeyframes={(animId, duration) =>
-        handleGsapConvertToKeyframes(animId, undefined, duration)
-      }
-      onSeekToTime={(t) => usePlayerStore.getState().requestSeek(t)}
-      onSetArcPath={handleSetArcPath}
-      onUpdateArcSegment={handleUpdateArcSegment}
-      onUnroll={handleUnroll}
-      onUpdateKeyframeEase={handleUpdateKeyframeEase}
-      onSetAllKeyframeEases={handleSetAllKeyframeEases}
-      recordingState={recordingState}
-      recordingDuration={recordingDuration}
-      onToggleRecording={onToggleRecording}
-    />
+      activeCompPath={activeCompPath}
+      readProjectFile={readProjectFile}
+      writeProjectFile={writeProjectFile}
+      recordEdit={recordEdit}
+      reloadPreview={reloadPreview}
+      domEditSaveTimestampRef={domEditSaveTimestampRef}
+    >
+      <PropertyPanel
+        projectId={projectId}
+        projectDir={projectDir}
+        assets={assets}
+        element={domEditGroupSelections.length > 1 ? null : domEditSelection}
+        multiSelectCount={domEditGroupSelections.length}
+        copiedAgentPrompt={copiedAgentPrompt}
+        onClearSelection={clearDomSelection}
+        onToggleElementHidden={onToggleElementHidden}
+        onUngroup={handleUngroupSelection}
+        onSetStyle={handleDomStyleCommit}
+        onSetAttribute={handleDomAttributeCommit}
+        onSetAttributeLive={handleDomAttributeLiveCommit}
+        onApplyColorGradingScope={handleApplyColorGradingScope}
+        onSetHtmlAttribute={handleDomHtmlAttributeCommit}
+        onRemoveBackground={handleRemoveBackground}
+        onSetManualOffset={handleDomPathOffsetCommit}
+        onSetManualSize={handleDomBoxSizeCommit}
+        onSetManualRotation={handleDomRotationCommit}
+        onSetText={handleDomTextCommit}
+        onSetTextFieldStyle={handleDomTextFieldStyleCommit}
+        onAddTextField={handleDomAddTextField}
+        onRemoveTextField={handleDomRemoveTextField}
+        onAskAgent={handleAskAgent}
+        onImportAssets={handleImportFiles}
+        fontAssets={fontAssets}
+        onImportFonts={handleImportFonts}
+        previewIframeRef={previewIframeRef}
+        gsapAnimations={selectedGsapAnimations}
+        gsapMultipleTimelines={gsapMultipleTimelines}
+        gsapUnsupportedTimelinePattern={gsapUnsupportedTimelinePattern}
+        onUpdateGsapProperty={handleGsapUpdateProperty}
+        onUpdateGsapMeta={handleGsapUpdateMeta}
+        onDeleteGsapAnimation={handleGsapDeleteAnimation}
+        onAddGsapProperty={handleGsapAddProperty}
+        onRemoveGsapProperty={handleGsapRemoveProperty}
+        onUpdateGsapFromProperty={handleGsapUpdateFromProperty}
+        onAddGsapFromProperty={handleGsapAddFromProperty}
+        onRemoveGsapFromProperty={handleGsapRemoveFromProperty}
+        onAddGsapAnimation={handleGsapAddAnimation}
+        onCommitAnimatedProperty={commitAnimatedProperty}
+        onCommitAnimatedProperties={commitAnimatedProperties}
+        onAddKeyframe={handleGsapAddKeyframe}
+        onRemoveKeyframe={handleGsapRemoveKeyframe}
+        onConvertToKeyframes={(animId, duration) =>
+          handleGsapConvertToKeyframes(animId, undefined, duration)
+        }
+        onSeekToTime={(t) => usePlayerStore.getState().requestSeek(t)}
+        onSetArcPath={handleSetArcPath}
+        onUpdateArcSegment={handleUpdateArcSegment}
+        onUnroll={handleUnroll}
+        onUpdateKeyframeEase={handleUpdateKeyframeEase}
+        onSetAllKeyframeEases={handleSetAllKeyframeEases}
+        recordingState={recordingState}
+        recordingDuration={recordingDuration}
+        onToggleRecording={onToggleRecording}
+      />
+    </DesignPanelPromoteProvider>
   );
 
   const renderQueuePanel = (
@@ -420,6 +434,9 @@ export function StudioRightPanel({
           format,
           resolution,
           composition,
+          // Render what the user is previewing: active variable overrides
+          // from the Variables panel ride along (undefined = defaults).
+          variables: usePreviewVariablesStore.getState().values ?? undefined,
         });
       }}
       compositionDimensions={compositionDimensions}
@@ -461,64 +478,38 @@ export function StudioRightPanel({
             <div className="flex min-w-0 items-center gap-1 overflow-hidden border-b border-neutral-800 px-3 py-2">
               {STUDIO_INSPECTOR_PANELS_ENABLED && (
                 <>
-                  <Tooltip label="Element styles and properties" side="bottom">
-                    <button
-                      type="button"
-                      onClick={() => handleInspectorPaneButtonClick("design")}
-                      aria-pressed={designPaneOpen}
-                      className={`h-8 rounded-xl px-3 text-[11px] font-medium transition-colors active:scale-[0.98] ${
-                        designPaneOpen
-                          ? "bg-neutral-800 text-white"
-                          : "text-neutral-500 hover:bg-neutral-800/70 hover:text-neutral-200"
-                      }`}
-                    >
-                      Design
-                    </button>
-                  </Tooltip>
-                  <Tooltip label="Composition layer stack" side="bottom">
-                    <button
-                      type="button"
-                      onClick={() => handleInspectorPaneButtonClick("layers")}
-                      aria-pressed={layersPaneOpen}
-                      className={`h-8 rounded-xl px-3 text-[11px] font-medium transition-colors active:scale-[0.98] ${
-                        layersPaneOpen
-                          ? "bg-neutral-800 text-white"
-                          : "text-neutral-500 hover:bg-neutral-800/70 hover:text-neutral-200"
-                      }`}
-                    >
-                      Layers
-                    </button>
-                  </Tooltip>
+                  <PanelTabButton
+                    label="Design"
+                    tooltip="Element styles and properties"
+                    active={designPaneOpen}
+                    onClick={() => handleInspectorPaneButtonClick("design")}
+                  />
+                  <PanelTabButton
+                    label="Layers"
+                    tooltip="Composition layer stack"
+                    active={layersPaneOpen}
+                    onClick={() => handleInspectorPaneButtonClick("layers")}
+                  />
                 </>
               )}
-              <Tooltip label="Render queue and exports" side="bottom">
-                <button
-                  type="button"
-                  onClick={() => setRightPanelTab("renders")}
-                  aria-pressed={rightPanelTab === "renders"}
-                  className={`h-8 rounded-xl px-3 text-[11px] font-medium transition-colors active:scale-[0.98] ${
-                    rightPanelTab === "renders"
-                      ? "bg-neutral-800 text-white"
-                      : "text-neutral-500 hover:bg-neutral-800/70 hover:text-neutral-200"
-                  }`}
-                >
-                  {renderJobs.length > 0 ? `Renders (${renderJobs.length})` : "Renders"}
-                </button>
-              </Tooltip>
-              <Tooltip label="Slideshow branching editor" side="bottom">
-                <button
-                  type="button"
-                  onClick={() => setRightPanelTab("slideshow")}
-                  aria-pressed={rightPanelTab === "slideshow"}
-                  className={`h-8 rounded-xl px-3 text-[11px] font-medium transition-colors active:scale-[0.98] ${
-                    rightPanelTab === "slideshow"
-                      ? "bg-neutral-800 text-white"
-                      : "text-neutral-500 hover:bg-neutral-800/70 hover:text-neutral-200"
-                  }`}
-                >
-                  Slideshow
-                </button>
-              </Tooltip>
+              <PanelTabButton
+                label={renderJobs.length > 0 ? `Renders (${renderJobs.length})` : "Renders"}
+                tooltip="Render queue and exports"
+                active={rightPanelTab === "renders"}
+                onClick={() => setRightPanelTab("renders")}
+              />
+              <PanelTabButton
+                label="Slideshow"
+                tooltip="Slideshow branching editor"
+                active={rightPanelTab === "slideshow"}
+                onClick={() => setRightPanelTab("slideshow")}
+              />
+              <PanelTabButton
+                label="Variables"
+                tooltip="Template variables — declare, preview with values"
+                active={rightPanelTab === "variables"}
+                onClick={() => setRightPanelTab("variables")}
+              />
             </div>
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
               {rightPanelTab === "block-params" && activeBlockParams ? (
@@ -534,6 +525,13 @@ export function StudioRightPanel({
                   scenes={slideshowScenes}
                   onPersist={onPersistSlideshow}
                   onPersistNotes={onPersistSlideshowNotes}
+                />
+              ) : rightPanelTab === "variables" ? (
+                <VariablesPanel
+                  sdkSession={sdkSession}
+                  reloadPreview={reloadPreview}
+                  domEditSaveTimestampRef={domEditSaveTimestampRef}
+                  recordEdit={recordEdit}
                 />
               ) : layersPaneOpen && designPaneOpen ? (
                 <div ref={splitContainerRef} className="flex h-full min-h-0 min-w-0 flex-col">

@@ -117,6 +117,10 @@ describe("Timeline provider boundary", () => {
       );
     });
 
+    // Flush passive effects (ResizeObserver-driven layout) so the gutter row is
+    // mounted before we query it.
+    act(() => {});
+
     const button = host.querySelector<HTMLButtonElement>('button[aria-label="Show track 0"]');
     expect(button).not.toBeNull();
     if (!button) throw new Error("Expected a track visibility toggle");
@@ -197,6 +201,40 @@ describe("Timeline provider boundary", () => {
     });
 
     expect(onSeek).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it("marks every clip in selectedElementIds as selected", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    Object.defineProperty(host, "clientWidth", {
+      configurable: true,
+      value: 720,
+    });
+
+    usePlayerStore.setState({
+      duration: 6,
+      timelineReady: true,
+      selectedElementId: "clip-2",
+      selectedElementIds: new Set(["clip-1", "clip-2"]),
+      elements: [
+        { id: "clip-1", tag: "div", start: 0, duration: 1, track: 0 },
+        { id: "clip-2", tag: "div", start: 1.5, duration: 1, track: 1 },
+        { id: "clip-3", tag: "div", start: 3, duration: 1, track: 2 },
+      ],
+    });
+
+    const root = createRoot(host);
+    act(() => {
+      root.render(React.createElement(Timeline));
+    });
+
+    const selectedClips = host.querySelectorAll(".timeline-clip.is-selected");
+    expect(selectedClips).toHaveLength(2);
+    expect(host.querySelector('[data-el-id="clip-3"]')?.classList.contains("is-selected")).toBe(
+      false,
+    );
+
     act(() => root.unmount());
   });
 });

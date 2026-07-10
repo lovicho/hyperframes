@@ -329,6 +329,8 @@ describe("engine helper exports (resolveScoped, findById, escapeHfId, readVariab
     expect(findById(document as unknown as Document, "hf-title")).not.toBeNull();
     expect(resolveScoped(document as unknown as Document, "hf-title")).not.toBeNull();
     expect(escapeHfId('hf-"quoted"')).toBe('hf-\\"quoted\\"');
-    expect(readVariableDefault(document as unknown as Document, "never-declared")).toBeUndefined();
+    // readVariableDefault takes the declaration element (the <html>/root), not the Document.
+    const declEl = (document as unknown as Document).documentElement;
+    expect(readVariableDefault(declEl, "never-declared")).toBeUndefined();
   });
 });

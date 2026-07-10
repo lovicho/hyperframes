@@ -57,6 +57,7 @@ import {
 } from "./deterministicFonts.js";
 import { prepareAnimatedGifInputs } from "./animatedGifPrep.js";
 import { createStudioPositionSeekReapplyScript } from "@hyperframes/studio-server/manual-edits-render-script";
+import { getPositionEditsRenderScript } from "@hyperframes/core/runtime/position-edits-render";
 import { defaultLogger, type ProducerLogger } from "../logger.js";
 
 export interface CompiledComposition {
@@ -82,6 +83,17 @@ export interface CompiledComposition {
 /** Adapts linkedom's `parseHTML` to the `checkSubCompositionUsability` contract. */
 function parseSubCompHtmlForValidity(html: string): ParsableDocumentLike {
   return parseHTML(html).document as unknown as ParsableDocumentLike;
+}
+
+export function injectSdkPositionEditsRenderScript(html: string): string {
+  if (!html.includes("data-hf-edit-base-x") && !html.includes("data-hf-edit-base-y")) {
+    return html;
+  }
+  const scriptBody = getPositionEditsRenderScript().replace(/<\/script/gi, "<\\/script");
+  const script = `<script>${scriptBody}</script>`;
+  const bodyClose = html.search(/<\/body\s*>/i);
+  if (bodyClose < 0) return `${html}${script}`;
+  return `${html.slice(0, bodyClose)}${script}${html.slice(bodyClose)}`;
 }
 
 /**
@@ -1730,6 +1742,7 @@ export async function compileForRender(
         `<script>${createStudioPositionSeekReapplyScript()}</script></body>`,
       )
     : assembledHtml;
+  const htmlWithSdkPositionScript = injectSdkPositionEditsRenderScript(htmlWithPositionScript);
 
   // Download remote <video> and <audio> sources to compiledDir and rewrite the
   // src attributes so the renderer reads from localhost. Remote S3 URLs cause
@@ -1737,7 +1750,7 @@ export async function compileForRender(
   // over the network; any that don't reach readyState >= 2 in time render as
   // blank black frames. Localising them eliminates the race.
   const { html: htmlWithLocalMedia, remoteMediaAssets } = await localizeRemoteMediaSources(
-    htmlWithPositionScript,
+    htmlWithSdkPositionScript,
     downloadDir,
   );
 

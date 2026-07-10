@@ -32,6 +32,19 @@ function parseElementEndAttr(element: Element): number | null {
   );
 }
 
+function readInlineZIndex(element: Element): number {
+  try {
+    const inline = (element as HTMLElement).style?.zIndex;
+    if (inline && inline !== "auto") {
+      const parsed = parseInt(inline, 10);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
 function maxDefinedNumber(...values: Array<number | null>): number | null {
   const finite = values.filter((value): value is number => Number.isFinite(value ?? null));
   if (finite.length === 0) return null;
@@ -434,6 +447,8 @@ export function collectRuntimeTimelinePayload(params: {
           node.getAttribute("data-track-index") ?? node.getAttribute("data-track") ?? String(i),
           10,
         ) || 0,
+      zIndex: readInlineZIndex(node),
+      stackingContextId: compositionContext.parentCompositionId ?? rootCompositionId,
       kind,
       tagName: tag,
       compositionId: node.getAttribute("data-composition-id"),
@@ -545,6 +560,8 @@ export function collectRuntimeTimelinePayload(params: {
                 el.getAttribute("data-track-index") ?? el.getAttribute("data-track") ?? "",
                 10,
               ) || gsapTrack,
+            zIndex: readInlineZIndex(el),
+            stackingContextId: rootCompositionIdForGsap,
             kind: "element",
             tagName: el.tagName.toLowerCase(),
             compositionId: el.getAttribute("data-composition-id"),
@@ -602,6 +619,8 @@ export function collectRuntimeTimelinePayload(params: {
             el.getAttribute("data-track-index") ?? el.getAttribute("data-track") ?? "",
             10,
           ) || overlayTrack,
+        zIndex: readInlineZIndex(el),
+        stackingContextId: rootCompositionIdForGsap,
         kind: "element",
         tagName: tag,
         compositionId: el.getAttribute("data-composition-id"),

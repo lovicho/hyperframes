@@ -2046,6 +2046,19 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       }
       block = extractGsapScriptBlock(html);
     }
+    if (!block && (body.type === "shift-positions" || body.type === "scale-positions")) {
+      return c.json({
+        ok: true,
+        changed: false,
+        mutated: false,
+        parsed: { animations: [], timelineVar: "tl", preamble: "", postamble: "" },
+        before: html,
+        after: html,
+        scriptText: "",
+        path: res.filePath,
+        backupPath: null,
+      });
+    }
     if (!block) {
       return c.json({ error: "no GSAP script found in file" }, 400);
     }
@@ -2081,6 +2094,7 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
     const responsePayload: Record<string, unknown> = {
       ok: true,
       changed,
+      mutated: changed,
       parsed: freshParsed,
       before: html,
       after: newHtml,
