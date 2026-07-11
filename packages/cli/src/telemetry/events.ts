@@ -3,6 +3,12 @@ import type { SubTimelineWaitOutcome } from "@hyperframes/engine";
 import { trackEvent } from "./client.js";
 import { readConfig } from "./config.js";
 
+// run_id is attached only when the orchestrator set HYPERFRAMES_RUN_ID — an
+// absent property, never null/"" (PostHog treats those as real values).
+function runIdField(runId: string | undefined): { run_id?: string } {
+  return runId !== undefined ? { run_id: runId } : {};
+}
+
 export interface RenderObservabilityTelemetryPayload {
   /** Worst sub-composition timeline wait outcome across sessions. */
   subTimelineWait?: SubTimelineWaitOutcome;
@@ -34,6 +40,19 @@ export interface RenderObservabilityTelemetryPayload {
   capturePlayerReadyTimeoutMs?: number;
   captureTransientRetries?: number;
   captureMemoryExhaustionDetected?: boolean;
+  // Mirror of the DE inversion/router state on `RenderCaptureObservability` —
+  // sourced from the live-mutated capture object rather than `perfSummary`,
+  // so a hard failure (crash, OOM, timeout) that never reaches perfSummary
+  // construction still reports which DE experiment cohort it was in. Mapped
+  // to the SAME `de_*` event keys `trackRenderComplete` sets explicitly from
+  // `perfSummary.drawElement`; the caller must spread this payload FIRST so
+  // the more authoritative perfSummary value wins when both are present.
+  captureDeWorkerInversion?: string;
+  captureDePreInversionWorkers?: number;
+  captureDeParallelRouter?: string;
+  captureDePreRouterWorkers?: number;
+  captureDeSelfVerifyFallback?: boolean;
+  captureDeFallbackReason?: string;
   observabilityExtractVideoCount?: number;
   observabilityExtractedVideoCount?: number;
   observabilityExtractTotalFrames?: number;
@@ -79,6 +98,12 @@ function renderObservabilityEventProperties(props: RenderObservabilityTelemetryP
     capture_player_ready_timeout_ms: props.capturePlayerReadyTimeoutMs,
     capture_transient_retries: props.captureTransientRetries,
     capture_memory_exhaustion_detected: props.captureMemoryExhaustionDetected,
+    de_worker_inversion: props.captureDeWorkerInversion,
+    de_pre_inversion_workers: props.captureDePreInversionWorkers,
+    de_parallel_router: props.captureDeParallelRouter,
+    de_pre_router_workers: props.captureDePreRouterWorkers,
+    de_self_verify_fallback: props.captureDeSelfVerifyFallback,
+    de_fallback_reason: props.captureDeFallbackReason,
     observability_extract_video_count: props.observabilityExtractVideoCount,
     observability_extracted_video_count: props.observabilityExtractedVideoCount,
     observability_extract_total_frames: props.observabilityExtractTotalFrames,
@@ -98,8 +123,11 @@ function redactTelemetryMessage(value: string): string {
   return redactTelemetryString(value);
 }
 
-export function trackCommand(command: string): void {
-  trackEvent("cli_command", { command });
+export function trackCommand(command: string, runId?: string): void {
+  trackEvent("cli_command", {
+    command,
+    ...runIdField(runId),
+  });
 }
 
 export function trackRenderComplete(
@@ -189,6 +217,11 @@ export function trackRenderComplete(
   trackEvent(
     "render_complete",
     {
+      // Spread first: explicit de_* keys below (sourced from the more
+      // authoritative perfSummary.drawElement, always present on this
+      // success path) must win over the observability-capture fallback
+      // this shares with trackRenderError's failure path.
+      ...renderObservabilityEventProperties(props),
       duration_ms: props.durationMs,
       fps: props.fps,
       quality: props.quality,
@@ -252,7 +285,6 @@ export function trackRenderComplete(
       extract_phase3_ms: props.extractPhase3Ms,
       extract_cache_hits: props.extractCacheHits,
       extract_cache_misses: props.extractCacheMisses,
-      ...renderObservabilityEventProperties(props),
     },
     props.distinctId,
   );
@@ -544,11 +576,65 @@ export function trackCommandResult(props: {
   success: boolean;
   exitCode: number;
   durationMs: number;
+  runId?: string;
 }): void {
   trackEvent("cli_command_result", {
     command: props.command,
     success: props.success,
     exit_code: props.exitCode,
     duration_ms: props.durationMs,
+    ...runIdField(props.runId),
+  });
+}
+
+export function trackCheckReport(props: {
+  contrastGate: boolean;
+  motionGate: boolean;
+  captionZoneGate: boolean;
+  frameCheckGate: boolean;
+  snapshotsGate: boolean;
+  lintErrors: number;
+  lintWarnings: number;
+  runtimeErrors: number;
+  runtimeWarnings: number;
+  layoutErrors: number;
+  layoutWarnings: number;
+  motionErrors: number;
+  motionWarnings: number;
+  contrastErrors: number;
+  contrastWarnings: number;
+  launchSettleMs: number;
+  seekLoopMs: number;
+  contrastMs: number;
+  gridPoints: number;
+  contrastPoints: number;
+  ok: boolean;
+  exitCode: number;
+  runId?: string;
+}): void {
+  trackEvent("check_report", {
+    gate_contrast: props.contrastGate,
+    gate_motion: props.motionGate,
+    gate_caption_zone: props.captionZoneGate,
+    gate_frame_check: props.frameCheckGate,
+    gate_snapshots: props.snapshotsGate,
+    lint_errors: props.lintErrors,
+    lint_warnings: props.lintWarnings,
+    runtime_errors: props.runtimeErrors,
+    runtime_warnings: props.runtimeWarnings,
+    layout_errors: props.layoutErrors,
+    layout_warnings: props.layoutWarnings,
+    motion_errors: props.motionErrors,
+    motion_warnings: props.motionWarnings,
+    contrast_errors: props.contrastErrors,
+    contrast_warnings: props.contrastWarnings,
+    launch_settle_ms: props.launchSettleMs,
+    seek_loop_ms: props.seekLoopMs,
+    contrast_ms: props.contrastMs,
+    grid_points: props.gridPoints,
+    contrast_points: props.contrastPoints,
+    ok: props.ok,
+    exit_code: props.exitCode,
+    ...runIdField(props.runId),
   });
 }
