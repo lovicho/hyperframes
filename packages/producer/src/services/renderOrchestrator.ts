@@ -110,6 +110,7 @@ import {
   observeRenderStage,
   type RenderCaptureObservability,
   type RenderExtractionObservability,
+  type RenderObservationData,
   type RenderObservabilitySummary,
 } from "./render/observability.js";
 import { type HdrPerfCollector, type HdrPerfSummary } from "./render/hdrPerf.js";
@@ -658,6 +659,10 @@ export function captureAttemptMadeProgress(
   remainingFrameCount: number,
 ): boolean {
   return remainingFrameCount < attemptTargetFrameCount;
+}
+
+export function resetCaptureAttemptProgress(job: { framesRendered?: number }): void {
+  job.framesRendered = 0;
 }
 
 export function isRecoverableParallelCaptureError(error: unknown): boolean {
@@ -1934,6 +1939,51 @@ export async function executeRenderJob(
         process.env.HF_DE_PARALLEL_STREAM === "true",
       routerEnabled: deParallelRouterEnabled,
     });
+    // Declared ahead of resolution (assigned below, after calibration) so
+    // captureStageObservationData can close over it for the calibration
+    // stage itself — reads as undefined until resolveRenderWorkerCount runs.
+    let workerCount: number;
+    const captureStageObservationData = (
+      extra: RenderObservationData = {},
+    ): RenderObservationData => ({
+      ...extra,
+      get workerCount() {
+        return workerCount;
+      },
+      get forceScreenshot() {
+        return captureForceScreenshot;
+      },
+      get totalFrames() {
+        return totalFrames;
+      },
+      get framesCompleted() {
+        return job.framesRendered ?? 0;
+      },
+      get captureMode() {
+        return (
+          probeSession?.captureMode ??
+          (captureForceScreenshot
+            ? "screenshot"
+            : cfg.useDrawElement
+              ? "drawelement"
+              : "beginframe")
+        );
+      },
+      get captureOperation() {
+        if ((job.framesRendered ?? 0) >= totalFrames) return "encode";
+        const mode =
+          probeSession?.captureMode ??
+          (captureForceScreenshot
+            ? "screenshot"
+            : cfg.useDrawElement
+              ? "drawelement"
+              : "beginframe");
+        if (mode === "screenshot") return "captureScreenshot";
+        if (mode === "drawelement") return "drawElement";
+        return "beginFrame";
+      },
+    });
+
     if (
       job.config.workers === undefined &&
       totalFrames >= 60 &&
@@ -1945,7 +1995,7 @@ export async function executeRenderJob(
       const outcome = await observeRenderStage(
         observability,
         "capture_calibration",
-        { forceScreenshot: captureForceScreenshot },
+        captureStageObservationData({ forceScreenshot: captureForceScreenshot }),
         () =>
           runCaptureCalibration({
             cfg,
@@ -1986,7 +2036,7 @@ export async function executeRenderJob(
 
     // Low-memory safe-mode's single-worker pin lives inside
     // resolveRenderWorkerCount so its "why workers=N" logging stays coherent.
-    let workerCount = resolveRenderWorkerCount(
+    workerCount = resolveRenderWorkerCount(
       totalFrames,
       job.config.workers,
       cfg,
@@ -2229,7 +2279,7 @@ export async function executeRenderJob(
     const effectiveQuality = job.config.crf ?? preset.quality;
     const effectiveBitrate = job.config.crf != null ? undefined : job.config.videoBitrate;
 
-    job.framesRendered = 0;
+    resetCaptureAttemptProgress(job);
 
     // ── Z-ordered multi-layer compositing ─────────────────────────────────
     // Per frame: query all elements' z-order, group into layers (DOM or HDR),
@@ -2248,7 +2298,7 @@ export async function executeRenderJob(
       const hdrRes = await observeRenderStage(
         observability,
         "capture_hdr_layered",
-        { workerCount, forceScreenshot: captureForceScreenshot, hasHdrContent },
+        captureStageObservationData({ hasHdrContent }),
         () =>
           runCaptureHdrStage({
             job,
@@ -2297,11 +2347,12 @@ export async function executeRenderJob(
       let streamingHandled = false;
       if (useStreamingEncode) {
         const captureFrameStart = Date.now();
-        const invokeStreaming = () =>
-          observeRenderStage(
+        const invokeStreaming = () => {
+          resetCaptureAttemptProgress(job);
+          return observeRenderStage(
             observability,
             "capture_streaming",
-            { workerCount, forceScreenshot: captureForceScreenshot },
+            captureStageObservationData(),
             () =>
               runCaptureStreamingStage({
                 fileServer: activeFileServer,
@@ -2339,6 +2390,7 @@ export async function executeRenderJob(
                 dedupPerfs,
               }),
           );
+        };
         let streamingRes;
         try {
           streamingRes = await invokeStreaming();
@@ -2510,11 +2562,12 @@ export async function executeRenderJob(
 
       if (!streamingHandled) {
         // ── Disk-based capture (original flow) ────────────────────────────
+        resetCaptureAttemptProgress(job);
         const captureFrameStart = Date.now();
         const captureRes = await observeRenderStage(
           observability,
           "capture_disk",
-          { workerCount, forceScreenshot: captureForceScreenshot, needsAlpha },
+          captureStageObservationData({ needsAlpha }),
           () =>
             runCaptureStage({
               fileServer: activeFileServer,
@@ -2555,7 +2608,12 @@ export async function executeRenderJob(
         const encodeRes = await observeRenderStage(
           observability,
           "encode",
-          { hasAudio, isPngSequence, isGif, chunkedEncode: enableChunkedEncode },
+          captureStageObservationData({
+            hasAudio,
+            isPngSequence,
+            isGif,
+            chunkedEncode: enableChunkedEncode,
+          }),
           () =>
             runEncodeStage({
               job,
@@ -2603,17 +2661,21 @@ export async function executeRenderJob(
     // directory deliverable, and gif is written directly to outputPath by the
     // two-pass palette encoder.
     if (!isPngSequence && !isGif) {
-      const assembleRes = await observeRenderStage(observability, "assemble", { hasAudio }, () =>
-        runAssembleStage({
-          job,
-          videoOnlyPath,
-          audioOutputPath,
-          outputPath,
-          hasAudio,
-          abortSignal,
-          assertNotAborted,
-          onProgress,
-        }),
+      const assembleRes = await observeRenderStage(
+        observability,
+        "assemble",
+        captureStageObservationData({ hasAudio }),
+        () =>
+          runAssembleStage({
+            job,
+            videoOnlyPath,
+            audioOutputPath,
+            outputPath,
+            hasAudio,
+            abortSignal,
+            assertNotAborted,
+            onProgress,
+          }),
       );
       perfStages.assembleMs = assembleRes.assembleMs;
     } else {
