@@ -310,6 +310,27 @@ describe("render telemetry events", () => {
     );
   });
 
+  it("sends beginframe no-damage reuse counters on render_complete", () => {
+    trackRenderComplete({
+      durationMs: 6000,
+      fps: 30,
+      quality: "standard",
+      docker: false,
+      gpu: false,
+      beginFrameNoDamageFrames: 720,
+      beginFrameHasDamageFrames: 480,
+    });
+
+    expect(trackEvent).toHaveBeenCalledWith(
+      "render_complete",
+      expect.objectContaining({
+        begin_frame_no_damage_frames: 720,
+        begin_frame_has_damage_frames: 480,
+      }),
+      undefined,
+    );
+  });
+
   it("redacts render_observation messages and includes renderJobId for correlation", () => {
     trackRenderObservation({
       renderJobId: "render-123",
@@ -338,6 +359,22 @@ describe("render telemetry events", () => {
         stage_elapsed_ms: 30_000,
         message: "Navigation failed for [path]",
       }),
+    );
+  });
+
+  it("carries capture_parallel_stream on render_error via the shared payload", () => {
+    trackRenderError({
+      fps: 30,
+      quality: "standard",
+      docker: false,
+      errorMessage: "worker crashed",
+      captureParallelStream: "beginframe",
+    });
+
+    expect(trackEvent).toHaveBeenCalledWith(
+      "render_error",
+      expect.objectContaining({ capture_parallel_stream: "beginframe" }),
+      undefined,
     );
   });
 });
