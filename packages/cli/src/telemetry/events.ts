@@ -1,6 +1,6 @@
 import { redactTelemetryString, type OutputResolutionIssueKind } from "@hyperframes/core";
 import type { SubTimelineWaitOutcome } from "@hyperframes/engine";
-import { trackEvent } from "./client.js";
+import { flush, trackEvent } from "./client.js";
 import { readConfig } from "./config.js";
 
 // run_id is attached only when the orchestrator set HYPERFRAMES_RUN_ID — an
@@ -298,6 +298,14 @@ export function trackRenderComplete(
     },
     props.distinctId,
   );
+  // Send immediately instead of waiting for the exit-time flush. The render
+  // command's normal teardown (agent-pipe EPIPE → process.exit(0), or an
+  // explicit process.exit) kills the lazy beforeExit flush mid-flight, which
+  // is why only ~10-15% of successful renders ever produced a render_complete
+  // — and the survivors skewed toward users with low RTT to PostHog. The
+  // process is alive and idle here; if it still dies mid-request, the queue
+  // keeps the event for the exit-time flushSync() fallback.
+  void flush();
 }
 
 export function trackRenderError(
@@ -339,6 +347,9 @@ export function trackRenderError(
     },
     props.distinctId,
   );
+  // Same rationale as trackRenderComplete: error paths process.exit(1) before
+  // the lazy flush can win its race — send now, exit-time fallback covers the rest.
+  void flush();
 }
 
 export function trackRenderObservation(props: {

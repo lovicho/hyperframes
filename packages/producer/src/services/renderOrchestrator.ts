@@ -1899,10 +1899,7 @@ export async function executeRenderJob(
       browserTimeout: cfg.browserTimeout,
     });
     updateCaptureObservability({ browserGpuMode: resolvedBrowserGpuMode });
-    const videoCaptureBeyondViewport = resolveVideoCaptureBeyondViewport(
-      composition.videos.length,
-      resolvedBrowserGpuMode,
-    );
+    const videoCaptureBeyondViewport = resolveVideoCaptureBeyondViewport(composition.videos.length);
 
     const captureOptions: CaptureOptions = {
       width,
