@@ -8,6 +8,7 @@ import {
 } from "../utils/variables.js";
 import {
   parseGifLoopArg,
+  hasExplicitCompositionArg,
   resolveBrowserTimeoutMsArg,
   resolveCompositionEntryArg,
   resolveDefaultFpsArg,
@@ -388,12 +389,14 @@ export default defineCommand({
   // fallow-ignore-next-line complexity
   async run({ args }) {
     // ── Resolve project ────────────────────────────────────────────────────
-    const project = resolveProject(args.dir);
+    const hasExplicitComposition = hasExplicitCompositionArg(args.composition);
+    const project = resolveProject(args.dir, { requireIndex: !hasExplicitComposition });
 
     // ── Resolve composition entry file ─────────────────────────────────────
     // Needed early: fps default below must read the actual render target, not
     // always index.html.
     const entryFile = resolveCompositionEntryArg(args.composition, project.dir, statSync);
+    const renderTarget = entryFile ? resolve(project.dir, entryFile) : project.indexPath;
 
     // ── Validate fps ───────────────────────────────────────────────────────
     // Accept either integer (`30`) or ffmpeg-style rational (`30000/1001`).
@@ -691,7 +694,7 @@ export default defineCommand({
         preparedBatch = batchModule.prepareBatchRender({
           batchPath,
           outputTemplate: batchOutputTemplate,
-          indexPath: project.indexPath,
+          indexPath: renderTarget,
           strictVariables: args["strict-variables"] ?? false,
           quiet: quiet || batchJson,
           json: batchJson,
@@ -708,7 +711,6 @@ export default defineCommand({
     // deck-native path. Best-effort — never block a render on this probe.
     if (!quiet) {
       try {
-        const renderTarget = entryFile ? resolve(project.dir, entryFile) : project.indexPath;
         const { slideshowIslandRegex } = await import("@hyperframes/core/slideshow");
         if (slideshowIslandRegex("i").test(readFileSync(renderTarget, "utf8"))) {
           console.log(
@@ -807,7 +809,10 @@ export default defineCommand({
 
     // ── Pre-render lint ──────────────────────────────────────────────────
     {
-      const lintResult = await lintProject(project.dir);
+      // lintProject's explicit-entry contract is an absolute source path;
+      // entryFile is project-relative for the producer.
+      const explicitEntry = entryFile ? renderTarget : undefined;
+      const lintResult = await lintProject(project.dir, explicitEntry);
       if (!quiet && (lintResult.totalErrors > 0 || lintResult.totalWarnings > 0)) {
         console.log("");
         for (const line of formatLintFindings(lintResult, { errorsFirst: true })) console.log(line);
@@ -841,7 +846,6 @@ export default defineCommand({
     if (outputResolution) {
       let resolutionIssue: { message: string; kind: OutputResolutionIssueKind } | undefined;
       try {
-        const renderTarget = entryFile ? resolve(project.dir, entryFile) : project.indexPath;
         resolutionIssue = await checkRenderResolutionPreflight(
           readFileSync(renderTarget, "utf8"),
           outputResolution,
@@ -934,7 +938,7 @@ export default defineCommand({
     // ── Validate --variables against data-composition-variables ─────────
     const strictVariables = args["strict-variables"] ?? false;
     if (variables && Object.keys(variables).length > 0) {
-      const issues = validateVariablesAgainstProject(project.indexPath, variables);
+      const issues = validateVariablesAgainstProject(renderTarget, variables);
       reportVariableIssues(issues, { strict: strictVariables, quiet });
     }
 
