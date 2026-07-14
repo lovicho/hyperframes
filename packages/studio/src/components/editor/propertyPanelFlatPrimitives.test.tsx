@@ -229,6 +229,96 @@ describe("FlatSlider", () => {
   });
 });
 
+describe("FlatSlider — Grade extensions", () => {
+  it("renders a center tick when centerTick is true, and omits it by default", () => {
+    const { host: withTick, root: rootA } = renderInto(
+      <FlatSlider
+        label="Exposure"
+        value={0}
+        min={-100}
+        max={100}
+        tier="default"
+        displayValue="+0.00"
+        centerTick
+        onCommit={vi.fn()}
+      />,
+    );
+    expect(withTick.querySelector('[data-flat-slider-center-tick="true"]')).not.toBeNull();
+    act(() => rootA.unmount());
+
+    const { host: withoutTick, root: rootB } = renderInto(
+      <FlatSlider
+        label="Layer blur"
+        value={0}
+        min={0}
+        max={100}
+        tier="default"
+        displayValue="0px"
+        onCommit={vi.fn()}
+      />,
+    );
+    expect(withoutTick.querySelector('[data-flat-slider-center-tick="true"]')).toBeNull();
+    act(() => rootB.unmount());
+  });
+
+  it("always reserves a 14px reset slot, showing the icon only when set and onReset is provided", () => {
+    const onReset = vi.fn();
+    const { host, root } = renderInto(
+      <FlatSlider
+        label="Contrast"
+        value={12}
+        min={-100}
+        max={100}
+        tier="explicitCustom"
+        displayValue="+12%"
+        centerTick
+        onReset={onReset}
+        onCommit={vi.fn()}
+      />,
+    );
+    const slot = host.querySelector('[data-flat-slider-reset-slot="true"]');
+    expect(slot).not.toBeNull();
+    const resetButton = host.querySelector<HTMLButtonElement>('[data-flat-slider-reset="true"]');
+    expect(resetButton).not.toBeNull();
+    act(() => resetButton?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+
+    const { host: unsetHost, root: rootB } = renderInto(
+      <FlatSlider
+        label="Contrast"
+        value={0}
+        min={-100}
+        max={100}
+        tier="default"
+        displayValue="0%"
+        centerTick
+        onCommit={vi.fn()}
+      />,
+    );
+    expect(unsetHost.querySelector('[data-flat-slider-reset-slot="true"]')).not.toBeNull();
+    expect(unsetHost.querySelector('[data-flat-slider-reset="true"]')).toBeNull();
+    act(() => rootB.unmount());
+  });
+
+  it("renders no reset slot at all when centerTick is omitted, matching existing Style/Media callers", () => {
+    const { host, root } = renderInto(
+      <FlatSlider
+        label="Opacity"
+        value={100}
+        min={0}
+        max={100}
+        tier="explicitCustom"
+        displayValue="100%"
+        onCommit={vi.fn()}
+      />,
+    );
+    expect(host.querySelector('[data-flat-slider-reset-slot="true"]')).toBeNull();
+    expect(host.querySelector('[data-flat-slider-reset="true"]')).toBeNull();
+    act(() => root.unmount());
+  });
+});
+
 describe("FlatSelectRow", () => {
   it("renders the default tier with no reset button", () => {
     const { host, root } = renderInto(
@@ -284,6 +374,44 @@ describe("FlatSelectRow", () => {
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(onChange).toHaveBeenCalledWith("hidden");
+    act(() => root.unmount());
+  });
+});
+
+describe("FlatSelectRow — label/value options", () => {
+  it("renders distinct labels for entries with a different display label than value", () => {
+    const { host, root } = renderInto(
+      <FlatSelectRow
+        label="Preset"
+        value="natural-lift"
+        options={[
+          { value: "neutral", label: "Neutral" },
+          { value: "natural-lift", label: "Natural Lift" },
+          { value: "fresh-pop", label: "Fresh Pop" },
+        ]}
+        tier="explicitCustom"
+        onChange={vi.fn()}
+      />,
+    );
+    const select = host.querySelector("select");
+    expect(select?.value).toBe("natural-lift");
+    const options = Array.from(host.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toEqual(["Neutral", "Natural Lift", "Fresh Pop"]);
+    act(() => root.unmount());
+  });
+
+  it("still treats a bare string array as value===label (Plan 2 behavior unchanged)", () => {
+    const { host, root } = renderInto(
+      <FlatSelectRow
+        label="Blend"
+        value="multiply"
+        options={["normal", "multiply", "screen"]}
+        tier="explicitCustom"
+        onChange={vi.fn()}
+      />,
+    );
+    const options = Array.from(host.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toEqual(["normal", "multiply", "screen"]);
     act(() => root.unmount());
   });
 });

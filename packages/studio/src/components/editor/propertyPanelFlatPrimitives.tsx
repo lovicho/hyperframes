@@ -247,6 +247,8 @@ export function FlatSlider({
   tier,
   displayValue,
   disabled,
+  centerTick,
+  onReset,
   onCommit,
 }: {
   label: string;
@@ -257,6 +259,8 @@ export function FlatSlider({
   tier: "default" | "explicitCustom";
   displayValue: string;
   disabled?: boolean;
+  centerTick?: boolean;
+  onReset?: () => void;
   onCommit: (nextValue: number) => void;
 }) {
   const clampedPct = Math.max(0, Math.min(100, ((value - min) / Math.max(max - min, 1e-6)) * 100));
@@ -285,6 +289,12 @@ export function FlatSlider({
           commitFromClientX(e.clientX, e.currentTarget.getBoundingClientRect());
         }}
       >
+        {centerTick && (
+          <div
+            data-flat-slider-center-tick="true"
+            className="absolute left-1/2 top-[-1px] h-1 w-px -translate-x-1/2 bg-panel-text-5"
+          />
+        )}
         {tier === "explicitCustom" && (
           <div
             data-flat-slider-fill="true"
@@ -308,6 +318,21 @@ export function FlatSlider({
       >
         {displayValue}
       </span>
+      {centerTick && (
+        <span data-flat-slider-reset-slot="true" className="w-3.5 flex-shrink-0">
+          {tier === "explicitCustom" && onReset && (
+            <button
+              type="button"
+              data-flat-slider-reset="true"
+              title="Remove — fall back to default"
+              onClick={onReset}
+              className="text-panel-text-3 hover:text-panel-text-1"
+            >
+              <RotateCcw size={11} />
+            </button>
+          )}
+        </span>
+      )}
     </div>
   );
 }
@@ -327,12 +352,15 @@ export function FlatSelectRow({
 }: {
   label: string;
   value: string;
-  options: string[];
+  options: Array<string | { value: string; label: string }>;
   tier: PropertyValueTier;
   disabled?: boolean;
   onChange: (nextValue: string) => void;
   onReset?: () => void;
 }) {
+  const normalizedOptions = options.map((option) =>
+    typeof option === "string" ? { value: option, label: option } : option,
+  );
   return (
     <div className="group flex min-h-[30px] items-center justify-between">
       <span className={`text-[11px] ${VALUE_TIER_LABEL_CLASS[tier]}`}>{label}</span>
@@ -344,9 +372,9 @@ export function FlatSelectRow({
             onChange={(e) => onChange(e.target.value)}
             className={`appearance-none bg-transparent text-right font-mono text-[11px] outline-none disabled:cursor-not-allowed ${VALUE_TIER_VALUE_CLASS[tier]}`}
           >
-            {options.map((option) => (
-              <option key={option} value={option}>
-                {option}
+            {normalizedOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
               </option>
             ))}
           </select>
