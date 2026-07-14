@@ -318,6 +318,11 @@ export function FlatSlider({
   // loss (another element steals it, or the browser reclaims it for a
   // scroll/touch gesture) where no other handler is about to run.
   const explicitReleaseRef = useRef(false);
+  // The committed value when the current drag began — Escape and right-click
+  // both cancel an in-progress drag by reverting to this, not by leaving
+  // whatever position the pointer last reached committed.
+  const dragStartValueRef = useRef(value);
+  const activePointerIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (draggingRef.current) return;
@@ -372,6 +377,22 @@ export function FlatSlider({
       }, 40 - elapsed);
     }
   };
+  // Reverts to the pre-drag value instead of leaving whatever position the
+  // pointer last reached committed — the drag's own leading-edge commit (in
+  // onPointerDown) may already have applied an intermediate value, so this
+  // must go through commitDraft (not just a visual setDraft) to actually
+  // undo it.
+  const cancelDrag = (target: HTMLDivElement) => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    const pointerId = activePointerIdRef.current;
+    if (pointerId !== null && target.hasPointerCapture(pointerId)) {
+      explicitReleaseRef.current = true;
+      target.releasePointerCapture(pointerId);
+    }
+    setDraft(dragStartValueRef.current);
+    commitDraft(dragStartValueRef.current);
+  };
 
   return (
     <div className="flex min-h-[28px] items-center gap-2.5">
@@ -390,6 +411,8 @@ export function FlatSlider({
         onPointerDown={(e) => {
           if (disabled) return;
           draggingRef.current = true;
+          dragStartValueRef.current = latestValueRef.current;
+          activePointerIdRef.current = e.pointerId;
           e.currentTarget.setPointerCapture(e.pointerId);
           const stepped = stepFromClientX(e.clientX, e.currentTarget.getBoundingClientRect());
           setDraft(stepped);
@@ -447,11 +470,24 @@ export function FlatSlider({
         }}
         onKeyDown={(e) => {
           if (disabled) return;
+          if (e.key === "Escape" && draggingRef.current) {
+            e.preventDefault();
+            cancelDrag(e.currentTarget);
+            return;
+          }
           const next = sliderKeyTarget(e.key, draft, min, max, step);
           if (next === null) return;
           e.preventDefault();
           setDraft(next);
           commitDraft(next);
+        }}
+        onContextMenu={(e) => {
+          // Right-click during a drag must cancel it (revert to the pre-drag
+          // value), not leave the last dragged-to position committed while
+          // the native context menu opens on top of the slider.
+          if (!draggingRef.current) return;
+          e.preventDefault();
+          cancelDrag(e.currentTarget);
         }}
       >
         <div className="absolute inset-x-0 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-panel-hover">
@@ -505,88 +541,4 @@ export function FlatSlider({
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  FlatSelectRow — label/value row backed by a native <select>        */
-/* ------------------------------------------------------------------ */
-
-export function FlatSelectRow({
-  label,
-  ariaLabel,
-  value,
-  options,
-  tier,
-  disabled,
-  onChange,
-  onReset,
-}: {
-  label: string;
-  /** Accessible name when a caller renders the visible label OUTSIDE this
-   *  row (label="" to avoid a duplicate) — e.g. Grade's "Preset" row, which
-   *  shows its own label span and would otherwise leave the <select>
-   *  unnamed. Falls back to `label` when omitted. */
-  ariaLabel?: string;
-  value: string;
-  options: Array<string | { value: string; label: string }>;
-  tier: PropertyValueTier;
-  disabled?: boolean;
-  onChange: (nextValue: string) => void;
-  onReset?: () => void;
-}) {
-  const normalizedOptions = options.map((option) =>
-    typeof option === "string" ? { value: option, label: option } : option,
-  );
-  // A valid authored value outside the preset list (e.g. a `mix-blend-mode`
-  // or `object-position` this row doesn't offer as a preset) must not be
-  // silently misrepresented as the first option — the native <select> falls
-  // back to selectedIndex 0 when `value` matches no <option>, and reselecting
-  // that visible-but-wrong preset overwrites the real persisted value. Prepend
-  // the current value so it's always representable, matching legacy
-  // `SelectField`'s same guard.
-  const renderedOptions =
-    value && !normalizedOptions.some((option) => option.value === value)
-      ? [{ value, label: value }, ...normalizedOptions]
-      : normalizedOptions;
-  return (
-    <div className="group flex min-h-[30px] items-center justify-between">
-      <span className={`text-[11px] ${VALUE_TIER_LABEL_CLASS[tier]}`}>{label}</span>
-      <span className="flex items-center gap-2">
-        <label className="flex items-center gap-1.5">
-          <select
-            value={value}
-            disabled={disabled}
-            aria-label={ariaLabel || label || undefined}
-            onChange={(e) => onChange(e.target.value)}
-            className={`appearance-none bg-transparent text-right font-mono text-[11px] outline-none disabled:cursor-not-allowed ${VALUE_TIER_VALUE_CLASS[tier]}`}
-          >
-            {renderedOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 10 10"
-            fill="currentColor"
-            className="flex-shrink-0 text-panel-text-5"
-          >
-            <path d="M2 3l3 4 3-4z" />
-          </svg>
-        </label>
-        {tier === "explicitCustom" && onReset && (
-          <button
-            type="button"
-            data-flat-select-reset="true"
-            title="Remove — fall back to default"
-            disabled={disabled}
-            onClick={onReset}
-            className="flex-shrink-0 text-panel-text-3 opacity-0 transition-opacity hover:text-panel-text-1 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <RotateCcw size={11} />
-          </button>
-        )}
-      </span>
-    </div>
-  );
-}
+export { FlatSelectRow } from "./propertyPanelFlatSelectRow";

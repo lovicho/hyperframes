@@ -473,6 +473,86 @@ describe("FlatSlider", () => {
     expect(track.getAttribute("aria-valuenow")).toBe("80");
     act(() => root.unmount());
   });
+
+  it("Escape during a drag reverts to the pre-drag value and releases pointer capture, instead of leaving the last dragged-to position committed", () => {
+    const onCommit = vi.fn();
+    const { host, root } = renderInto(
+      <FlatSlider
+        label="Opacity"
+        value={10}
+        min={0}
+        max={100}
+        tier="explicitCustom"
+        displayValue="10%"
+        onCommit={onCommit}
+      />,
+    );
+    const track = host.querySelector<HTMLElement>('[data-flat-slider-track="true"]');
+    if (!track) throw new Error("expected a track element");
+    Object.defineProperty(track, "getBoundingClientRect", {
+      value: () => ({ left: 0, width: 100, top: 0, height: 20, right: 100, bottom: 20 }),
+    });
+    act(() => {
+      track.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, clientX: 30, pointerId: 1 }),
+      );
+    });
+    // The leading-edge commit already applied the dragged-to value (30).
+    expect(onCommit).toHaveBeenLastCalledWith(30);
+    act(() => {
+      track.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(onCommit).toHaveBeenLastCalledWith(10);
+    expect(track.getAttribute("aria-valuenow")).toBe("10");
+    expect(track.hasPointerCapture(1)).toBe(false);
+    // A subsequent pointermove for the now-released pointer must not resume
+    // the cancelled drag.
+    onCommit.mockClear();
+    act(() => {
+      track.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, clientX: 80, pointerId: 1 }),
+      );
+    });
+    expect(onCommit).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it("right-click (contextmenu) during a drag cancels it and reverts to the pre-drag value, instead of committing the last dragged-to position", () => {
+    const onCommit = vi.fn();
+    const { host, root } = renderInto(
+      <FlatSlider
+        label="Opacity"
+        value={10}
+        min={0}
+        max={100}
+        tier="explicitCustom"
+        displayValue="10%"
+        onCommit={onCommit}
+      />,
+    );
+    const track = host.querySelector<HTMLElement>('[data-flat-slider-track="true"]');
+    if (!track) throw new Error("expected a track element");
+    Object.defineProperty(track, "getBoundingClientRect", {
+      value: () => ({ left: 0, width: 100, top: 0, height: 20, right: 100, bottom: 20 }),
+    });
+    act(() => {
+      track.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, clientX: 65, pointerId: 1 }),
+      );
+    });
+    expect(onCommit).toHaveBeenLastCalledWith(65);
+    const contextMenuEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    act(() => {
+      track.dispatchEvent(contextMenuEvent);
+    });
+    expect(contextMenuEvent.defaultPrevented).toBe(true);
+    expect(onCommit).toHaveBeenLastCalledWith(10);
+    expect(track.getAttribute("aria-valuenow")).toBe("10");
+    expect(track.hasPointerCapture(1)).toBe(false);
+    act(() => root.unmount());
+  });
 });
 
 describe("FlatSlider — Grade extensions", () => {
