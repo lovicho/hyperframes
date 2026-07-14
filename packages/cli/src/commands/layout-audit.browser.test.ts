@@ -141,6 +141,49 @@ describe("layout-audit.browser", () => {
     expect(runAudit()).toEqual([]);
   });
 
+  it("suppresses intentional ellipsis clipping under overflow opt-outs", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="overflow-optout">
+          <div id="headline" style="width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">
+            Intentional long truncated label
+          </div>
+        </div>
+      </div>
+    `;
+    const headline = document.querySelector("#headline");
+    if (!(headline instanceof HTMLElement)) throw new Error("missing headline");
+    Object.defineProperties(headline, {
+      clientWidth: { configurable: true, value: 100 },
+      scrollWidth: { configurable: true, value: 240 },
+      clientHeight: { configurable: true, value: 20 },
+      scrollHeight: { configurable: true, value: 20 },
+    });
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+        headline: rect({ left: 40, top: 60, width: 100, height: 20 }),
+        text: rect({ left: 40, top: 60, width: 240, height: 20 }),
+      },
+      {
+        headline: { overflow: "hidden", overflowX: "hidden", overflowY: "hidden" },
+      },
+    );
+
+    installAuditScript();
+    const textOverflowCodes = () =>
+      runAudit()
+        .map((issue) => issue.code)
+        .filter((code) => code === "clipped_text" || code === "text_box_overflow");
+
+    expect(textOverflowCodes()).toEqual(["clipped_text", "text_box_overflow"]);
+    document.querySelector("#overflow-optout")?.setAttribute("data-layout-allow-overflow", "");
+    expect(textOverflowCodes()).toEqual([]);
+    document.querySelector("#overflow-optout")?.removeAttribute("data-layout-allow-overflow");
+    headline.setAttribute("data-layout-bleed", "true");
+    expect(textOverflowCodes()).toEqual([]);
+  });
+
   it("does not flag glyph-ink vertical spill within the font-metric band on a non-clipping box", () => {
     // A painted, non-clipping caption-word-like box whose glyph ink (text rect) exceeds its snug
     // line-height box by a few px vertically — normal typography, nothing is clipped. (fontSize
@@ -1089,6 +1132,75 @@ describe("contrast-audit.browser background sampling", () => {
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ selector: "#label", wcagAA: true, bg: "rgb(10,10,10)" });
   });
+
+  it("accepts outlined text when its stroke has adequate background contrast", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="caption">Outlined white caption</div>
+      </div>
+    `;
+
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          display: "block",
+          visibility: "visible",
+          opacity: "1",
+          color: "rgb(255, 255, 255)",
+          webkitTextStrokeWidth: "8px",
+          webkitTextStrokeColor: "rgb(0, 0, 0)",
+          fontSize: "40px",
+          fontWeight: "700",
+          clipPath: "none",
+        }) as unknown as CSSStyleDeclaration,
+    );
+    vi.spyOn(document.getElementById("caption")!, "getBoundingClientRect").mockReturnValue(
+      rect({ left: 50, top: 50, width: 300, height: 60 }),
+    );
+    (document as unknown as { elementFromPoint: () => Element | null }).elementFromPoint = () =>
+      null;
+
+    installContrastScript();
+
+    const result = await runContrastAudit();
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      selector: "#caption",
+      fg: "rgb(0,0,0)",
+      bg: "rgb(255,255,255)",
+      wcagAA: true,
+    });
+  });
+
+  it("skips text whose sampled backdrop remains transparent", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="overlay" data-width="640" data-height="360">
+        <span id="label">Live</span>
+      </div>
+    `;
+
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          display: "block",
+          visibility: "visible",
+          opacity: "1",
+          color: "rgb(255, 255, 255)",
+          fontSize: "20px",
+          fontWeight: "700",
+          clipPath: "none",
+        }) as unknown as CSSStyleDeclaration,
+    );
+    vi.spyOn(document.getElementById("label")!, "getBoundingClientRect").mockReturnValue(
+      rect({ left: 50, top: 50, width: 100, height: 30 }),
+    );
+    (document as unknown as { elementFromPoint: () => Element | null }).elementFromPoint = () =>
+      null;
+
+    installContrastScript(new Uint8ClampedArray(640 * 360 * 4));
+
+    expect(await runContrastAudit()).toEqual([]);
+  });
 });
 
 // Both blocks overlap heavily; only the exemption on block A should suppress
@@ -1202,6 +1314,24 @@ describe("layout-audit.browser occlusion", () => {
     const issues = auditOcclusionScene({
       overlayStyle: { backgroundColor: "rgb(10, 10, 10)", opacity: "0.3" },
       topmostId: "overlay",
+    });
+    expect(issues.some((issue) => issue.code === "text_occluded")).toBe(false);
+  });
+
+  it("does not treat transparent pixels in an image as text occlusion", () => {
+    const issues = auditImageOcclusionScene(0);
+    expect(issues.some((issue) => issue.code === "text_occluded")).toBe(false);
+  });
+
+  it("still treats opaque pixels in an image as text occlusion", () => {
+    const occluded = auditImageOcclusionScene(255).find((issue) => issue.code === "text_occluded");
+    expect(occluded).toMatchObject({ selector: "#headline", containerSelector: "#overlay" });
+  });
+
+  it("does not treat object-fit letterboxing as image occlusion", () => {
+    const issues = auditImageOcclusionScene(255, {
+      objectFit: "contain",
+      headlineTextRect: rect({ left: 50, top: 500, width: 200, height: 80 }),
     });
     expect(issues.some((issue) => issue.code === "text_occluded")).toBe(false);
   });
@@ -1472,6 +1602,39 @@ function auditOcclusionScene(options: {
     headlineTextRect: rect({ left: 200, top: 500, width: 600, height: 80 }),
     topmostId: options.topmostId,
   });
+  installAuditScript();
+  return runAudit();
+}
+
+function auditImageOcclusionScene(
+  alpha: number,
+  options: { objectFit?: string; headlineTextRect?: DOMRect } = {},
+): ReturnType<typeof runAudit> {
+  document.body.innerHTML = `
+    <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+      <div id="headline">Headline copy</div>
+      <img id="overlay" src="paper.png" alt="" />
+    </div>
+  `;
+  const overlay = document.getElementById("overlay") as HTMLImageElement;
+  Object.defineProperties(overlay, {
+    naturalWidth: { configurable: true, value: 100 },
+    naturalHeight: { configurable: true, value: 100 },
+  });
+  const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, "getContext") as unknown as {
+    mockReturnValue(value: CanvasRenderingContext2D): void;
+  };
+  getContextSpy.mockReturnValue({
+    drawImage: vi.fn(),
+    getImageData: vi.fn(() => ({ data: new Uint8ClampedArray([0, 0, 0, alpha]) })),
+  } as unknown as CanvasRenderingContext2D);
+  installOcclusionGeometry({
+    styleOverrides: { overlay: { objectFit: options.objectFit ?? "fill" } },
+    headlineTextRect:
+      options.headlineTextRect ?? rect({ left: 200, top: 500, width: 600, height: 80 }),
+    topmostId: "overlay",
+  });
+  overlay.getBoundingClientRect = () => rect({ left: 0, top: 0, width: 1920, height: 1080 });
   installAuditScript();
   return runAudit();
 }

@@ -105,6 +105,10 @@
     return !!element.closest("[data-layout-allow-overflow]");
   }
 
+  function hasTextClipOptOut(element) {
+    return hasAllowOverflowFlag(element) || element.hasAttribute("data-layout-bleed");
+  }
+
   function opacityChain(element) {
     let opacity = 1;
     for (let current = element; current; current = current.parentElement) {
@@ -394,6 +398,7 @@
   }
 
   function clippedTextIssue(element, time, tolerance) {
+    if (hasTextClipOptOut(element)) return null;
     const style = getComputedStyle(element);
     if (!clipsOverflow(style)) return null;
     const overflowX = element.scrollWidth - element.clientWidth;
@@ -455,7 +460,7 @@
     const containerOverflow = overflowFor(textRect, containerRect, tolerance, verticalTolerance);
     if (
       containerOverflow &&
-      !hasAllowOverflowFlag(element) &&
+      !hasTextClipOptOut(element) &&
       !clippedByAncestor(element, container)
     ) {
       const style = elementStyle;
@@ -481,7 +486,7 @@
     }
 
     const canvasOverflow = overflowFor(textRect, rootRect, tolerance);
-    if (canvasOverflow && !hasAllowOverflowFlag(element)) {
+    if (canvasOverflow && !hasTextClipOptOut(element)) {
       issues.push({
         code: "canvas_overflow",
         severity: "info",
@@ -730,13 +735,117 @@
 
   const RASTER_TAGS = new Set(["IMG", "VIDEO", "CANVAS"]);
   const FRAME_MEDIA_TAGS = new Set([...RASTER_TAGS, "SVG"]);
+  const imageAlphaCanvases = new WeakMap();
+
+  function objectPositionOffset(value, freeSpace) {
+    const token = String(value || "50%")
+      .trim()
+      .split(/\s+/)[0];
+    if (token === "left" || token === "top") return 0;
+    if (token === "right" || token === "bottom") return freeSpace;
+    if (token === "center") return freeSpace / 2;
+    if (token.endsWith("%")) return (freeSpace * parseFloat(token)) / 100;
+    const pixels = parseFloat(token);
+    return Number.isFinite(pixels) ? pixels : freeSpace / 2;
+  }
+
+  function objectPositionOffsets(value, freeX, freeY) {
+    const tokens = String(value || "50% 50%")
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2);
+    let x = "50%";
+    let y = "50%";
+    if (tokens.length === 1) {
+      if (tokens[0] === "top" || tokens[0] === "bottom") y = tokens[0];
+      else x = tokens[0];
+    } else {
+      for (const token of tokens) {
+        if (token === "top" || token === "bottom") y = token;
+        else if (token === "left" || token === "right") x = token;
+        else if (x === "50%") x = token;
+        else y = token;
+      }
+    }
+    return { x: objectPositionOffset(x, freeX), y: objectPositionOffset(y, freeY) };
+  }
+
+  // Return the alpha painted by an <img> at a viewport point. `null` means the
+  // browser would not let us inspect the image (not loaded or cross-origin), in
+  // which case callers preserve the conservative opaque fallback.
+  function imageAlphaAt(element, x, y) {
+    const sourceWidth = element.naturalWidth;
+    const sourceHeight = element.naturalHeight;
+    const rect = element.getBoundingClientRect();
+    if (!sourceWidth || !sourceHeight || !rect.width || !rect.height) return null;
+
+    const style = getComputedStyle(element);
+    const fit = style.objectFit || "fill";
+    let scaleX = rect.width / sourceWidth;
+    let scaleY = rect.height / sourceHeight;
+    if (fit !== "fill") {
+      const contain = Math.min(scaleX, scaleY);
+      const cover = Math.max(scaleX, scaleY);
+      const scale =
+        fit === "cover"
+          ? cover
+          : fit === "none"
+            ? 1
+            : fit === "scale-down"
+              ? Math.min(1, contain)
+              : contain;
+      scaleX = scale;
+      scaleY = scale;
+    }
+
+    const paintedWidth = sourceWidth * scaleX;
+    const paintedHeight = sourceHeight * scaleY;
+    const offsets = objectPositionOffsets(
+      style.objectPosition,
+      rect.width - paintedWidth,
+      rect.height - paintedHeight,
+    );
+    const localX = x - rect.left - offsets.x;
+    const localY = y - rect.top - offsets.y;
+    if (localX < 0 || localY < 0 || localX >= paintedWidth || localY >= paintedHeight) return 0;
+
+    try {
+      let cached = imageAlphaCanvases.get(element);
+      const source = element.currentSrc || element.src;
+      if (
+        !cached ||
+        cached.width !== sourceWidth ||
+        cached.height !== sourceHeight ||
+        cached.source !== source
+      ) {
+        const canvas = document.createElement("canvas");
+        canvas.width = sourceWidth;
+        canvas.height = sourceHeight;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (!context) return null;
+        context.drawImage(element, 0, 0, sourceWidth, sourceHeight);
+        cached = { context, width: sourceWidth, height: sourceHeight, source };
+        imageAlphaCanvases.set(element, cached);
+      }
+      const sourceX = Math.min(sourceWidth - 1, Math.max(0, Math.floor(localX / scaleX)));
+      const sourceY = Math.min(sourceHeight - 1, Math.max(0, Math.floor(localY / scaleY)));
+      return cached.context.getImageData(sourceX, sourceY, 1, 1).data[3] / 255;
+    } catch {
+      return null;
+    }
+  }
 
   // An element hides text beneath it when it paints opaque pixels at near-full
   // opacity: raster content (img/video/canvas), a background image, or a solid
   // background colour. Low-opacity overlays (grain, scrims) do not occlude.
-  function isOpaqueOccluder(element) {
-    if (opacityChain(element) < 0.6) return false;
+  function isOpaqueOccluder(element, x, y) {
+    const opacity = opacityChain(element);
+    if (opacity < 0.6) return false;
     if (IGNORE_TAGS.has(element.tagName)) return false;
+    if (element.tagName === "IMG") {
+      const alpha = imageAlphaAt(element, x, y);
+      if (alpha !== null) return alpha * opacity >= 0.6;
+    }
     if (RASTER_TAGS.has(element.tagName)) return true;
     return hasOpaqueBackground(getComputedStyle(element));
   }
@@ -798,7 +907,7 @@
       // Pair-specific exemptions excuse this hit only; keep walking for deeper occluders.
       if (sharedPreserve3d(element, hit)) continue;
       if (isCrossSceneTransitionOverlap(element, hit)) continue;
-      if (isOpaqueOccluder(hit)) return hit;
+      if (isOpaqueOccluder(hit, x, y)) return hit;
     }
     return null;
   }

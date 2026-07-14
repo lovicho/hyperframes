@@ -50,6 +50,8 @@ export {
   resolveConfig,
   DEFAULT_CONFIG,
   scaleProtocolTimeoutForComposition,
+  shouldClampToScreenshotForConcreteGpu,
+  applyConcreteGpuScreenshotClamp,
   type EngineConfig,
 } from "./config.js";
 export {

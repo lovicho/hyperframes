@@ -71,6 +71,7 @@ import {
   type SubTimelineWaitOutcome,
   resolveBrowserGpuMode,
   resolveHeadlessShellPath,
+  applyConcreteGpuScreenshotClamp,
   scaleProtocolTimeoutForComposition,
   isMemoryExhaustionError,
   isTransientBrowserError,
@@ -1982,7 +1983,28 @@ export async function executeRenderJob(
       chromePath: resolveHeadlessShellPath(cfg),
       browserTimeout: cfg.browserTimeout,
     });
-    updateCaptureObservability({ browserGpuMode: resolvedBrowserGpuMode });
+    // Apply the software-GPU→screenshot clamp to the AUTHORITATIVE local
+    // `captureForceScreenshot` (not just the observability copy) so all
+    // downstream strategy + telemetry code reads the corrected value.
+    // Otherwise: `frameCapture.ts` clamps its own local and routes
+    // screenshot, but the still-`false` orchestrator local (a) mislabels the
+    // parallel-stream logging as "beginframe" below and (b) overwrites the
+    // earlier observability correction back to BeginFrame at the
+    // capture_strategy telemetry site. `resolveConfig` couldn't see
+    // `browserGpuMode:"auto"` resolving to software at config time, so
+    // `captureForceScreenshot` was still `compileResult.forceScreenshot === false`
+    // on that path. Both env and programmatic opt-outs preserved via
+    // `applyConcreteGpuScreenshotClamp` (the programmatic one carried on the
+    // config as `forceScreenshotExplicitlyOptedOut`).
+    captureForceScreenshot = applyConcreteGpuScreenshotClamp(
+      captureForceScreenshot,
+      resolvedBrowserGpuMode,
+      cfg,
+    );
+    updateCaptureObservability({
+      browserGpuMode: resolvedBrowserGpuMode,
+      forceScreenshot: captureForceScreenshot,
+    });
     const videoCaptureBeyondViewport = resolveVideoCaptureBeyondViewport(composition.videos.length);
 
     const captureOptions: CaptureOptions = {
