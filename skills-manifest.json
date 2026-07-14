@@ -26,16 +26,16 @@
       "files": 99
     },
     "hyperframes-cli": {
-      "hash": "797fd624f0b83cb5",
-      "files": 7
+      "hash": "5e1e197baf9b6653",
+      "files": 8
     },
     "hyperframes-core": {
       "hash": "690ebb3ba5420b90",
       "files": 14
     },
     "hyperframes-creative": {
-      "hash": "3e5bcbf46dc14427",
-      "files": 69
+      "hash": "e0750456fba2cf22",
+      "files": 78
     },
     "hyperframes-keyframes": {
       "hash": "040453e302a0e15b",
@@ -46,7 +46,7 @@
       "files": 10
     },
     "media-use": {
-      "hash": "14d15dedf7acd4ed",
+      "hash": "7a51f53cf615fe97",
       "files": 124
     },
     "motion-graphics": {
@@ -58,8 +58,8 @@
       "files": 132
     },
     "pr-to-video": {
-      "hash": "2132f6f9bd474f52",
-      "files": 22
+      "hash": "688b43a31bbc9360",
+      "files": 28
     },
     "product-launch-video": {
       "hash": "b1b41c74a52e28f1",
