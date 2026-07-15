@@ -109,6 +109,28 @@ export interface RenderExtractionObservability {
   vfrPreflightCount?: number;
   cacheHits?: number;
   cacheMisses?: number;
+  /**
+   * Per-clip captured-vs-expected-frame gauges. Emitted by the parity gate
+   * at extract finalization (see `videoFrameCoverage.ts`). Undefined when
+   * the render has no source videos to cover.
+   *
+   * • `minVideoFrameCoverageRatio` — worst clip's `captured / expected`
+   *   ratio (0 when a clip was never extracted; a strong "later-injected
+   *   clip silently dropped" signal per field ts=1784139267).
+   * • `coverageShortfallClipCount` — clips whose ratio fell below the
+   *   configured threshold (`HF_VIDEO_COVERAGE_THRESHOLD`, default 0.95).
+   *   Non-zero only ever accompanies a `VideoFrameCoverageError` throw.
+   */
+  minVideoFrameCoverageRatio?: number;
+  coverageShortfallClipCount?: number;
+  /**
+   * Count of authored `[data-start]` clip windows in the compiled HTML —
+   * a coarse proxy for the ts=1784144554 field signal shape (147-clip
+   * composition, 130 word-level caption divs authored-clip-count-scaled
+   * failure). Static scan; dynamic script-inserted timed clips land in
+   * the probe-stage's `hasRuntimeInsertedMedia` path (PR #2474).
+   */
+  authoredTimedClipCount?: number;
 }
 
 export interface RenderInitObservability {
