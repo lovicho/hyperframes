@@ -132,6 +132,7 @@ import {
   type RenderObservationData,
   type RenderObservabilitySummary,
 } from "./render/observability.js";
+import { emitFallbackCaptureProfile } from "./render/fallbackCaptureProfile.js";
 import { type HdrPerfCollector, type HdrPerfSummary } from "./render/hdrPerf.js";
 import {
   assertVideoFrameCoverage,
@@ -3050,6 +3051,17 @@ export async function executeRenderJob(
         perfStages.encodeMs = encodeRes.encodeMs;
       }
     } // end SDR capture paths block
+
+    // Opt-in per-frame timing summary for the fast-capture fallback path
+    // (drawElement → screenshot when composition uses filter:blur,
+    // filter:drop-shadow, clip-path, backdrop-filter, or hits any other
+    // fallback gate). Emits a `capture_fallback_profile` observability
+    // checkpoint per fallback-engaged session behind
+    // `HF_PROFILE_FALLBACK_CAPTURE=true`. No-op otherwise, and no-op
+    // when no session's capture engaged the fallback path — healthy
+    // (drawElement) renders pay zero overhead. See
+    // `fallbackCaptureProfile.ts` for the framing rationale.
+    emitFallbackCaptureProfile(observability, dedupPerfs);
 
     applyRenderWarningPolicy(
       job,

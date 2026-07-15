@@ -179,6 +179,17 @@ export interface CaptureSession {
   deVerifyFrames?: Map<number, Buffer>;
   /** Low-cardinality init-gate reason when drawElement routed to baseline (telemetry). */
   deGateReason?: string;
+  /**
+   * Full trigger string when drawElement gated off to the screenshot fallback
+   * path — preserves the specific CSS effect (`filter:blur`,
+   * `filter:drop-shadow`, `backdrop-filter`, `clip-path`) that
+   * {@link deGateReason} sanitizes down to a low-cardinality bucket. Populated
+   * on the same fallback-gate branches as `deGateReason`; consumed by the
+   * `capture_fallback_profile` observability checkpoint gated behind
+   * `HF_PROFILE_FALLBACK_CAPTURE=true`. See
+   * `packages/producer/src/services/render/fallbackCaptureProfile.ts`.
+   */
+  deFallbackTrigger?: string;
   /** Wall-clock ms spent capturing self-verification ground truth at init (telemetry). */
   deVerifyInitMs?: number;
   /** Count of per-frame "No cached paint record" screenshot fallbacks (telemetry). */
@@ -651,6 +662,7 @@ async function initDrawElementOrTransparentBackground(
     (!forceScreenshot || forceDE);
   if ((session.config?.useDrawElement ?? false) && supersampling) {
     session.deGateReason = "supersampling";
+    session.deFallbackTrigger = "supersampling";
     console.log(
       "[engine] --experimental-fast-capture disabled for this render: drawElementImage " +
         "ignores deviceScaleFactor, so supersampled (DPR > 1) output uses screenshot capture.",
@@ -658,6 +670,7 @@ async function initDrawElementOrTransparentBackground(
   }
   if ((session.config?.useDrawElement ?? false) && !supersampling && forceScreenshot) {
     session.deGateReason = "render_mode_hint";
+    session.deFallbackTrigger = "render_mode_hint";
     console.log(
       "[engine] fast capture: falling back to screenshot — render-mode compatibility " +
         "hint forced screenshot capture (e.g. raw requestAnimationFrame composition).",
@@ -707,6 +720,7 @@ async function initDrawElementOrTransparentBackground(
     });
     if (!supportsDrawElement) {
       session.deGateReason = "unsupported_chrome";
+      session.deFallbackTrigger = "unsupported_chrome";
       console.log(
         `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
           "this Chrome build does not implement canvas.drawElementImage (Dev/Canary-only " +
@@ -732,6 +746,7 @@ async function initDrawElementOrTransparentBackground(
     const mode = resolveDrawElementCaptureMode(session.isSwiftShader, transparent);
     if (mode === "screenshot") {
       session.deGateReason = "swiftshader";
+      session.deFallbackTrigger = "swiftshader";
       // Fall back to the browser's LAUNCH mode, not unconditionally to
       // "screenshot": on a BeginFrame-launched browser (Linux fast capture)
       // Page.captureScreenshot hangs for the full protocol timeout, while
@@ -752,6 +767,11 @@ async function initDrawElementOrTransparentBackground(
         const cssFx = await detectCssEffectRisk(page);
         if (cssFx) {
           session.deGateReason = `css_effect:${(cssFx.split(":")[0] ?? "").replace(/[^a-z-]/gi, "")}`;
+          // Full specific effect ("filter:blur" / "filter:drop-shadow" /
+          // "backdrop-filter" / "clip-path") — `deGateReason` sanitizes
+          // this to the low-cardinality prefix; `deFallbackTrigger` keeps
+          // the fine-grained value for the diagnostic profile emission.
+          session.deFallbackTrigger = cssFx;
           console.log(
             `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
               `${cssFx} detected (drawElementImage cannot reproduce it; see fast-capture-limitations.md)`,
@@ -786,6 +806,7 @@ async function initDrawElementOrTransparentBackground(
         );
         if (atRisk.size > 0 && atRiskFraction > fractionFloor) {
           session.deGateReason = "at_risk_timeline";
+          session.deFallbackTrigger = "at_risk_timeline";
           console.log(
             `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
               `${atRisk.size}/${totalFrames} frames animate a compositor-incompatible prop ` +
@@ -803,6 +824,7 @@ async function initDrawElementOrTransparentBackground(
       const threeD = await initThreeDProjection(page);
       if (!forceDE && !threeD.ok) {
         session.deGateReason = "3d_init_failed";
+        session.deFallbackTrigger = "3d_init_failed";
         console.log(
           `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
             `3D projection init failed (${threeD.reason ?? "unknown"})`,
@@ -3510,6 +3532,26 @@ function medianOf(samples: number[]): number {
   return Math.round(sorted[Math.floor(sorted.length / 2)] ?? 0);
 }
 
+/**
+ * Percentile of a positive-real sample set (nearest-rank; matches how the
+ * existing {@link medianOf} p50 helper picks the middle index). `p` is a
+ * fraction in [0, 1]; the sample at `floor(p * n)` (clamped to `[0, n-1]`)
+ * is returned. Sample set is not mutated. Returns 0 for empty input, mirroring
+ * the p50 helper.
+ *
+ * Used for the `capture_fallback_profile` observability checkpoint added in
+ * the fast-capture fallback profiling PR: we already collect `capturePerf.frameMs`
+ * per session, so computing p95/p99 is one sort + two lookups — cheap enough
+ * to always compute alongside the existing p50, no separate opt-in path
+ * needed for the math. The env gate lives at the emission site.
+ */
+export function percentileOf(samples: number[], p: number): number {
+  if (samples.length === 0) return 0;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * sorted.length)));
+  return Math.round(sorted[idx] ?? 0);
+}
+
 export function getCapturePerfSummary(session: CaptureSession): CapturePerfSummary {
   const frames = Math.max(1, session.capturePerf.frames);
   return {
@@ -3519,6 +3561,8 @@ export function getCapturePerfSummary(session: CaptureSession): CapturePerfSumma
     avgBeforeCaptureMs: Math.round(session.capturePerf.beforeCaptureMs / frames),
     avgScreenshotMs: Math.round(session.capturePerf.screenshotMs / frames),
     p50TotalMs: medianOf(session.capturePerf.frameMs),
+    p95TotalMs: percentileOf(session.capturePerf.frameMs, 0.95),
+    p99TotalMs: percentileOf(session.capturePerf.frameMs, 0.99),
     subTimelineWaitOutcome: session.subTimelineWaitOutcome,
     warnings: session.warnings.map((warning) => ({
       ...warning,
@@ -3539,6 +3583,7 @@ export function getCapturePerfSummary(session: CaptureSession): CapturePerfSumma
     beginFrameHasDamage: session.beginFrameHasDamageCount,
     captureMode: session.captureMode,
     deGateReason: session.deGateReason,
+    deFallbackTrigger: session.deFallbackTrigger,
     deWorkerEncode: session.workerEncodeEnabled ?? false,
     deVerifyArmed: session.deVerifyFrames?.size ?? 0,
     deVerifyInitMs: session.deVerifyInitMs ?? 0,

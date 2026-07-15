@@ -170,6 +170,18 @@ const ALLOWED_STRING_DATA_KEYS = new Set([
   // from actual zero-frame stalls once capture is meant to be underway.
   // Field signal ts=1784019503.
   "stagePhase",
+  // Full-fidelity fast-capture fallback trigger — the specific reason
+  // drawElement gated off ("filter:blur", "filter:drop-shadow",
+  // "backdrop-filter", "clip-path", "at_risk_timeline", "swiftshader", …).
+  // Populated on the `capture_fallback_profile` checkpoint emitted by
+  // `fallbackCaptureProfile.ts` when the operator opts into
+  // `HF_PROFILE_FALLBACK_CAPTURE=true` so downstream metric consumers can
+  // characterize per-frame perf by the exact trigger. Complementary to
+  // `deGateReason`, which is the low-cardinality bucket for aggregation —
+  // this string preserves the fine-grained "which CSS property" for
+  // diagnostic reads. Sanitized like any observation message; low-cardinality
+  // by construction (bounded by the fallback-trigger enumeration).
+  "triggerReason",
 ]);
 const RESERVED_LOG_KEYS = new Set([
   "data",

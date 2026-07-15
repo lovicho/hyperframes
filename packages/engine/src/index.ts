@@ -108,6 +108,7 @@ export {
   discardWarmupCapture,
   getCompositionDuration,
   getCapturePerfSummary,
+  percentileOf,
   prepareCaptureSessionForReuse,
   type CaptureSession,
   isTransientBrowserError,
