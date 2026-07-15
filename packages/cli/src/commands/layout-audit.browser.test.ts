@@ -242,6 +242,31 @@ describe("layout-audit.browser", () => {
       ]),
     );
   });
+
+  it("does not expand a parent's overflow geometry to a positioned descendant", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="headline">Visible copy<span id="positioned-copy">Positioned copy</span></div>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+        headline: rect({ left: 40, top: 60, width: 200, height: 40 }),
+        "positioned-copy": rect({ left: 700, top: 60, width: 160, height: 40 }),
+        headlineText: rect({ left: 40, top: 60, width: 120, height: 40 }),
+        "positioned-copyText": rect({ left: 700, top: 60, width: 160, height: 40 }),
+        text: rect({ left: 40, top: 60, width: 820, height: 40 }),
+      },
+      { "positioned-copy": { position: "absolute" } },
+    );
+    installAuditScript();
+
+    const parentOverflow = runAudit().find(
+      (issue) => issue.code === "canvas_overflow" && issue.selector === "#headline",
+    );
+    expect(parentOverflow).toBeUndefined();
+  });
 });
 
 it("is inert unless text or media candidates are explicitly requested", () => {
@@ -1133,6 +1158,50 @@ describe("contrast-audit.browser background sampling", () => {
     expect(result[0]).toMatchObject({ selector: "#label", wcagAA: true, bg: "rgb(10,10,10)" });
   });
 
+  it("resolves color-mix() foregrounds before computing contrast", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <span id="label">Mixed color</span>
+      </div>
+    `;
+
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          display: "block",
+          visibility: "visible",
+          opacity: "1",
+          color: "color-mix(in srgb, rgb(37, 99, 235) 20%, rgb(255, 255, 255) 80%)",
+          fontSize: "20px",
+          fontWeight: "400",
+          clipPath: "none",
+        }) as unknown as CSSStyleDeclaration,
+    );
+    vi.spyOn(document.getElementById("label")!, "getBoundingClientRect").mockReturnValue(
+      rect({ left: 50, top: 50, width: 120, height: 30 }),
+    );
+    (document as unknown as { elementFromPoint: () => Element | null }).elementFromPoint = () =>
+      null;
+
+    installContrastScript(
+      pixelsWithRegion(
+        rect({ left: 0, top: 0, width: 640, height: 360 }),
+        [10, 10, 10],
+        [10, 10, 10],
+      ),
+    );
+
+    const result = await runContrastAudit();
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      selector: "#label",
+      fg: "rgb(211,224,251)",
+      bg: "rgb(10,10,10)",
+      ratio: 14.92,
+      wcagAA: true,
+    });
+  });
+
   it("accepts outlined text when its stroke has adequate background contrast", async () => {
     document.body.innerHTML = `
       <div id="root" data-composition-id="main" data-width="640" data-height="360">
@@ -1265,7 +1334,11 @@ function auditOverlapScene(options: {
         selected = node;
       },
       getClientRects() {
-        const id = (selected as Element | null)?.id ?? "";
+        const element =
+          selected?.nodeType === Node.TEXT_NODE
+            ? selected.parentElement
+            : (selected as Element | null);
+        const id = element?.id ?? "";
         return textRects[id]
           ? ([textRects[id]] as unknown as DOMRectList)
           : ([] as unknown as DOMRectList);
@@ -1345,6 +1418,28 @@ describe("layout-audit.browser occlusion", () => {
     expect(issues.some((issue) => issue.code === "text_occluded")).toBe(false);
   });
 
+  it("does not treat a visible container as painted text when its only text child is hidden", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="caption-container"><span id="caption">Hidden caption</span></div>
+        <div id="overlay"></div>
+      </div>
+    `;
+    installOcclusionGeometry({
+      styleOverrides: {
+        caption: { opacity: "0" },
+        overlay: { backgroundColor: "rgb(10, 10, 10)" },
+      },
+      headlineTextRect: rect({ left: 200, top: 500, width: 600, height: 80 }),
+      topmostId: "overlay",
+      textRectElementId: "caption-container",
+    });
+    installAuditScript();
+
+    const issues = runAudit();
+    expect(issues.some((issue) => issue.code === "text_occluded")).toBe(false);
+  });
+
   it("carries the fully-covered fraction when the occluder hits every probe point", () => {
     const occluded = auditOcclusionScene({
       overlayStyle: { backgroundColor: "rgb(10, 10, 10)" },
@@ -1404,6 +1499,47 @@ describe("layout-audit.browser occlusion", () => {
     };
     installAuditScript();
     expect(runAudit().some((issue) => issue.code === "text_occluded")).toBe(false);
+  });
+
+  it("audits only a container's direct text when a hidden descendant also has text", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="headline">Visible copy<span id="hidden-copy">Hidden copy</span></div>
+        <div id="overlay"></div>
+      </div>
+    `;
+    installOcclusionGeometry({
+      styleOverrides: {
+        "hidden-copy": { opacity: "0" },
+        overlay: { backgroundColor: "rgb(10, 10, 10)" },
+      },
+      headlineTextRect: rect({ left: 200, top: 500, width: 600, height: 80 }),
+      topmostId: "overlay",
+    });
+    installAuditScript();
+    const issue = runAudit().find((candidate) => candidate.code === "text_occluded");
+    expect(issue?.text).toBe("Visible copy");
+  });
+
+  it("does not expand a container's text audit to a positioned descendant", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="headline">Visible copy<span id="positioned-copy">Positioned copy</span></div>
+        <div id="overlay"></div>
+      </div>
+    `;
+    installOcclusionGeometry({
+      styleOverrides: {
+        "positioned-copy": { position: "absolute" },
+        overlay: { backgroundColor: "rgb(10, 10, 10)" },
+      },
+      headlineTextRect: rect({ left: 200, top: 500, width: 600, height: 80 }),
+      topmostId: "overlay",
+    });
+    installAuditScript();
+    const issues = runAudit().filter((candidate) => candidate.code === "text_occluded");
+    const headlineIssue = issues.find((candidate) => candidate.selector === "#headline");
+    expect(headlineIssue?.text).toBe("Visible copy");
   });
 
   it("does not count a low-alpha gradient overlay (grid/scrim) as an opaque occluder", () => {
@@ -1476,6 +1612,7 @@ describe("layout-audit.browser occlusion", () => {
       },
       headlineTextRect: rect({ left: 200, top: 500, width: 600, height: 80 }),
       topmostId: "overlay",
+      textRectElementId: "inner",
     });
     installAuditScript();
     expect(runAudit().some((issue) => issue.code === "text_occluded")).toBe(true);
@@ -1643,6 +1780,7 @@ function installOcclusionGeometry(options: {
   styleOverrides: Record<string, Partial<Record<string, string>>>;
   headlineTextRect: DOMRect;
   topmostId: string;
+  textRectElementId?: string;
 }): void {
   const baseStyle: Record<string, string> = {
     display: "block",
@@ -1689,7 +1827,11 @@ function installOcclusionGeometry(options: {
         selected = node;
       },
       getClientRects() {
-        return (selected as Element | null)?.id === "headline"
+        const selectedElement =
+          selected?.nodeType === Node.TEXT_NODE
+            ? (selected.parentElement as Element | null)
+            : (selected as Element | null);
+        return selectedElement?.id === (options.textRectElementId ?? "headline")
           ? ([options.headlineTextRect] as unknown as DOMRectList)
           : ([] as unknown as DOMRectList);
       },
@@ -1820,6 +1962,7 @@ async function runContrastAudit(): Promise<Array<Record<string, unknown>>> {
 interface AuditIssue {
   code: string;
   selector: string;
+  text?: string;
   containerSelector?: string;
   overflow?: Record<string, number>;
   message?: string;
@@ -1834,6 +1977,20 @@ function runAudit(): AuditIssue[] {
     }
   ).__hyperframesLayoutAudit;
   return audit({ time: 1, tolerance: 2 });
+}
+
+function selectedRangeElement(selected: Node | null): Element | null {
+  return selected?.nodeType === Node.TEXT_NODE
+    ? (selected.parentElement as Element | null)
+    : (selected as Element | null);
+}
+
+function rangeTextRect(selected: Node | null, rects: Record<string, DOMRect>): DOMRect | undefined {
+  const element = selectedRangeElement(selected);
+  if (element?.id === "ignored") return rects.ignored;
+  if (selected?.nodeType === Node.TEXT_NODE && element?.id)
+    return rects[`${element.id}Text`] ?? rects.text;
+  return rects.text;
 }
 
 function installGeometry(
@@ -1890,8 +2047,7 @@ function installGeometry(
         selected = node;
       },
       getClientRects() {
-        const element = selected as Element | null;
-        const textRect = element?.id === "ignored" ? rects.ignored : rects.text;
+        const textRect = rangeTextRect(selected, rects);
         return textRect ? ([textRect] as unknown as DOMRectList) : ([] as unknown as DOMRectList);
       },
       detach() {},

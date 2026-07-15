@@ -83,6 +83,16 @@ export interface ProbeStageInput {
   deviceScaleFactor: number;
 }
 
+const FRAME_BOUNDARY_EPSILON = 1e-3;
+
+function durationToFrameCount(duration: number, fps: number): number {
+  const rawFrameCount = duration * fps;
+  const nearestFrame = Math.round(rawFrameCount);
+  return Math.abs(rawFrameCount - nearestFrame) <= FRAME_BOUNDARY_EPSILON
+    ? nearestFrame
+    : Math.ceil(rawFrameCount);
+}
+
 export interface ProbeStageResult {
   /** May be reassigned from `recompileWithResolutions`. */
   compiled: CompiledComposition;
@@ -221,6 +231,7 @@ export async function runProbeStage(input: ProbeStageInput): Promise<ProbeStageR
       fps: job.config.fps,
       format: needsAlpha ? "png" : "jpeg",
       quality: needsAlpha ? undefined : 80,
+      variables: job.config.variables,
       deviceScaleFactor,
     };
 
@@ -558,7 +569,7 @@ export async function runProbeStage(input: ProbeStageInput): Promise<ProbeStageR
   const browserProbeMs = Date.now() - probeStart;
 
   const duration = composition.duration;
-  const totalFrames = Math.ceil(duration * fpsToNumber(job.config.fps));
+  const totalFrames = durationToFrameCount(duration, fpsToNumber(job.config.fps));
 
   if (duration <= 0) {
     // Gather diagnostics to help users understand why the render would produce a black video.
