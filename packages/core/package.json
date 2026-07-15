@@ -113,6 +113,12 @@
       "import": "./src/runtime/startExpression.ts",
       "types": "./src/runtime/startExpression.ts"
     },
+    "./runtime/start-resolver": {
+      "bun": "./src/runtime/startResolver.ts",
+      "node": "./dist/runtime/startResolver.js",
+      "import": "./src/runtime/startResolver.ts",
+      "types": "./src/runtime/startResolver.ts"
+    },
     "./runtime/protocol": {
       "bun": "./src/runtime/protocol.ts",
       "node": "./dist/runtime/protocol.js",
@@ -328,6 +334,10 @@
       "./runtime/start-expression": {
         "import": "./dist/runtime/startExpression.js",
         "types": "./dist/runtime/startExpression.d.ts"
+      },
+      "./runtime/start-resolver": {
+        "import": "./dist/runtime/startResolver.js",
+        "types": "./dist/runtime/startResolver.d.ts"
       },
       "./runtime/protocol": {
         "import": "./dist/runtime/protocol.js",
