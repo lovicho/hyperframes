@@ -134,6 +134,13 @@ describe("classic property-panel primitive telemetry", () => {
     const input = host.querySelector("input");
     if (!input) throw new Error("expected metric input");
 
+    // Regression guard for CommitField's shared `align` default: the classic
+    // panel lays out label-then-value inline, where left-aligned reads
+    // naturally — this must stay left even though the flat inspector's
+    // FlatRow now opts into `align="right"` for its own justify-between rows.
+    expect(input.className).toContain("text-left");
+    expect(input.className).not.toContain("text-right");
+
     act(() => blurInput(input));
     expect(trackStudioEvent).not.toHaveBeenCalled();
 

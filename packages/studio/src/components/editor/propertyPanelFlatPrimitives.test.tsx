@@ -38,6 +38,16 @@ describe("FlatRow", () => {
     act(() => root.unmount());
   });
 
+  it("right-aligns the value input — the flat inspector's justify-between row layout leaves a left-aligned value looking stranded at the edge of its own box", () => {
+    const { host, root } = renderInto(
+      <FlatRow label="Size" value="72px" tier="explicitCustom" onCommit={vi.fn()} />,
+    );
+    const input = host.querySelector("input");
+    expect(input?.className).toContain("text-right");
+    expect(input?.className).not.toContain("text-left");
+    act(() => root.unmount());
+  });
+
   it("renders the explicitCustom tier with a mint value and a reset button", () => {
     const onReset = vi.fn();
     const { host, root } = renderInto(

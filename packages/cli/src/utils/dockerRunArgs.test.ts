@@ -377,6 +377,26 @@ describe("buildDockerRunArgs", () => {
     expect(args[idx + 1]).toBe("landscape-4k");
   });
 
+  it("forwards the RAW aspect-agnostic alias `1080p` verbatim (does not pre-normalize to `landscape`)", () => {
+    // Miga R2 important note on PR #2529: Docker correctness now depends on
+    // forwarding the raw alias string, not the canonical preset — the
+    // in-container CLI re-runs `normalizeResolutionFlag` +
+    // `isAspectAgnosticResolutionAlias` so aspect-agnostic aliases keep
+    // their orientation-adaptive behavior. A future refactor that
+    // silently substitutes the normalized preset here would restore the
+    // portrait-only Docker failure this test pins against.
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, outputResolution: "1080p" },
+    });
+    const idx = args.indexOf("--resolution");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe("1080p");
+    // Belt-and-braces: the normalized preset name must NOT slip in as a
+    // second value that would confuse citty parsing on the container side.
+    expect(args).not.toContain("landscape");
+  });
+
   it("omits --resolution when outputResolution is not set", () => {
     const args = buildDockerRunArgs({ ...FIXED_INPUT, options: BASE });
     expect(args).not.toContain("--resolution");

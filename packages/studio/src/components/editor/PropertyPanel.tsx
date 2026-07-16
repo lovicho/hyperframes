@@ -197,11 +197,11 @@ export const PropertyPanel = memo(function PropertyPanel(props: PropertyPanelPro
   const manualSizeEditingDisabled = !element.capabilities.canApplyManualSize;
   const manualRotationEditingDisabled = !element.capabilities.canApplyManualRotation;
   const sourceLabel = element.id ? `#${element.id}` : (element.selector ?? "");
-  const showEditableSections = element.capabilities.canEditStyles;
   // Capabilities are already resolved on the selection; recompute only sections,
   // feeding the live GSAP tween count (arrives on the gsapAnimations prop, not the
   // selection) so the Timing section shows for pure-GSAP elements with no data-start.
   const sections = resolveEditingSections(domEditSelectionToFacts(element, gsapAnimations.length));
+  const showEditableSections = element.capabilities.canEditStyles && sections.style;
   const manualOffset = readStudioPathOffset(element.element);
   const manualSize = readStudioBoxSize(element.element);
   const resolvedWidth =
@@ -385,161 +385,163 @@ export const PropertyPanel = memo(function PropertyPanel(props: PropertyPanelPro
           />
         )}
 
-        <Section title="Layout" icon={<Move size={15} />}>
-          <div className={RESPONSIVE_GRID}>
-            <div className="flex items-center gap-1">
-              <div className="flex-1">
-                <MetricField
-                  label="X"
-                  value={formatPxMetricValue(displayX)}
-                  disabled={manualOffsetEditingDisabled}
-                  scrub
-                  onCommit={(next) => commitManualOffset("x", next)}
-                />
+        {sections.layout && (
+          <Section title="Layout" icon={<Move size={15} />}>
+            <div className={RESPONSIVE_GRID}>
+              <div className="flex items-center gap-1">
+                <div className="flex-1">
+                  <MetricField
+                    label="X"
+                    value={formatPxMetricValue(displayX)}
+                    disabled={manualOffsetEditingDisabled}
+                    scrub
+                    onCommit={(next) => commitManualOffset("x", next)}
+                  />
+                </div>
+                {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
+                  <KeyframeNavigation
+                    property="x"
+                    keyframes={navKeyframes}
+                    currentPercentage={currentPct}
+                    onSeek={seekFromKfPct}
+                    onAddKeyframe={() =>
+                      onCommitAnimatedProperty &&
+                      void onCommitAnimatedProperty(element, "x", displayX)
+                    }
+                    onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("x"), pct)}
+                    onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("x"))}
+                  />
+                )}
               </div>
-              {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
-                <KeyframeNavigation
-                  property="x"
-                  keyframes={navKeyframes}
-                  currentPercentage={currentPct}
-                  onSeek={seekFromKfPct}
-                  onAddKeyframe={() =>
-                    onCommitAnimatedProperty &&
-                    void onCommitAnimatedProperty(element, "x", displayX)
-                  }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("x"), pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("x"))}
-                />
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="flex-1">
-                <MetricField
-                  label="Y"
-                  value={formatPxMetricValue(displayY)}
-                  disabled={manualOffsetEditingDisabled}
-                  scrub
-                  onCommit={(next) => commitManualOffset("y", next)}
-                />
+              <div className="flex items-center gap-1">
+                <div className="flex-1">
+                  <MetricField
+                    label="Y"
+                    value={formatPxMetricValue(displayY)}
+                    disabled={manualOffsetEditingDisabled}
+                    scrub
+                    onCommit={(next) => commitManualOffset("y", next)}
+                  />
+                </div>
+                {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
+                  <KeyframeNavigation
+                    property="y"
+                    keyframes={navKeyframes}
+                    currentPercentage={currentPct}
+                    onSeek={seekFromKfPct}
+                    onAddKeyframe={() =>
+                      onCommitAnimatedProperty &&
+                      void onCommitAnimatedProperty(element, "y", displayY)
+                    }
+                    onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("y"), pct)}
+                    onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("y"))}
+                  />
+                )}
               </div>
-              {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
-                <KeyframeNavigation
-                  property="y"
-                  keyframes={navKeyframes}
-                  currentPercentage={currentPct}
-                  onSeek={seekFromKfPct}
-                  onAddKeyframe={() =>
-                    onCommitAnimatedProperty &&
-                    void onCommitAnimatedProperty(element, "y", displayY)
-                  }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("y"), pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("y"))}
-                />
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="flex-1">
-                <MetricField
-                  label="W"
-                  value={formatPxMetricValue(displayW)}
-                  disabled={manualSizeEditingDisabled}
-                  scrub
-                  onCommit={(next) => commitManualSize("width", next)}
-                />
+              <div className="flex items-center gap-1">
+                <div className="flex-1">
+                  <MetricField
+                    label="W"
+                    value={formatPxMetricValue(displayW)}
+                    disabled={manualSizeEditingDisabled}
+                    scrub
+                    onCommit={(next) => commitManualSize("width", next)}
+                  />
+                </div>
+                {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
+                  <KeyframeNavigation
+                    property="width"
+                    keyframes={navKeyframes}
+                    currentPercentage={currentPct}
+                    onSeek={seekFromKfPct}
+                    onAddKeyframe={() =>
+                      onCommitAnimatedProperty &&
+                      void onCommitAnimatedProperty(element, "width", displayW)
+                    }
+                    onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("width"), pct)}
+                    onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("width"))}
+                  />
+                )}
               </div>
-              {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
-                <KeyframeNavigation
-                  property="width"
-                  keyframes={navKeyframes}
-                  currentPercentage={currentPct}
-                  onSeek={seekFromKfPct}
-                  onAddKeyframe={() =>
-                    onCommitAnimatedProperty &&
-                    void onCommitAnimatedProperty(element, "width", displayW)
-                  }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("width"), pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("width"))}
-                />
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="flex-1">
-                <MetricField
-                  label="H"
-                  value={formatPxMetricValue(displayH)}
-                  disabled={manualSizeEditingDisabled}
-                  scrub
-                  onCommit={(next) => commitManualSize("height", next)}
-                />
+              <div className="flex items-center gap-1">
+                <div className="flex-1">
+                  <MetricField
+                    label="H"
+                    value={formatPxMetricValue(displayH)}
+                    disabled={manualSizeEditingDisabled}
+                    scrub
+                    onCommit={(next) => commitManualSize("height", next)}
+                  />
+                </div>
+                {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
+                  <KeyframeNavigation
+                    property="height"
+                    keyframes={navKeyframes}
+                    currentPercentage={currentPct}
+                    onSeek={seekFromKfPct}
+                    onAddKeyframe={() =>
+                      onCommitAnimatedProperty &&
+                      void onCommitAnimatedProperty(element, "height", displayH)
+                    }
+                    onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("height"), pct)}
+                    onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("height"))}
+                  />
+                )}
               </div>
-              {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
-                <KeyframeNavigation
-                  property="height"
-                  keyframes={navKeyframes}
-                  currentPercentage={currentPct}
-                  onSeek={seekFromKfPct}
-                  onAddKeyframe={() =>
-                    onCommitAnimatedProperty &&
-                    void onCommitAnimatedProperty(element, "height", displayH)
-                  }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("height"), pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("height"))}
-                />
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <div className="flex-1">
-                <MetricField
-                  label="R"
-                  value={`${displayR}°`}
-                  disabled={manualRotationEditingDisabled}
-                  onCommit={(next) => commitManualRotation(next.replace("°", ""))}
-                />
+              <div className="flex items-center gap-1">
+                <div className="flex-1">
+                  <MetricField
+                    label="R"
+                    value={`${displayR}°`}
+                    disabled={manualRotationEditingDisabled}
+                    onCommit={(next) => commitManualRotation(next.replace("°", ""))}
+                  />
+                </div>
+                {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
+                  <KeyframeNavigation
+                    property="rotation"
+                    keyframes={navKeyframes}
+                    currentPercentage={currentPct}
+                    onSeek={seekFromKfPct}
+                    onAddKeyframe={() =>
+                      onCommitAnimatedProperty &&
+                      void onCommitAnimatedProperty(element, "rotation", displayR)
+                    }
+                    onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("rotation"), pct)}
+                    onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("rotation"))}
+                  />
+                )}
               </div>
-              {STUDIO_KEYFRAMES_ENABLED && gsapAnimId && (
-                <KeyframeNavigation
-                  property="rotation"
-                  keyframes={navKeyframes}
-                  currentPercentage={currentPct}
-                  onSeek={seekFromKfPct}
-                  onAddKeyframe={() =>
-                    onCommitAnimatedProperty &&
-                    void onCommitAnimatedProperty(element, "rotation", displayR)
-                  }
-                  onRemoveKeyframe={(pct) => onRemoveKeyframe?.(animIdForProp("rotation"), pct)}
-                  onConvertToKeyframes={() => onConvertToKeyframes?.(animIdForProp("rotation"))}
-                />
-              )}
             </div>
-          </div>
-          <PropertyPanel3dTransform
-            gsapRuntimeValues={gsap3dValues}
-            gsapAnimId={gsapAnimId}
-            resolveAnimIdForProp={animIdForProp}
-            gsapKeyframes={navKeyframes}
-            currentPct={currentPct}
-            elStart={elStart}
-            elDuration={elDuration}
-            element={element}
-            onCommitAnimatedProperty={onCommitAnimatedProperty}
-            onCommitAnimatedProperties={onCommitAnimatedProperties}
-            onSeekToTime={onSeekToTime}
-            onRemoveKeyframe={onRemoveKeyframe}
-            onConvertToKeyframes={onConvertToKeyframes}
-            onLivePreviewProps={createGsapLivePreview(iframeRef)}
-          />
-          <div className="mt-3">
-            <div className="mb-2 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
-              Stacking
-            </div>
-            <MetricField
-              label="Z-index"
-              value={String(parseInt(styles["z-index"] || "auto", 10) || 0)}
-              scrub
-              onCommit={(next) => onSetStyle("z-index", next)}
+            <PropertyPanel3dTransform
+              gsapRuntimeValues={gsap3dValues}
+              gsapAnimId={gsapAnimId}
+              resolveAnimIdForProp={animIdForProp}
+              gsapKeyframes={navKeyframes}
+              currentPct={currentPct}
+              elStart={elStart}
+              elDuration={elDuration}
+              element={element}
+              onCommitAnimatedProperty={onCommitAnimatedProperty}
+              onCommitAnimatedProperties={onCommitAnimatedProperties}
+              onSeekToTime={onSeekToTime}
+              onRemoveKeyframe={onRemoveKeyframe}
+              onConvertToKeyframes={onConvertToKeyframes}
+              onLivePreviewProps={createGsapLivePreview(iframeRef)}
             />
-          </div>
-        </Section>
+            <div className="mt-3">
+              <div className="mb-2 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
+                Stacking
+              </div>
+              <MetricField
+                label="Z-index"
+                value={String(parseInt(styles["z-index"] || "auto", 10) || 0)}
+                scrub
+                onCommit={(next) => onSetStyle("z-index", next)}
+              />
+            </div>
+          </Section>
+        )}
 
         {STUDIO_GSAP_PANEL_ENABLED &&
           onUpdateGsapProperty &&

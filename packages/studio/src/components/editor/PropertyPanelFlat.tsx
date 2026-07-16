@@ -388,48 +388,50 @@ export function PropertyPanelFlat({
       ),
     });
   }
-  groups.push({
-    id: "layout",
-    title: "Layout",
-    // No scrub accessory: FlatRow/CommitField has no pointer-drag scrubbing
-    // (wheel/arrow keys only) — advertising "drag values to scrub" here lies.
-    summary: `${formatPxMetricValue(displayX)},${formatPxMetricValue(displayY)} · ${Math.round(displayW)}×${Math.round(displayH)}`,
-    content: (
-      <FlatLayoutSection
-        element={element}
-        styles={styles}
-        onSetStyle={onSetStyle}
-        disabled={!element.capabilities.canEditStyles}
-        displayX={displayX}
-        displayY={displayY}
-        displayW={displayW}
-        displayH={displayH}
-        displayR={displayR}
-        manualOffsetEditingDisabled={manualOffsetEditingDisabled}
-        manualSizeEditingDisabled={manualSizeEditingDisabled}
-        manualRotationEditingDisabled={manualRotationEditingDisabled}
-        commitManualOffset={commitManualOffset}
-        commitManualSize={commitManualSize}
-        commitManualRotation={commitManualRotation}
-        gsapAnimId={gsapAnimId}
-        navKeyframes={navKeyframes}
-        currentPct={currentPct}
-        seekFromKfPct={seekFromKfPct}
-        animIdForProp={animIdForProp}
-        resolveAnimIdForProp={animIdForProp}
-        gsapRuntimeValues={gsapRuntimeValues}
-        gsapKeyframes={navKeyframes}
-        elStart={elStart}
-        elDuration={elDuration}
-        onCommitAnimatedProperty={onCommitAnimatedProperty}
-        onCommitAnimatedProperties={onCommitAnimatedProperties}
-        onSeekToTime={onSeekToTime}
-        onRemoveKeyframe={onRemoveKeyframe}
-        onConvertToKeyframes={onConvertToKeyframes}
-        onLivePreviewProps={createGsapLivePreview(previewIframeRef ?? { current: null })}
-      />
-    ),
-  });
+  if (sections.layout) {
+    groups.push({
+      id: "layout",
+      title: "Layout",
+      // No scrub accessory: FlatRow/CommitField has no pointer-drag scrubbing
+      // (wheel/arrow keys only) — advertising "drag values to scrub" here lies.
+      summary: `${formatPxMetricValue(displayX)},${formatPxMetricValue(displayY)} · ${Math.round(displayW)}×${Math.round(displayH)}`,
+      content: (
+        <FlatLayoutSection
+          element={element}
+          styles={styles}
+          onSetStyle={onSetStyle}
+          disabled={!element.capabilities.canEditStyles}
+          displayX={displayX}
+          displayY={displayY}
+          displayW={displayW}
+          displayH={displayH}
+          displayR={displayR}
+          manualOffsetEditingDisabled={manualOffsetEditingDisabled}
+          manualSizeEditingDisabled={manualSizeEditingDisabled}
+          manualRotationEditingDisabled={manualRotationEditingDisabled}
+          commitManualOffset={commitManualOffset}
+          commitManualSize={commitManualSize}
+          commitManualRotation={commitManualRotation}
+          gsapAnimId={gsapAnimId}
+          navKeyframes={navKeyframes}
+          currentPct={currentPct}
+          seekFromKfPct={seekFromKfPct}
+          animIdForProp={animIdForProp}
+          resolveAnimIdForProp={animIdForProp}
+          gsapRuntimeValues={gsapRuntimeValues}
+          gsapKeyframes={navKeyframes}
+          elStart={elStart}
+          elDuration={elDuration}
+          onCommitAnimatedProperty={onCommitAnimatedProperty}
+          onCommitAnimatedProperties={onCommitAnimatedProperties}
+          onSeekToTime={onSeekToTime}
+          onRemoveKeyframe={onRemoveKeyframe}
+          onConvertToKeyframes={onConvertToKeyframes}
+          onLivePreviewProps={createGsapLivePreview(previewIframeRef ?? { current: null })}
+        />
+      ),
+    });
+  }
   if (showMotionGroup) {
     groups.push({
       id: "motion",

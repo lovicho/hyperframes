@@ -100,11 +100,9 @@ import {
 } from "./fileServer.js";
 import { defaultLogger, type ProducerLogger } from "../logger.js";
 import { createMemorySampler, type MemorySampler, updateJobStatus } from "./render/shared.js";
-import { buildRenderErrorDetails, cleanupRenderResources, safeCleanup } from "./render/cleanup.js";
-import {
-  OrderedRenderEventPublisher,
-  publishRenderFailure,
-} from "./render/renderEventPublisher.js";
+import { buildRenderErrorDetails } from "./render/cleanup.js";
+import { publishRenderFailure } from "./render/renderEventPublisher.js";
+import { RenderExecutionContext } from "./render/renderExecutionContext.js";
 import { ArtifactTransaction } from "./render/artifactTransaction.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { formatCaptureFrameName } from "../utils/paths.js";
@@ -344,6 +342,21 @@ export interface RenderConfig {
    * HDR constraints.
    */
   outputResolution?: CanvasResolution;
+  /**
+   * True when `outputResolution` was normalized from an aspect-agnostic alias
+   * (`1080p`, `hd`, `4k`, `uhd`) rather than a preset that names its own
+   * orientation (`landscape`, `portrait`, `1080p-portrait`, …). Set by the
+   * CLI + server layers via `isAspectAgnosticResolutionAlias(rawInput)` at
+   * flag/body parse time.
+   *
+   * When true, the compile stage adapts the preset to the composition's
+   * orientation before calling `resolveDeviceScaleFactor` — a portrait
+   * 1080×1920 composition with `--resolution 1080p` (normalized to
+   * `landscape`) is re-mapped to `portrait`, honoring the user's intent
+   * ("render at 1080p") without forcing them to know the aspect-suffixed
+   * alias (`1080p-portrait`). Explicit orientation presets stay strict.
+   */
+  outputResolutionAspectAgnostic?: boolean;
 }
 
 export interface RenderPerfSummary {
@@ -1561,11 +1574,51 @@ export async function executeRenderJob(
   const pipelineStart = Date.now();
   const baseLog = job.config.logger ?? defaultLogger;
   const logPath = job.config.debug ? join(workDir, "render.log") : null;
-  const log = logPath ? createRenderFileLogger(logPath, baseLog) : baseLog;
-  const eventPublisher = new OrderedRenderEventPublisher(progressSink, log);
-  const onProgress: ProgressCallback | undefined = progressSink
-    ? (progressJob, message) => eventPublisher.publish(progressJob, message)
-    : undefined;
+  const execution = new RenderExecutionContext({
+    request: { renderJobId: job.id, projectDir, outputPath },
+    logger: logPath ? createRenderFileLogger(logPath, baseLog) : baseLog,
+    progressSink,
+    signal: abortSignal,
+  });
+  const log = execution.logger;
+  execution.defer("remove workDir", () => {
+    if (job.config.debug) return;
+    if (job.status === "complete" && process.env.KEEP_TEMP === "1") {
+      log.info("KEEP_TEMP=1 — leaving workDir on disk for inspection", { workDir });
+      return;
+    }
+    rmSync(workDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  });
+
+  try {
+    await executeRenderPipeline({
+      job,
+      projectDir,
+      outputPath,
+      workDir,
+      logPath,
+      pipelineStart,
+      execution,
+    });
+  } finally {
+    await execution.dispose();
+  }
+}
+
+async function executeRenderPipeline(input: {
+  job: RenderJob;
+  projectDir: string;
+  outputPath: string;
+  workDir: string;
+  logPath: string | null;
+  pipelineStart: number;
+  execution: RenderExecutionContext;
+}): Promise<void> {
+  const { job, projectDir, outputPath, workDir, logPath, pipelineStart, execution } = input;
+  const log = execution.logger;
+  const eventPublisher = execution.events;
+  const onProgress = execution.onProgress;
+  const executionSignal = execution.signal;
   let fileServer: FileServerHandle | null = null;
   let probeSession: CaptureSession | null = null;
   let lastBrowserConsole: string[] = [];
@@ -1637,21 +1690,35 @@ export async function executeRenderJob(
     const count = captureAttempts.filter((a) => a.reason === "transient-retry").length;
     if (count > 0) updateCaptureObservability({ transientRetries: count });
   };
-  // Declared outside the try so `finally` can stop the interval, but
-  // the sampler is created INSIDE the try so a synchronous throw
-  // between declaration and the try-block (currently impossible, but
-  // defensible if more setup ever lands here) can't leak the interval.
+  // The execution context's dynamic disposer reads this binding, so any
+  // sampler acquired by the pipeline is stopped by the unconditional outer
+  // finally even when setup or terminal reporting throws.
   let memSampler: MemorySampler | null = null;
   // "routed" = the parallel router fired and held; "reverted" = fired but
   // the self-verify retry rolled back; undefined = never fired.
   let deParallelRouter: "routed" | "reverted" | undefined;
 
+  execution.defer("rollback staged artifact", () => artifactTransaction.rollback());
+  execution.defer("close file server", () => {
+    if (!fileServer) return;
+    closeFileServerSafely(fileServer, "renderExecutionContext", log);
+    fileServer = null;
+  });
+  execution.defer("close probe session", async () => {
+    if (!probeSession) return;
+    const session = probeSession;
+    probeSession = null;
+    await closeCaptureSession(session);
+  });
+  execution.defer("stop memory sampler", () => {
+    memSampler?.stop();
+    memSampler = null;
+  });
+
   try {
     memSampler = createMemorySampler();
     const assertNotAborted = () => {
-      if (abortSignal?.aborted) {
-        throw new RenderCancelledError("render_cancelled");
-      }
+      execution.assertActive(() => new RenderCancelledError("render_cancelled"));
     };
 
     job.startedAt = new Date();
@@ -1934,7 +2001,7 @@ export async function executeRenderJob(
           cfg,
           log,
           composition,
-          abortSignal,
+          abortSignal: executionSignal,
           assertNotAborted,
           // Copy (don't symlink) extracted frames on Windows — symlinkSync throws
           // EPERM there without Developer Mode/admin, which failed local renders.
@@ -2026,7 +2093,7 @@ export async function executeRenderJob(
           compiledDir,
           duration: probeResult.duration,
           audios: composition.audios,
-          abortSignal,
+          abortSignal: executionSignal,
           assertNotAborted,
         }),
     );
@@ -2724,7 +2791,7 @@ export async function executeRenderJob(
             buildCaptureOptions,
             createRenderVideoFrameInjector,
             hdrDiagnostics,
-            abortSignal,
+            abortSignal: executionSignal,
             assertNotAborted,
             onProgress,
           }),
@@ -2782,7 +2849,7 @@ export async function executeRenderJob(
                 },
                 buildCaptureOptions,
                 createRenderVideoFrameInjector,
-                abortSignal,
+                abortSignal: executionSignal,
                 assertNotAborted,
                 onProgress,
                 dedupPerfs,
@@ -2805,7 +2872,7 @@ export async function executeRenderJob(
           // which errors qualify.
           const isVerifyError = isDrawElementVerificationError(err);
           const isCancellation =
-            err instanceof RenderCancelledError || abortSignal?.aborted === true;
+            err instanceof RenderCancelledError || executionSignal?.aborted === true;
           if (
             !shouldRetryViaPinnedFallback({
               isVerifyError,
@@ -2994,7 +3061,7 @@ export async function executeRenderJob(
               dedupPerfs,
               buildCaptureOptions,
               createRenderVideoFrameInjector,
-              abortSignal,
+              abortSignal: executionSignal,
               assertNotAborted,
               onProgress,
             }),
@@ -3043,7 +3110,7 @@ export async function executeRenderJob(
               enableChunkedEncode,
               chunkedEncodeSize,
               engineConfig: cfg,
-              abortSignal,
+              abortSignal: executionSignal,
               assertNotAborted,
               onProgress,
             }),
@@ -3098,7 +3165,7 @@ export async function executeRenderJob(
             audioOutputPath,
             outputPath: stagedOutputPath,
             hasAudio,
-            abortSignal,
+            abortSignal: executionSignal,
             assertNotAborted,
             onProgress,
           }),
@@ -3174,7 +3241,6 @@ export async function executeRenderJob(
       }
     }
 
-    // ── Cleanup ─────────────────────────────────────────────────────────
     if (job.config.debug) {
       // Copy output MP4 (or single-file alpha output) into the debug dir for
       // easy access. Skipped for png-sequence: outputPath is a directory, not
@@ -3184,16 +3250,6 @@ export async function executeRenderJob(
         const debugOutput = join(workDir, `output${videoExt}`);
         copyFileSync(stagedOutputPath, debugOutput);
       }
-    } else if (process.env.KEEP_TEMP === "1") {
-      log.info("KEEP_TEMP=1 — leaving workDir on disk for inspection", { workDir });
-    } else {
-      await safeCleanup(
-        "remove workDir",
-        () => {
-          rmSync(workDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-        },
-        log,
-      );
     }
 
     artifactTransaction.commit();
@@ -3201,19 +3257,10 @@ export async function executeRenderJob(
     updateJobStatus(job, "complete", "Render complete", 100, onProgress);
     await eventPublisher.flush();
   } catch (error) {
-    await safeCleanup("rollback staged artifact", () => artifactTransaction.rollback(), log);
-    if (error instanceof RenderCancelledError || abortSignal?.aborted) {
+    if (error instanceof RenderCancelledError || executionSignal?.aborted) {
       job.error = error instanceof Error ? error.message : "render_cancelled";
       updateJobStatus(job, "cancelled", "Render cancelled", job.progress, onProgress);
       await eventPublisher.flush();
-      await cleanupRenderResources({
-        fileServer,
-        probeSession,
-        workDir,
-        debug: Boolean(job.config.debug),
-        log,
-        label: "cancel",
-      });
       throw error instanceof RenderCancelledError
         ? error
         : new RenderCancelledError("render_cancelled");
@@ -3346,17 +3393,6 @@ export async function executeRenderJob(
         .slice(-5),
     });
 
-    await cleanupRenderResources({
-      fileServer,
-      probeSession,
-      workDir,
-      debug: Boolean(job.config.debug),
-      log,
-      label: "error",
-    });
-
     throw error;
-  } finally {
-    memSampler?.stop();
   }
 }

@@ -9,11 +9,17 @@ export function CommitField({
   value,
   disabled,
   liveCommit,
+  align = "left",
   onCommit,
 }: {
   value: string;
   disabled?: boolean;
   liveCommit?: boolean;
+  /** The legacy panel lays out label-then-value inline (left reads naturally);
+   *  the flat inspector lays out label…value across a `justify-between` row,
+   *  where a left-aligned value looks stranded at the edge of its own
+   *  right-hand box instead of lining up with every other row's value. */
+  align?: "left" | "right";
   onCommit: (nextValue: string) => void;
 }) {
   const [draft, setDraft] = useState(value);
@@ -92,7 +98,9 @@ export function CommitField({
         scheduleCommit(nextDraft);
       }}
       title={parseNumericToken(value) ? "Scroll or use Arrow keys to adjust" : undefined}
-      className="min-w-0 w-full bg-transparent text-[11px] font-medium text-neutral-100 outline-none disabled:cursor-not-allowed disabled:text-neutral-600"
+      className={`min-w-0 w-full bg-transparent text-[11px] font-medium text-neutral-100 outline-none disabled:cursor-not-allowed disabled:text-neutral-600 ${
+        align === "right" ? "text-right" : "text-left"
+      }`}
     />
   );
 }

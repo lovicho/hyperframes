@@ -2035,4 +2035,35 @@ describe("initSandboxRuntimeModular", () => {
       expect(footer.style.left).toBe("");
     });
   });
+  describe("partial registry timelines", () => {
+    it("survives play/pause/seek when the sole registered timeline lacks pause()", () => {
+      const root = document.createElement("div");
+      root.setAttribute("data-composition-id", "main");
+      root.setAttribute("data-root", "true");
+      root.setAttribute("data-start", "0");
+      root.setAttribute("data-duration", "10");
+      root.setAttribute("data-width", "1920");
+      root.setAttribute("data-height", "1080");
+      document.body.appendChild(root);
+
+      // An authored composition can register a PARTIAL timeline — duration/seek
+      // only. It renders fine (the render path never pauses), so the interactive
+      // transport must tolerate the missing pause() instead of throwing
+      // "tl.pause is not a function" (top recurring studio unhandled error).
+      const partial = createMockTimeline(10) as RuntimeTimelineLike & { pause?: unknown };
+      delete partial.pause;
+      window.__timelines = { main: partial as RuntimeTimelineLike };
+
+      initSandboxRuntimeModular();
+      const player = window.__player;
+      expect(player).toBeDefined();
+
+      expect(() => {
+        player?.play();
+        player?.pause();
+        player?.seek(1);
+        player?.renderSeek(2);
+      }).not.toThrow();
+    });
+  });
 });

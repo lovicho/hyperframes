@@ -469,6 +469,29 @@
       // utils/compositionServer.ts; the remaining clone is per-command logging text
       // (different labels/help lines) — extracting it would over-abstract.
       "packages/cli/src/commands/present.ts",
+      // Portrait --resolution alias fix (via/resolution-portrait-fix):
+      // cloudrun.ts and lambda.ts are intentionally symmetric per-adapter
+      // dispatchers — same subcommand surface (deploy / render / render-batch /
+      // progress / destroy), same argument parsers (parseFormat / parseCodec /
+      // parseQuality / parsePositiveInt), same wire-config shape. The 390-line
+      // cross-file clone is that pre-existing structural symmetry; the shared
+      // resolution-flag parse now lives in utils/parseOutputResolution.ts, but
+      // consolidating the per-adapter dispatcher body further would collapse
+      // two distinct SDK surfaces (AWS + GCP) into a single verb router that
+      // future adapters (Azure, etc.) would have to fork back out of.
+      // Line-shift fingerprint after adding `outputResolutionAspectAgnostic`
+      // threading re-flags the inherited clones.
+      "packages/cli/src/commands/cloudrun.ts",
+      "packages/cli/src/commands/lambda.ts",
+      // lambda/render.ts and lambda/render-batch.ts declare parallel
+      // RenderArgs / RenderBatchArgs interfaces (same core render knobs, with
+      // batch-only extras like maxConcurrent / dryRun). Extracting the shared
+      // subset into a base interface would force every consumer to spell out
+      // the intersection at every call site; the current shape is
+      // intent-preserving. Pre-existing dupe, re-flagged after threading the
+      // aspect-agnostic field through both interfaces.
+      "packages/cli/src/commands/lambda/render.ts",
+      "packages/cli/src/commands/lambda/render-batch.ts",
       // skillsManifest.test.ts: parallel arrange/act/assert cases for locateInstall
       // (project vs global scope, per-agent host conventions, claude-code priority).
       // Each case seeds a dir then asserts the resolved location/agent; collapsing
@@ -743,6 +766,36 @@
       // work on this same branch (commits 444639d75, b57b31beb, 6f2e9848c,
       // eba8a0fa2), unrelated to the Grade group (Plan 5) currently landing.
       "packages/studio/src/components/editor/propertyPanelSections.tsx",
+      // Portrait --resolution alias fix (via/resolution-portrait-fix):
+      // server.ts `render` (cyclo 10 / CRAP 31.6) and distributed/plan.ts
+      // `plan` (cyclo 33 / CRAP 36.7) are both pre-existing complexity —
+      // the PR only threads `outputResolutionAspectAgnostic` through the
+      // parseRenderOverrides/RenderInput/DistributedRenderConfig shape and
+      // adds one field spread inside `plan`. Neither function body gained
+      // branches, but the line-shift fingerprint re-flags the inherited
+      // complexity. The new re-target logic itself is extracted into
+      // `adaptAspectAgnosticResolution` in compileStage.ts to keep that
+      // stage's runCompileStage under the cyclo/cognitive thresholds.
+      "packages/producer/src/server.ts",
+      "packages/producer/src/services/distributed/plan.ts",
+      // Sibling-surface fix (PR #2529 R2): lambda.ts's top-level `run`
+      // (cyclo 39, CRAP 1560) is the big subcommand switch that pre-dates
+      // this PR. The change threads two additional variables through the
+      // `render` and `render-batch` branches (parsed resolution +
+      // aspect-agnostic flag) but adds no new branches. parseIntFlag /
+      // parseEnum (both cyclo 5, CRAP 30 — right at the threshold) are also
+      // pre-existing utility parsers; the file-level line shift after
+      // adding the shared parseOutputResolutionFlag call re-flags them at
+      // the boundary. All three findings are inherited complexity, not new
+      // branches introduced by the aspect-agnostic threading.
+      "packages/cli/src/commands/lambda.ts",
+      // Sibling-surface fix (PR #2529 R2): lambda/render.ts's
+      // `waitForCompletion` (cyclo 11, CRAP 37.1) is the pre-existing SFN
+      // progress-poll loop. This PR only adds `outputResolutionAspectAgnostic`
+      // to `RenderArgs` + a two-line extraction (`buildLambdaRenderConfig`);
+      // `waitForCompletion` is untouched. Line-shift fingerprint re-flags
+      // the inherited complexity.
+      "packages/cli/src/commands/lambda/render.ts",
     ],
   },
 }

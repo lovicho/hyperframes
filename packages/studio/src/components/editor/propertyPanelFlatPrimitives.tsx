@@ -51,6 +51,7 @@ export function FlatRow({
             value={value}
             disabled={disabled}
             liveCommit={liveCommit}
+            align="right"
             onCommit={(nextValue) => {
               track("metric", label);
               onCommit(nextValue);

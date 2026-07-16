@@ -128,6 +128,12 @@ export interface DistributedRenderConfig {
   videoFrameFormat?: VideoFrameFormat;
   /** Output resolution preset; engages Chrome `deviceScaleFactor` supersampling. */
   outputResolution?: CanvasResolution;
+  /**
+   * True when `outputResolution` was normalized from an aspect-agnostic alias
+   * (`1080p`, `hd`, `4k`, `uhd`) — the compile stage re-targets the preset
+   * to the composition's orientation.
+   */
+  outputResolutionAspectAgnostic?: boolean;
 
   /**
    * Frames per chunk. When explicitly set, that value is used and
@@ -762,6 +768,7 @@ export async function plan(
     bitrate: config.bitrate,
     videoFrameFormat: config.videoFrameFormat,
     outputResolution: config.outputResolution,
+    outputResolutionAspectAgnostic: config.outputResolutionAspectAgnostic,
     // HDR is banned in distributed mode. force-sdr keeps the
     // extract / encoder paths off the HDR branches entirely.
     hdrMode: config.hdrMode ?? "force-sdr",

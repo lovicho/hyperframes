@@ -43,7 +43,12 @@ import { isVideoFrameFormat } from "@hyperframes/engine";
 import { resolveRenderPaths } from "./utils/paths.js";
 import { defaultLogger, type ProducerLogger } from "./logger.js";
 import { Semaphore } from "./utils/semaphore.js";
-import { parseFps, normalizeResolutionFlag, type CanvasResolution } from "@hyperframes/core";
+import {
+  parseFps,
+  normalizeResolutionFlag,
+  isAspectAgnosticResolutionAlias,
+  type CanvasResolution,
+} from "@hyperframes/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,9 +98,17 @@ interface RenderInput {
    * Output resolution preset (e.g. `landscape-4k`). Drives the same
    * `resolveDeviceScaleFactor` supersampling path the local CLI uses — Chrome
    * renders at a higher devicePixelRatio so the captured screenshot lands at
-   * the requested dimensions. Aspect ratio must match the composition.
+   * the requested dimensions. Aspect ratio must match the composition unless
+   * `outputResolutionAspectAgnostic` is set (see below).
    */
   outputResolution?: CanvasResolution;
+  /**
+   * True when `outputResolution` was normalized from an aspect-agnostic alias
+   * (`1080p`, `hd`, `4k`, `uhd`). The compile stage will adapt the preset to
+   * the composition's orientation instead of rejecting portrait/square
+   * compositions as an aspect-ratio mismatch.
+   */
+  outputResolutionAspectAgnostic?: boolean;
 }
 
 interface PreparedRenderInput {
@@ -151,7 +164,8 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
     ? body.videoFrameFormat
     : undefined;
 
-  const { variables, outputResolution } = parseRenderOverrides(body);
+  const { variables, outputResolution, outputResolutionAspectAgnostic } =
+    parseRenderOverrides(body);
 
   return {
     outputPath,
@@ -165,6 +179,7 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
     format,
     variables,
     outputResolution,
+    outputResolutionAspectAgnostic,
     videoFrameFormat,
   };
 }
@@ -182,15 +197,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function parseRenderOverrides(body: Record<string, unknown>): {
   variables?: Record<string, unknown>;
   outputResolution?: CanvasResolution;
+  outputResolutionAspectAgnostic?: boolean;
 } {
   // Only forward a plain JSON object. Arrays / primitives / null → undefined.
   const variables = isPlainObject(body.variables) ? body.variables : undefined;
   // Accept canonical presets and aliases ("4k", "landscape-4k", …).
-  const outputResolution =
-    typeof body.outputResolution === "string"
-      ? normalizeResolutionFlag(body.outputResolution)
-      : undefined;
-  return { variables, outputResolution };
+  const rawOutputResolution =
+    typeof body.outputResolution === "string" ? body.outputResolution : undefined;
+  const outputResolution = rawOutputResolution
+    ? normalizeResolutionFlag(rawOutputResolution)
+    : undefined;
+  // Preserve the "raw shape was tier-only" signal so the compile stage can
+  // adapt the preset to the composition's orientation. Set only when
+  // normalization succeeded — a bad string doesn't need the flag.
+  const outputResolutionAspectAgnostic = outputResolution
+    ? isAspectAgnosticResolutionAlias(rawOutputResolution)
+    : undefined;
+  return { variables, outputResolution, outputResolutionAspectAgnostic };
 }
 
 /**
@@ -210,6 +233,7 @@ function buildRenderJobConfig(input: RenderInput, log: ProducerLogger) {
     entryFile: input.entryFile,
     variables: input.variables,
     outputResolution: input.outputResolution,
+    outputResolutionAspectAgnostic: input.outputResolutionAspectAgnostic,
     videoFrameFormat: input.videoFrameFormat,
     logger: log,
   };

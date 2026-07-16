@@ -53,6 +53,32 @@ import { shouldAttemptPeriodicTimelineBind } from "./timelineRebindPolicy";
 const AUTHORED_DURATION_ATTR = "data-hf-authored-duration";
 const AUTHORED_END_ATTR = "data-hf-authored-end";
 
+/**
+ * A `window.__timelines` entry is authored content and may be a PARTIAL
+ * RuntimeTimelineLike — e.g. duration/seek only, no `pause()`. Such
+ * compositions render fine (the render path only seeks and never pauses), so
+ * timeline resolution stays permissive by design; the interactive transport
+ * must not crash on the missing method (top recurring studio:unhandled_error:
+ * "E.pause is not a function"). One analytics event per page so the
+ * composition author can find the partial timeline.
+ */
+let warnedTimelineMissingPause = false;
+function pauseTimelineIfPossible(tl: RuntimeTimelineLike | null | undefined): void {
+  if (!tl) return;
+  if (typeof tl.pause !== "function") {
+    if (!warnedTimelineMissingPause) {
+      warnedTimelineMissingPause = true;
+      emitAnalyticsEvent("timeline_missing_pause", {});
+    }
+    return;
+  }
+  try {
+    tl.pause();
+  } catch (err) {
+    swallow("runtime.timeline.pause", err);
+  }
+}
+
 type ExportRenderFpsResolution = {
   fps: number | null;
   source: "render-options" | "default" | "unknown";
@@ -1210,7 +1236,7 @@ export function initSandboxRuntimeModular(): void {
       if (typeof state.capturedTimeline.progress === "function") {
         state.capturedTimeline.progress(1, true);
         state.capturedTimeline.progress(0, false);
-        state.capturedTimeline.pause();
+        pauseTimelineIfPossible(state.capturedTimeline);
       }
     }
     if (boundDuration > 0) {
@@ -1232,7 +1258,7 @@ export function initSandboxRuntimeModular(): void {
         }
         const seekTime = Math.max(0, state.currentTime || 0);
         state.capturedTimeline.totalTime(seekTime, false);
-        state.capturedTimeline.pause();
+        pauseTimelineIfPossible(state.capturedTimeline);
       }
 
       // GSAP bakes the CSS `translate` into style.transform on seek.
@@ -1536,9 +1562,13 @@ export function initSandboxRuntimeModular(): void {
       state.capturedTimeline.timeScale(state.playbackRate);
     }
     try {
-      state.capturedTimeline.pause();
-      state.capturedTimeline.seek(previousTime, false);
-      if (wasPlaying) {
+      // pause guarded separately: a PARTIAL timeline without pause() must not
+      // abort the seek/play restore below (the catch would swallow them too).
+      pauseTimelineIfPossible(state.capturedTimeline);
+      if (typeof state.capturedTimeline.seek === "function") {
+        state.capturedTimeline.seek(previousTime, false);
+      }
+      if (wasPlaying && typeof state.capturedTimeline.play === "function") {
         state.capturedTimeline.play();
       }
     } catch (err) {
@@ -2135,7 +2165,7 @@ export function initSandboxRuntimeModular(): void {
         const declaredDur = Number(rootEl?.getAttribute("data-duration") ?? 0);
         if (declaredDur > 0) clock.setDuration(declaredDur);
       }
-      if (tl) tl.pause();
+      pauseTimelineIfPossible(tl);
       if (!clock.play()) return;
       state.isPlaying = true;
       state.mediaForceSyncNextTick = true;
@@ -2161,7 +2191,7 @@ export function initSandboxRuntimeModular(): void {
       state.mediaForceSyncNextTick = true;
       hardSyncAllMedia(state.currentTime);
       const tl = state.capturedTimeline;
-      if (tl) tl.pause();
+      pauseTimelineIfPossible(tl);
       runAdapters("pause");
       syncMediaForCurrentState();
       colorGrading.redraw();
@@ -2181,7 +2211,7 @@ export function initSandboxRuntimeModular(): void {
       state.isPlaying = false;
       state.mediaForceSyncNextTick = true;
       const tl = state.capturedTimeline;
-      if (tl) tl.pause();
+      pauseTimelineIfPossible(tl);
       seekTimelineAndAdapters(state.currentTime);
       runAdapters("pause");
       if (options?.keepPlaying && wasPlaying) {
@@ -2549,7 +2579,8 @@ export function initSandboxRuntimeModular(): void {
   ) => {
     try {
       const suppressEvents = options?.suppressEvents === true;
-      timeline.pause();
+      // Guarded: a partial timeline without pause() must still get its seek.
+      pauseTimelineIfPossible(timeline);
       if (typeof timeline.totalTime === "function") {
         timeline.totalTime(timeSeconds, suppressEvents);
       } else {
@@ -2783,7 +2814,7 @@ export function initSandboxRuntimeModular(): void {
             player._timeline = state.capturedTimeline;
           }
           if (state.capturedTimeline && state.capturedTimeline !== prevTimeline) {
-            state.capturedTimeline.pause();
+            pauseTimelineIfPossible(state.capturedTimeline);
           }
           const dur = getSafeTimelineDurationSeconds(state.capturedTimeline, 0);
           if (dur > 0) clock.setDuration(dur);
@@ -2996,7 +3027,7 @@ export function initSandboxRuntimeModular(): void {
   if (state.capturedTimeline) {
     const dur = getSafeTimelineDurationSeconds(state.capturedTimeline, 0);
     if (dur > 0) clock.setDuration(dur);
-    state.capturedTimeline.pause();
+    pauseTimelineIfPossible(state.capturedTimeline);
   }
 
   installPositionEditsSeekReapply(window as Window & typeof globalThis);
