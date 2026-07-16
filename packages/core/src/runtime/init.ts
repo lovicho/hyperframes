@@ -19,7 +19,11 @@ import {
 } from "./adapters/video-texture-compat";
 import { forceDispatchSeekEvent } from "./adapters/seek-dispatch";
 import { createWaapiAdapter } from "./adapters/waapi";
-import { refreshRuntimeMediaCache, syncRuntimeMedia } from "./media";
+import {
+  refreshRuntimeMediaCache,
+  resolveRuntimeMediaClipDuration,
+  syncRuntimeMedia,
+} from "./media";
 import { probeAndCacheElementVolume, type VolumeKeyframe } from "./mediaVolumeEnvelope.js";
 import { createPickerModule } from "./picker";
 import { createRuntimePlayer, type RuntimePlayerTransport } from "./player";
@@ -1807,10 +1811,12 @@ export function initSandboxRuntimeModular(): void {
         const ownDuration = Number.parseFloat(element.dataset.duration ?? "");
         const explicitDuration =
           Number.isFinite(ownDuration) && ownDuration > 0 ? ownDuration : null;
-        const candidates = [sourceDuration, hostRemaining, explicitDuration].filter(
-          (value): value is number => value != null,
-        );
-        return candidates.length > 0 ? Math.min(...candidates) : null;
+        return resolveRuntimeMediaClipDuration({
+          isVideo: element.tagName === "VIDEO",
+          sourceDuration,
+          hostRemaining,
+          explicitDuration,
+        });
       },
     });
     // Attach probed volume keyframes to clips so syncRuntimeMedia can use the
