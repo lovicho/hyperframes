@@ -21,6 +21,7 @@ import {
   buildChromeArgs,
   resolveBrowserGpuMode,
   resolveHeadlessShellPath,
+  type BrowserLease,
   type CaptureMode,
 } from "./browserManager.js";
 import {
@@ -61,6 +62,8 @@ export type BeforeCaptureHook = (page: Page, time: number) => Promise<void>;
 
 export interface CaptureSession {
   browser: Browser;
+  /** Exact ownership token for this browser acquisition. */
+  browserLease?: BrowserLease;
   page: Page;
   options: CaptureOptions;
   serverUrl: string;
@@ -1014,9 +1017,85 @@ export async function createCaptureSession(
     { ...config, browserGpuMode: resolvedGpuMode },
   );
 
-  const { browser, captureMode } = await acquireBrowser(chromeArgs, config);
+  const browserLease = await acquireBrowser(chromeArgs, config);
+  return constructCaptureSessionWithRollback({
+    browserLease,
+    serverUrl,
+    outputDir,
+    options,
+    onBeforeCapture,
+    config,
+    useDrawElement,
+  });
+}
+
+interface CaptureSessionConstructionInput {
+  browserLease: BrowserLease;
+  serverUrl: string;
+  outputDir: string;
+  options: CaptureOptions;
+  onBeforeCapture: BeforeCaptureHook | null;
+  config?: Partial<EngineConfig>;
+  useDrawElement: boolean;
+}
+
+async function constructCaptureSessionWithRollback(
+  input: CaptureSessionConstructionInput,
+): Promise<CaptureSession> {
+  let page: Page | undefined;
+  try {
+    return await constructCaptureSession({
+      ...input,
+      onPageCreated: (createdPage) => {
+        page = createdPage;
+      },
+    });
+  } catch (error) {
+    let pageClosed = true;
+    try {
+      if (page) {
+        const rollbackPage = page;
+        pageClosed = await waitForCloseWithTimeout(
+          Promise.resolve().then(() => rollbackPage.close()),
+        );
+      }
+    } finally {
+      if (!pageClosed) {
+        console.warn(
+          "[FrameCapture] Timed out closing page during construction rollback; forcing browser process shutdown",
+        );
+        input.browserLease.forceRelease();
+      } else {
+        const browserClosed = await waitForCloseWithTimeout(input.browserLease.release());
+        if (!browserClosed) {
+          console.warn(
+            "[FrameCapture] Timed out closing browser during construction rollback; forcing browser process shutdown",
+          );
+          input.browserLease.forceRelease();
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+async function constructCaptureSession(
+  input: CaptureSessionConstructionInput & { onPageCreated(page: Page): void },
+): Promise<CaptureSession> {
+  const {
+    browserLease,
+    serverUrl,
+    outputDir,
+    options,
+    onBeforeCapture,
+    config,
+    useDrawElement,
+    onPageCreated,
+  } = input;
+  const { browser, captureMode } = browserLease;
 
   const page = await browser.newPage();
+  onPageCreated(page);
   // Polyfill esbuild's keepNames helper inside the page.
   //
   // The engine is published as raw TypeScript (`packages/engine/package.json`
@@ -1126,6 +1205,7 @@ export async function createCaptureSession(
 
   return {
     browser,
+    browserLease,
     page,
     options: sessionOptions,
     serverUrl,
@@ -3345,18 +3425,20 @@ export async function closeCaptureSession(session: CaptureSession): Promise<void
     const pageClosed = await waitForCloseWithTimeout(session.page.close());
     if (!pageClosed) {
       console.warn("[FrameCapture] Timed out closing page; forcing browser process shutdown");
-      forceReleaseBrowser(session.browser);
+      if (session.browserLease) session.browserLease.forceRelease();
+      else forceReleaseBrowser(session.browser);
       session.browserReleased = true;
     }
     session.pageReleased = true;
   }
   if (!session.browserReleased && session.browser) {
     const browserClosed = await waitForCloseWithTimeout(
-      releaseBrowser(session.browser, session.config),
+      session.browserLease?.release() ?? releaseBrowser(session.browser, session.config),
     );
     if (!browserClosed) {
       console.warn("[FrameCapture] Timed out closing browser; forcing browser process shutdown");
-      forceReleaseBrowser(session.browser);
+      if (session.browserLease) session.browserLease.forceRelease();
+      else forceReleaseBrowser(session.browser);
     }
     session.browserReleased = true;
   }
