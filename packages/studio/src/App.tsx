@@ -23,6 +23,7 @@ import { useDomEditSession } from "./hooks/useDomEditSession";
 import { useSdkSelectionSync } from "./hooks/useSdkSelectionSync";
 import { useStudioSdkSessions } from "./hooks/useStudioSdkSessions";
 import { useBlockHandlers } from "./hooks/useBlockHandlers";
+import { useAddAssetAtPlayhead } from "./hooks/useAddAssetAtPlayhead";
 import { useAppHotkeys } from "./hooks/useAppHotkeys";
 import { useClipboard } from "./hooks/useClipboard";
 import { deleteSelectedKeyframes } from "./hooks/timelineEditingHelpers";
@@ -195,14 +196,7 @@ export function StudioApp() {
     },
     [timelineEditing.handleTimelineGroupMove],
   );
-  const handleAddAssetAtPlayhead = useCallback(
-    (assetPath: string) =>
-      timelineEditing.handleTimelineAssetDrop(assetPath, {
-        start: usePlayerStore.getState().currentTime,
-        track: 0,
-      }),
-    [timelineEditing],
-  );
+  const handleAddAssetAtPlayhead = useAddAssetAtPlayhead(timelineEditing.handleTimelineAssetDrop);
   const {
     activeBlockParams,
     setActiveBlockParams,
@@ -533,6 +527,7 @@ export function StudioApp() {
                           onToggleRecording={recordingToggle}
                           sdkSession={sdkHandle.session}
                           publishSdkSession={sdkHandle.publish}
+                          forceReloadSdkSession={sdkHandle.forceReload}
                           reloadPreview={reloadPreview}
                           domEditSaveTimestampRef={domEditSaveTimestampRef}
                           recordEdit={editHistory.recordEdit}

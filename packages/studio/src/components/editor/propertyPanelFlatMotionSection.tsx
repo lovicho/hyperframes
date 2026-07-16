@@ -85,7 +85,7 @@ export function FlatTimingRow({
   const cell = (label: string, value: string, onCommit: (next: string) => void) => (
     <div className="grid gap-px">
       <span className="text-[9px] text-panel-text-4">{label}</span>
-      <span className="border-b border-transparent font-mono text-[11px] text-panel-text-0 hover:border-panel-border-input">
+      <span className="border-b border-panel-border-input/50 font-mono text-[11px] text-panel-text-0 hover:border-panel-border-input">
         <CommitField
           value={value}
           onCommit={(next) => {

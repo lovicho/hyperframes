@@ -10,6 +10,7 @@
  */
 
 import { useCallback, type ReactNode } from "react";
+import type { Composition } from "@hyperframes/sdk";
 import type { DomEditSelection } from "./editor/domEditingTypes";
 import { useSdkSession } from "../hooks/useSdkSession";
 import { useVariablesPersist, type UseVariablesPersistParams } from "../hooks/useVariablesPersist";
@@ -24,6 +25,7 @@ export function DesignPanelPromoteProvider({
   projectId,
   activeCompPath,
   showToast,
+  forceReloadSharedSdkSession,
   children,
   ...persistDeps
 }: PersistDeps & {
@@ -31,16 +33,40 @@ export function DesignPanelPromoteProvider({
   projectId: string | null;
   activeCompPath: string | null;
   showToast: (message: string, tone?: "error" | "info") => void;
+  /**
+   * Forces the app's SHARED SDK session (Variables tab, Slideshow, etc.) to
+   * re-open from disk. This provider opens its OWN session, separate from
+   * that shared one, so a persist through it never fires the shared session's
+   * own "change" event. When the target happens to be the same file the
+   * shared session already has open, that session is left holding stale
+   * in-memory content after a successful persist — worse, the self-write-echo
+   * registry that would normally reload it on the next file-change
+   * notification is keyed by file path only (not by session instance), so it
+   * mistakes this provider's write for its own echo and stays stale
+   * indefinitely. Called unconditionally (not gated on targetPath matching
+   * activeCompPath): re-opening a file that didn't change is a harmless
+   * no-op re-parse, cheaper than the bug class a subtly-wrong path guard
+   * could reintroduce.
+   */
+  forceReloadSharedSdkSession?: () => void;
   children: ReactNode;
 }) {
   const targetPath = selection?.sourceFile || activeCompPath || "index.html";
   const handle = useSdkSession(projectId, targetPath, persistDeps.domEditSaveTimestampRef);
-  const persist = useVariablesPersist({
+  const rawPersist = useVariablesPersist({
     ...persistDeps,
     sdkSession: handle.session,
     publishSdkSession: handle.publish,
     activeCompPath: targetPath,
   });
+  const persist = useCallback(
+    async (label: string, mutate: (session: Composition) => void) => {
+      const committed = await rawPersist(label, mutate);
+      if (committed) forceReloadSharedSdkSession?.();
+      return committed;
+    },
+    [rawPersist, forceReloadSharedSdkSession],
+  );
   const handlePersistError = useCallback(
     (error: unknown) => showToast(getStudioSaveErrorMessage(error), "error"),
     [showToast],

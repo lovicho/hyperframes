@@ -289,6 +289,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     | `--to` | Export transcript sidecar format: `srt` or `vtt` |
     | `--output, -o` | Output path for exported SRT/VTT sidecar |
     | `--preserve-cues` | Keep each transcript entry as its own caption cue (skip word-level grouping) |
+    | `--timeout` | Whisper spawn timeout in ms. Overrides the duration+model auto-scaled default. Increase on slow CPUs (e.g. emulated arm64/x64) where medium/large models take many seconds per audio second. Minimum 5000. Env: `HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS`. |
     | `--json` | Output result as JSON |
 
     The command auto-detects the input type. Audio/video files are transcribed with whisper.cpp. Transcript files (`.json`, `.srt`, `.vtt`) are normalized and imported. Pass `--to srt` or `--to vtt` with a transcript input to write a caption sidecar instead.

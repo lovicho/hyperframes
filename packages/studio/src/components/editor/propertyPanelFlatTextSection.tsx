@@ -111,7 +111,7 @@ function FlatTextFieldEditor({
         >
           Weight
         </span>
-        <label className="flex items-center gap-1.5">
+        <label className="flex items-center gap-1.5 border-b border-panel-border-input/50 pb-px hover:border-panel-border-input">
           <select
             value={weight}
             onChange={(e) => {

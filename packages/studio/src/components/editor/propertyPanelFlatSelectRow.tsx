@@ -53,7 +53,13 @@ export function FlatSelectRow({
     <div className="group flex min-h-[30px] items-center justify-between">
       <span className={`text-[11px] ${VALUE_TIER_LABEL_CLASS[tier]}`}>{label}</span>
       <span className="flex items-center gap-2">
-        <label className="flex items-center gap-1.5">
+        <label
+          className={`flex items-center gap-1.5 border-b pb-px ${
+            tier === "explicitCustom"
+              ? "border-panel-accent/30 group-hover:border-panel-accent/70"
+              : "border-panel-border-input/50 group-hover:border-panel-border-input"
+          }`}
+        >
           <select
             value={value}
             disabled={disabled}

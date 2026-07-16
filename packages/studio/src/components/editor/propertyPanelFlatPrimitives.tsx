@@ -43,8 +43,8 @@ export function FlatRow({
           data-flat-row-value="true"
           className={`min-w-0 border-b pb-px font-mono text-[11px] ${VALUE_TIER_VALUE_CLASS[tier]} ${
             tier === "explicitCustom"
-              ? "border-transparent group-hover:border-panel-accent/35"
-              : "border-transparent group-hover:border-panel-border-input"
+              ? "border-panel-accent/30 group-hover:border-panel-accent/70"
+              : "border-panel-border-input/50 group-hover:border-panel-border-input"
           }`}
         >
           <CommitField

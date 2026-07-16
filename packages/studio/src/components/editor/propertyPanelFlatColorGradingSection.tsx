@@ -377,7 +377,7 @@ export function FlatColorGradingSection({
                   track("select", "Custom LUT");
                   applyLut(src || null, src && lut?.src === src ? lut.intensity : 1);
                 }}
-                className="bg-transparent font-mono text-[10px] text-panel-text-3 outline-none"
+                className="border-b border-panel-border-input/50 bg-transparent font-mono text-[10px] text-panel-text-3 outline-none hover:border-panel-border-input"
               >
                 <option value="">None</option>
                 {lutAssets.map((asset) => (
@@ -545,7 +545,7 @@ export function FlatColorGradingSection({
                 onSetApplyScope(e.target.value as "source-file" | "project");
               }}
               disabled={applyBusy}
-              className="bg-transparent font-mono text-[11px] text-panel-text-0 outline-none disabled:opacity-50"
+              className="border-b border-panel-border-input/50 bg-transparent font-mono text-[11px] text-panel-text-0 outline-none hover:border-panel-border-input disabled:opacity-50"
             >
               <option value="source-file">Current file media</option>
               <option value="project">All project media</option>
