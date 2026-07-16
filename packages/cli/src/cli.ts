@@ -295,45 +295,77 @@ process.on("exit", (code) => {
   _flushSync?.();
 });
 
-process.on("uncaughtException", (error) => {
-  if ((error as NodeJS.ErrnoException).code === "EPIPE") {
-    commandFailed = true;
-    process.exit(0);
-  }
-  // Post-artifact-validated shutdown throws (worker teardown, browser
-  // process cleanup, stray subprocess stream error) must not turn a valid
-  // render into an exit-1 "no final error message" failure. The render
-  // command sets `renderSucceeded` right after the producer resolves and
-  // the artifact is committed — from that point on, every throw here is
-  // a teardown artifact, not a render failure. Field signals:
-  //   ts=1784169760, ts=1784171150, ts=1784172467 (all win32/x64, CLI
-  //   0.7.58, ffmpeg=no, 1080x1920, valid MP4s on disk).
-  if (isRenderSucceeded()) {
-    // Log to stderr for diagnosis but do NOT flip commandFailed and do NOT
-    // exit non-zero. The render is valid.
-    process.stderr.write(
-      `  [hyperframes] Post-render uncaughtException (render already succeeded): ${error.message}\n`,
-    );
-    _trackCliError?.({
-      error_name: error.name,
-      error_message: error.message,
-      stack_trace: error.stack,
-      command,
-      kind: "uncaught_exception",
-    });
-    _flushSync?.();
-    process.exit(0);
-  }
-  commandFailed = true;
+// Report a CLI error event to telemetry. Extracted from the process-error
+// handlers so their bodies stay simple linear branches (see fallow CRAP
+// scoring — arrow handlers with inline telemetry calls tip past threshold).
+function emitCliErrorEvent(kind: "uncaught_exception" | "unhandled_rejection", error: Error): void {
   _trackCliError?.({
     error_name: error.name,
     error_message: error.message,
     stack_trace: error.stack,
     command,
-    kind: "uncaught_exception",
+    kind,
   });
+}
+
+// Handle a post-artifact-validated throw: record the diagnostic, emit the
+// telemetry event, but do NOT mark the run as failed. Field signals:
+//   ts=1784169760, ts=1784171150, ts=1784172467 (all win32/x64, CLI 0.7.58,
+//   ffmpeg=no, 1080x1920, valid MP4s on disk).
+// The render is valid — a worker teardown / browser shutdown / stray
+// subprocess stream error after `renderSucceeded` was set must not flip
+// exit code or telemetry success to failure.
+function reportPostRenderTerminationEvent(
+  label: "uncaughtException" | "unhandledRejection",
+  kind: "uncaught_exception" | "unhandled_rejection",
+  error: Error,
+): void {
+  process.stderr.write(
+    `  [hyperframes] Post-render ${label} (render already succeeded): ${error.message}\n`,
+  );
+  emitCliErrorEvent(kind, error);
+}
+
+// Terminate the process after a post-artifact-validated throw. Wraps
+// report + flush + exit(0) so the caller arrow handler doesn't accumulate
+// optional-chain branches (fallow CRAP scoring on the arrow tips past
+// threshold otherwise).
+function exitAfterPostRenderTermination(
+  label: "uncaughtException" | "unhandledRejection",
+  kind: "uncaught_exception" | "unhandled_rejection",
+  error: Error,
+): never {
+  reportPostRenderTerminationEvent(label, kind, error);
+  _flushSync?.();
+  process.exit(0);
+}
+
+// Terminate the process after a genuine CLI failure — mark commandFailed,
+// emit telemetry, flush, exit(1). Same rationale as above: keeps the arrow
+// handler linear so fallow CRAP stays under threshold.
+function exitAfterCliFailure(
+  kind: "uncaught_exception" | "unhandled_rejection",
+  error: Error,
+): never {
+  commandFailed = true;
+  emitCliErrorEvent(kind, error);
   _flushSync?.();
   process.exit(1);
+}
+
+process.on("uncaughtException", (error) => {
+  if ((error as NodeJS.ErrnoException).code === "EPIPE") {
+    commandFailed = true;
+    process.exit(0);
+  }
+  // Post-artifact-validated shutdown throws must not turn a valid render
+  // into an exit-1 "no final error message" failure. The render command
+  // sets `renderSucceeded` right after the producer resolves and the
+  // artifact is committed.
+  if (isRenderSucceeded()) {
+    exitAfterPostRenderTermination("uncaughtException", "uncaught_exception", error);
+  }
+  exitAfterCliFailure("uncaught_exception", error);
 });
 
 // unhandledRejection does not call process.exit() — Node may continue
@@ -346,26 +378,11 @@ process.on("unhandledRejection", (reason) => {
   // render as failed. `commandFailed` gates the success:true telemetry
   // field — keep it false when the render actually succeeded.
   if (isRenderSucceeded()) {
-    process.stderr.write(
-      `  [hyperframes] Post-render unhandledRejection (render already succeeded): ${error.message}\n`,
-    );
-    _trackCliError?.({
-      error_name: error.name,
-      error_message: error.message,
-      stack_trace: error.stack,
-      command,
-      kind: "unhandled_rejection",
-    });
+    reportPostRenderTerminationEvent("unhandledRejection", "unhandled_rejection", error);
     return;
   }
   commandFailed = true;
-  _trackCliError?.({
-    error_name: error.name,
-    error_message: error.message,
-    stack_trace: error.stack,
-    command,
-    kind: "unhandled_rejection",
-  });
+  emitCliErrorEvent("unhandled_rejection", error);
 });
 
 // Lazy-load help renderer — avoids allocating help data on non-help invocations
