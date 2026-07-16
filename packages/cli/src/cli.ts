@@ -103,6 +103,7 @@ import { defineCommand, runMain } from "citty";
 import type { ArgsDef, CommandDef } from "citty";
 import { getRunId } from "./telemetry/runId.js";
 import { reportCommandFailure, trackCommandFailures } from "./utils/command-failure-tracking.js";
+import { isRenderSucceeded } from "./utils/render-success-state.js";
 
 const isHelp = process.argv.includes("--help") || process.argv.includes("-h");
 
@@ -299,6 +300,30 @@ process.on("uncaughtException", (error) => {
     commandFailed = true;
     process.exit(0);
   }
+  // Post-artifact-validated shutdown throws (worker teardown, browser
+  // process cleanup, stray subprocess stream error) must not turn a valid
+  // render into an exit-1 "no final error message" failure. The render
+  // command sets `renderSucceeded` right after the producer resolves and
+  // the artifact is committed — from that point on, every throw here is
+  // a teardown artifact, not a render failure. Field signals:
+  //   ts=1784169760, ts=1784171150, ts=1784172467 (all win32/x64, CLI
+  //   0.7.58, ffmpeg=no, 1080x1920, valid MP4s on disk).
+  if (isRenderSucceeded()) {
+    // Log to stderr for diagnosis but do NOT flip commandFailed and do NOT
+    // exit non-zero. The render is valid.
+    process.stderr.write(
+      `  [hyperframes] Post-render uncaughtException (render already succeeded): ${error.message}\n`,
+    );
+    _trackCliError?.({
+      error_name: error.name,
+      error_message: error.message,
+      stack_trace: error.stack,
+      command,
+      kind: "uncaught_exception",
+    });
+    _flushSync?.();
+    process.exit(0);
+  }
   commandFailed = true;
   _trackCliError?.({
     error_name: error.name,
@@ -315,8 +340,25 @@ process.on("uncaughtException", (error) => {
 // running if the rejection is non-fatal (e.g. a fire-and-forget promise).
 // The exit handler above will still fire with the real exit code.
 process.on("unhandledRejection", (reason) => {
-  commandFailed = true;
   const error = reason instanceof Error ? reason : new Error(String(reason));
+  // Same rationale as the uncaughtException branch above: a stray promise
+  // rejection during post-artifact-validated cleanup must not mark a valid
+  // render as failed. `commandFailed` gates the success:true telemetry
+  // field — keep it false when the render actually succeeded.
+  if (isRenderSucceeded()) {
+    process.stderr.write(
+      `  [hyperframes] Post-render unhandledRejection (render already succeeded): ${error.message}\n`,
+    );
+    _trackCliError?.({
+      error_name: error.name,
+      error_message: error.message,
+      stack_trace: error.stack,
+      command,
+      kind: "unhandled_rejection",
+    });
+    return;
+  }
+  commandFailed = true;
   _trackCliError?.({
     error_name: error.name,
     error_message: error.message,

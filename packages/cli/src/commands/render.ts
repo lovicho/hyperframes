@@ -81,6 +81,11 @@ import { runEnvironmentChecks } from "../browser/preflight.js";
 import { detectH264EncoderMode } from "../browser/ffmpeg.js";
 import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import { killOrphanedProcesses } from "../utils/orphanCleanup.js";
+import {
+  markRenderSucceeded,
+  runPostRenderStep,
+  runPostRenderStepAsync,
+} from "../utils/render-success-state.js";
 import type { ProducerLogger, RenderJob } from "@hyperframes/producer";
 import {
   MAX_VP9_CPU_USED,
@@ -1413,23 +1418,35 @@ async function renderDocker(
 
   const elapsed = Date.now() - startTime;
 
+  // Docker child exited 0 → the containerized producer already validated
+  // AND committed the artifact. Mirror renderLocal's post-success guarantee
+  // so any late throw here (telemetry flush, feedback prompt) cannot flip
+  // the exit code.
+  markRenderSucceeded();
+
   // Track metrics (no job object available from Docker — use a minimal stub)
-  trackRenderComplete({
-    durationMs: elapsed,
-    fps: fpsToNumber(options.fps),
-    quality: options.quality,
-    workers: options.workers,
-    docker: true,
-    gpu: options.gpu,
-    authoringSkill: options.authoringSkill,
-    ...getMemorySnapshot(),
-  });
+  runPostRenderStep("trackRenderComplete", () =>
+    trackRenderComplete({
+      durationMs: elapsed,
+      fps: fpsToNumber(options.fps),
+      quality: options.quality,
+      workers: options.workers,
+      docker: true,
+      gpu: options.gpu,
+      authoringSkill: options.authoringSkill,
+      ...getMemorySnapshot(),
+    }),
+  );
 
   // ponytail: Docker runs the producer in a child process, so no perfSummary is
   // threaded back here; the summary shows render time only (never a wrong video
   // length). Probe the output with ffprobe if a duration figure is wanted here.
-  printRenderComplete(outputPath, elapsed, options.quiet);
-  warnIfWebmAlphaDropped(outputPath, options.format, options.quiet);
+  runPostRenderStep("printRenderComplete", () =>
+    printRenderComplete(outputPath, elapsed, options.quiet),
+  );
+  runPostRenderStep("warnIfWebmAlphaDropped", () =>
+    warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
+  );
   if (options.exitAfterComplete) scheduleRenderProcessExit();
   return { renderTimeMs: elapsed };
 }
@@ -1559,6 +1576,13 @@ export async function renderLocal(
     );
   }
 
+  // Render resolved without throwing → producer's `artifact validated`
+  // checkpoint fired AND the artifact was committed to disk. From this
+  // point on, ANY thrown teardown error must not be allowed to override
+  // the exit code. Field signal ts=1784169760 / ts=1784171150 / ts=1784172467
+  // (win32/x64, CLI 0.7.58): valid MP4 on disk, exited 1 with no error print.
+  markRenderSucceeded();
+
   maybeConsumeDeParallelRouterTrial(deParallelRouterTrialArmed, job, options.quiet);
   const elapsed = Date.now() - startTime;
   if (job.outcome === "completed_with_warnings") {
@@ -1566,20 +1590,26 @@ export async function renderLocal(
       console.warn(c.warn(`  [${warning.code}] ${warning.message}`));
     }
   }
-  trackRenderMetrics(job, elapsed, options, false);
-  printRenderComplete(
-    outputPath,
-    elapsed,
-    options.quiet,
-    job.perfSummary?.compositionDurationSeconds,
-    job.perfSummary?.totalFrames,
+  runPostRenderStep("trackRenderMetrics", () => trackRenderMetrics(job, elapsed, options, false));
+  runPostRenderStep("printRenderComplete", () =>
+    printRenderComplete(
+      outputPath,
+      elapsed,
+      options.quiet,
+      job.perfSummary?.compositionDurationSeconds,
+      job.perfSummary?.totalFrames,
+    ),
   );
-  warnIfWebmAlphaDropped(outputPath, options.format, options.quiet);
+  runPostRenderStep("warnIfWebmAlphaDropped", () =>
+    warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
+  );
   if (!options.skipFeedback) {
-    await maybePromptRenderFeedback({
-      renderDurationMs: elapsed,
-      quiet: options.quiet,
-    });
+    await runPostRenderStepAsync("maybePromptRenderFeedback", () =>
+      maybePromptRenderFeedback({
+        renderDurationMs: elapsed,
+        quiet: options.quiet,
+      }),
+    );
   }
   if (options.exitAfterComplete) scheduleRenderProcessExit();
   const durationMs = job.perfSummary
