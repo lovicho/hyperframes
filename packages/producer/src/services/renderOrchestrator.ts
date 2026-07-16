@@ -45,7 +45,13 @@ import {
 } from "fs";
 import { tmpdir } from "node:os";
 import { parseHTML } from "linkedom";
-import { type CanvasResolution, type Fps, type FpsInput, toFps } from "@hyperframes/core";
+import {
+  type CanvasResolution,
+  type Fps,
+  type FpsInput,
+  fpsToNumber,
+  toFps,
+} from "@hyperframes/core";
 import {
   type EngineConfig,
   resolveConfig,
@@ -78,6 +84,8 @@ import {
   isTransientBrowserError,
   isDrawElementVerificationError,
   getDrawElementVerificationDetails,
+  augmentProtocolTimeoutError,
+  augmentPageNavigationTimeoutError,
 } from "@hyperframes/engine";
 import { join, dirname, resolve } from "path";
 import { totalmem } from "node:os";
@@ -124,7 +132,15 @@ import {
   type RenderObservationData,
   type RenderObservabilitySummary,
 } from "./render/observability.js";
+import { emitFallbackCaptureProfile } from "./render/fallbackCaptureProfile.js";
 import { type HdrPerfCollector, type HdrPerfSummary } from "./render/hdrPerf.js";
+import {
+  assertVideoFrameCoverage,
+  computeVideoFrameCoverage,
+  countAuthoredTimedClips,
+  resolveVideoCoverageThreshold,
+  type VideoFrameCoverageReport,
+} from "./render/videoFrameCoverage.js";
 import { runCompileStage } from "./render/stages/compileStage.js";
 import { runProbeStage } from "./render/stages/probeStage.js";
 import {
@@ -175,11 +191,25 @@ function sampleDirectoryBytes(dir: string): number {
 function summarizeExtractionObservability(
   extractionResult: ExtractionResult | null,
   videoCount: number,
+  coverageReports?: readonly VideoFrameCoverageReport[],
+  authoredTimedClipCount?: number,
 ): RenderExtractionObservability {
   const extracted = extractionResult?.extracted ?? [];
   const totalFramesExtracted = extractionResult?.totalFramesExtracted ?? 0;
   const maxFramesPerVideo = extracted.reduce((max, item) => Math.max(max, item.totalFrames), 0);
   const phaseBreakdown = extractionResult?.phaseBreakdown;
+  // Only surface the coverage gauges when we actually ran the gate — a
+  // no-video render must not emit a spurious `minVideoFrameCoverageRatio`
+  // that dashboards interpret as "coverage measured, was 0/0=1".
+  const coverageGauges =
+    coverageReports && coverageReports.length > 0
+      ? {
+          minVideoFrameCoverageRatio: coverageReports.reduce(
+            (min, r) => Math.min(min, r.ratio),
+            Number.POSITIVE_INFINITY,
+          ),
+        }
+      : {};
   return {
     videoCount,
     extractedVideoCount: extracted.length,
@@ -192,6 +222,8 @@ function summarizeExtractionObservability(
     vfrPreflightCount: phaseBreakdown?.vfrPreflightCount,
     cacheHits: phaseBreakdown?.cacheHits,
     cacheMisses: phaseBreakdown?.cacheMisses,
+    ...coverageGauges,
+    authoredTimedClipCount,
   };
 }
 
@@ -1831,7 +1863,7 @@ export async function executeRenderJob(
     const probeResult = await observeRenderStage(
       observability,
       "browser_probe",
-      { forceScreenshot: captureForceScreenshot },
+      { forceScreenshot: captureForceScreenshot, stagePhase: "calibrating" },
       () =>
         runProbeStage({
           projectDir,
@@ -1848,6 +1880,10 @@ export async function executeRenderJob(
           needsAlpha,
           deviceScaleFactor,
         }),
+      // Browser probe is pre-capture; report `browser calibrating` so a
+      // slow probe (~64s SwiftShader warm-up on Windows was the reported
+      // shape) doesn't read as a zero-frame stall. Field signal ts=1784019503.
+      { heartbeatMessage: "browser calibrating (frames not started)" },
     );
     compiled = probeResult.compiled;
     compositionHash = computeCompositionObservabilityHash(compiled.html);
@@ -1918,9 +1954,28 @@ export async function executeRenderJob(
       imageColorSpaces,
     } = extractResult;
     perfStages.videoExtractMs = extractResult.videoExtractMs;
+
+    // ── Parity gate: per-clip captured-vs-expected-frame coverage ───────
+    // Fail loudly BEFORE encode if any clip's delivered frames fall below
+    // the threshold — check/snapshot passes on individual frames while the
+    // encoded MP4 silently renders the clip blank (field signal
+    // ts=1784139267: 15-injection later-clip drop; see videoFrameCoverage.ts).
+    // Also count authored `[data-start]` clip windows as a coarse proxy
+    // for the ts=1784144554 authored-clip-count-scaled failure shape.
+    const coverageReports: VideoFrameCoverageReport[] = extractionResult
+      ? computeVideoFrameCoverage(
+          composition.videos,
+          extractionResult.extracted,
+          fpsToNumber(job.config.fps),
+        )
+      : [];
+    const coverageThreshold = resolveVideoCoverageThreshold();
+    const authoredTimedClipCount = countAuthoredTimedClips(compiled.html);
     extractionObservability = summarizeExtractionObservability(
       extractionResult,
       composition.videos.length,
+      coverageReports,
+      authoredTimedClipCount,
     );
     observability.checkpoint("video_extract", "frames resolved", {
       videoCount: extractionObservability.videoCount,
@@ -1932,7 +1987,15 @@ export async function executeRenderJob(
       vfrPreflightMs: extractionObservability.vfrPreflightMs ?? null,
       cacheHits: extractionObservability.cacheHits ?? null,
       cacheMisses: extractionObservability.cacheMisses ?? null,
+      minVideoFrameCoverageRatio: extractionObservability.minVideoFrameCoverageRatio ?? null,
+      authoredTimedClipCount: extractionObservability.authoredTimedClipCount ?? null,
     });
+    // Gate AFTER the checkpoint so a coverage-failed render still emits
+    // the observability row (partial telemetry is still worth having).
+    // `assertVideoFrameCoverage` no-ops on an empty report list AND on a
+    // null threshold, so the gate is inert for no-video + opted-out
+    // renders alike.
+    assertVideoFrameCoverage(coverageReports, coverageThreshold);
 
     // ── HDR auto-detection ──────────────────────────────────────────────
     const effectiveHdr = resolveEffectiveHdrMode({
@@ -2219,9 +2282,15 @@ export async function executeRenderJob(
     // captureStageObservationData can close over it for the calibration
     // stage itself — reads as undefined until resolveRenderWorkerCount runs.
     let workerCount: number;
+    // Default `stagePhase` — spread FIRST so a caller can override via
+    // `extra` (the calibration call site passes `stagePhase: "calibrating"`
+    // to distinguish healthy pre-capture waits from actual zero-frame stalls
+    // during capture; heartbeats in `capture_calibration` otherwise emit
+    // `framesCompleted: 0` and read as broken). Field signal ts=1784019503.
     const captureStageObservationData = (
       extra: RenderObservationData = {},
     ): RenderObservationData => ({
+      stagePhase: "capturing",
       ...extra,
       get workerCount() {
         return workerCount;
@@ -2271,7 +2340,14 @@ export async function executeRenderJob(
       const outcome = await observeRenderStage(
         observability,
         "capture_calibration",
-        captureStageObservationData({ forceScreenshot: captureForceScreenshot }),
+        captureStageObservationData({
+          forceScreenshot: captureForceScreenshot,
+          // Override the default `capturing` — calibration writes probe
+          // frames only, not `job.framesRendered`, so heartbeats reporting
+          // `framesCompleted: 0` misread as broken. Field signal
+          // ts=1784019503.
+          stagePhase: "calibrating",
+        }),
         () =>
           runCaptureCalibration({
             cfg,
@@ -2286,6 +2362,7 @@ export async function executeRenderJob(
             createRenderVideoFrameInjector,
             assertNotAborted,
           }),
+        { heartbeatMessage: "browser calibrating (frames not started)" },
       );
       captureCalibration = outcome.calibration;
       captureForceScreenshot = outcome.forceScreenshot;
@@ -2975,6 +3052,17 @@ export async function executeRenderJob(
       }
     } // end SDR capture paths block
 
+    // Opt-in per-frame timing summary for the fast-capture fallback path
+    // (drawElement → screenshot when composition uses filter:blur,
+    // filter:drop-shadow, clip-path, backdrop-filter, or hits any other
+    // fallback gate). Emits a `capture_fallback_profile` observability
+    // checkpoint per fallback-engaged session behind
+    // `HF_PROFILE_FALLBACK_CAPTURE=true`. No-op otherwise, and no-op
+    // when no session's capture engaged the fallback path — healthy
+    // (drawElement) renders pay zero overhead. See
+    // `fallbackCaptureProfile.ts` for the framing rationale.
+    emitFallbackCaptureProfile(observability, dedupPerfs);
+
     applyRenderWarningPolicy(
       job,
       [...layeredCaptureWarnings, ...dedupPerfs.flatMap((perf) => perf.warnings ?? [])],
@@ -3143,7 +3231,41 @@ export async function executeRenderJob(
     // Retry burn on a render that STILL failed — the actionable signal for tuning
     // MAX_TRANSIENT_CAPTURE_RETRIES (mirrors the success-path record above).
     recordTransientRetryObservability();
-    const errorMessage = memoryGuidance ?? normalizeErrorMessage(error);
+    // Surface HyperFrames' PRODUCER_PUPPETEER_PROTOCOL_TIMEOUT_MS env +
+    // --protocol-timeout CLI in Puppeteer CDP protocol-timeout errors. Puppeteer's
+    // stock "Runtime.callFunctionOn timed out. Increase the 'protocolTimeout'
+    // setting" text doesn't name the HyperFrames knob and doesn't state the
+    // effective timeout that was already applied (300000 ms base + auto-scaling
+    // via `scaleProtocolTimeoutForComposition`). Field signal ts=1784047847
+    // reporter gave up on HF and switched to FFmpeg because the error didn't
+    // point them at the lever. `augmentProtocolTimeoutError` returns the input
+    // unchanged when the message doesn't match, so non-timeout failures (memory
+    // exhaustion, other CDP errors) flow through with no change.
+    const protocolTimeoutError = augmentProtocolTimeoutError(error, cfg.protocolTimeout);
+    // Surface HyperFrames' PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS env +
+    // --browser-timeout CLI + HYPERFRAMES_BROWSER_PATH escape hatch in
+    // Puppeteer `page.goto` navigation-timeout errors. Puppeteer's stock
+    // "Navigation timeout of 60000 ms exceeded" text names none of these
+    // levers. Field signal ts=1784146416 (darwin/arm64, CLI 0.7.58): host
+    // page.goto hit Navigation timeout twice on a CSS 3D + audio composition;
+    // Docker rendered the same composition successfully. Mirrors #2443's
+    // HYPERFRAMES_BROWSER_PATH surfacing at the runtime-navigation layer
+    // (vs download-time). `augmentPageNavigationTimeoutError` returns the
+    // input unchanged when the message doesn't match the Nav-timeout regex,
+    // so protocol-timeout / memory / other CDP errors flow through unchanged.
+    // hasCss3D + hasAudio are both left undefined here — no compile-time
+    // CSS-3D signal is currently threaded through the render pipeline, and
+    // `hasAudio` from the audio_process stage is block-scoped inside the
+    // try. Per the helper's fallback docs, unknown flags route to the
+    // generic env + browser-path hints (Docker compound hint suppressed).
+    // A future compile-time CSS-3D scan (e.g. htmlCompiler.ts pass over
+    // `transform-style: preserve-3d`, `perspective:`, `rotateX(`, etc.) can
+    // thread both flags here to enable the full compound Docker hint.
+    const navigationTimeoutError = augmentPageNavigationTimeoutError(
+      protocolTimeoutError,
+      cfg.pageNavigationTimeout,
+    );
+    const errorMessage = memoryGuidance ?? normalizeErrorMessage(navigationTimeoutError);
     const carriedBrowserConsole = getCaptureStageBrowserConsole(error);
     if (carriedBrowserConsole.length > 0) {
       lastBrowserConsole = [...lastBrowserConsole, ...carriedBrowserConsole].slice(-200);

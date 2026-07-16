@@ -81,6 +81,22 @@ const TAILWIND_BROWSER_SRC = `https://cdn.jsdelivr.net/npm/@tailwindcss/browser@
 const TAILWIND_BROWSER_INTEGRITY =
   "sha384-v5YF9xS+gLRWdvrQ0u/WRbCkjSIH0NjHIPe8tBL1ZRrmI7PiSH6LLdzs0aAIMCuh";
 
+export function resolveVideoDurationSeconds({
+  streamDuration,
+  frameDuration,
+  formatDuration,
+}: {
+  streamDuration: number;
+  frameDuration: number;
+  formatDuration: number;
+}): number {
+  return (
+    [streamDuration, frameDuration, formatDuration].find(
+      (duration) => Number.isFinite(duration) && duration > 0,
+    ) ?? DEFAULT_META.durationSeconds
+  );
+}
+
 // ---------------------------------------------------------------------------
 // ffprobe helper — shells out to ffprobe to avoid engine dependency
 // ---------------------------------------------------------------------------
@@ -103,6 +119,8 @@ function probeVideo(filePath: string): VideoMeta | undefined {
         height?: number;
         r_frame_rate?: string;
         avg_frame_rate?: string;
+        duration?: string;
+        nb_frames?: string;
       }[];
       format?: { duration?: string };
     } = JSON.parse(raw);
@@ -124,11 +142,18 @@ function probeVideo(filePath: string): VideoMeta | undefined {
       }
     }
 
-    const durationStr = parsed.format?.duration;
-    const durationSeconds = durationStr !== undefined ? parseFloat(durationStr) : 5;
+    const streamDuration = parseFloat(videoStream.duration ?? "");
+    const frameCount = parseInt(videoStream.nb_frames ?? "", 10);
+    const frameDuration = Number.isFinite(frameCount) && fps > 0 ? frameCount / fps : NaN;
+    const formatDuration = parseFloat(parsed.format?.duration ?? "");
+    const durationSeconds = resolveVideoDurationSeconds({
+      streamDuration,
+      frameDuration,
+      formatDuration,
+    });
 
     return {
-      durationSeconds: Number.isNaN(durationSeconds) ? 5 : durationSeconds,
+      durationSeconds,
       width: videoStream.width ?? 1920,
       height: videoStream.height ?? 1080,
       fps,

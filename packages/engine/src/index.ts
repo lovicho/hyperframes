@@ -79,6 +79,15 @@ export {
   type CaptureMode,
   type AcquiredBrowser,
 } from "./services/browserManager.js";
+export {
+  augmentProtocolTimeoutError,
+  isProtocolTimeoutError,
+} from "./services/protocolTimeoutErrorHint.js";
+export {
+  augmentPageNavigationTimeoutError,
+  isPageNavigationTimeoutError,
+  type NavigationTimeoutHintContext,
+} from "./services/pageNavigationTimeoutErrorHint.js";
 
 // ── Frame capture pipeline ──────────────────────────────────────────────────────
 export {
@@ -99,6 +108,7 @@ export {
   discardWarmupCapture,
   getCompositionDuration,
   getCapturePerfSummary,
+  percentileOf,
   prepareCaptureSessionForReuse,
   type CaptureSession,
   isTransientBrowserError,
@@ -252,6 +262,17 @@ export {
 } from "./utils/alphaBlit.js";
 
 export { groupIntoLayers, type CompositeLayer } from "./utils/layerCompositor.js";
+
+export {
+  diffGpuParityFrames,
+  diffGpuParityPngs,
+  verifyGpuParity,
+  type RgbaFrame,
+  type GpuParityDiffOptions,
+  type GpuParityDiffResult,
+  type BlackOnlyInARegion,
+  type VerifyGpuParityResult,
+} from "./utils/gpuParityDiff.js";
 
 // ── Shader transitions ────────────────────────────────────────────────────────
 export {

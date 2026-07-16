@@ -138,6 +138,7 @@ export {
   extractResolvedMedia,
   clampDurations,
   shouldClampMediaDuration,
+  shouldClampResolvedMediaDuration,
   MEDIA_DURATION_CLAMP_EPSILON_SECONDS,
 } from "./compiler/timingCompiler";
 

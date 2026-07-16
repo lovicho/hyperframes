@@ -38,14 +38,17 @@ describe("useFileManager project ownership", () => {
       resolveProjectARead = resolve;
     });
     const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/files/missing.html") && !init?.method) {
+        return Promise.resolve({ ok: false, status: 404 } as Response);
+      }
       if (url.includes("project-a") && !init?.method) return projectARead;
       if (!init?.method) {
         return Promise.resolve({
           ok: true,
-          json: async () => ({ content: "PROJECT_B" }),
+          json: async () => ({ content: "PROJECT_B", version: "b-v1" }),
         } as Response);
       }
-      return Promise.resolve({ ok: true } as Response);
+      return Promise.resolve({ ok: true, json: async () => ({ version: "a-v2" }) } as Response);
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -74,10 +77,11 @@ describe("useFileManager project ownership", () => {
 
     resolveProjectARead?.({
       ok: true,
-      json: async () => ({ content: "PROJECT_A" }),
+      json: async () => ({ content: "PROJECT_A", version: "a-v1" }),
     } as Response);
     await expect(delayedRead).resolves.toBe("PROJECT_A");
     await managerA.writeProjectFile("index.html", "A_AFTER");
+    await managerA.writeProjectFile("missing.html", "A_NEW");
     await expect(managerB.readProjectFile("index.html")).resolves.toBe("PROJECT_B");
     await expect(managerB.readOptionalProjectFile("index.html")).resolves.toBe("PROJECT_B");
 
@@ -87,6 +91,13 @@ describe("useFileManager project ownership", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project-a%2F..%2Fother%3Fx%3D1/files/index.html",
       expect.objectContaining({ method: "PUT", body: "A_AFTER" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-a%2F..%2Fother%3Fx%3D1/files/missing.html",
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-a%2F..%2Fother%3Fx%3D1/files/missing.html",
+      expect.objectContaining({ method: "PUT", body: "A_NEW" }),
     );
     expect(fetchMock).toHaveBeenCalledWith("/api/projects/project-b%23fragment/files/index.html");
     expect(fetchMock).toHaveBeenCalledWith(
