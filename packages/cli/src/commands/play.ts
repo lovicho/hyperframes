@@ -12,11 +12,17 @@ export const examples: Example[] = [
     "Open with CDP enabled (requires browser path + isolated profile)",
     "hyperframes play --browser-path /usr/bin/chromium --user-data-dir /tmp/hf-profile --remote-debugging-port 9222",
   ],
+  [
+    "Disable auto-proxying of browser-hostile video codecs (HEVC, ProRes, AV1)",
+    "hyperframes play --no-proxy",
+  ],
 ];
 import { resolve } from "node:path";
+import type { Hono } from "hono";
 import * as clack from "@clack/prompts";
 import { c } from "../ui/colors.js";
-import { resolveProject } from "../utils/project.js";
+import { resolveProject, type ProjectDir } from "../utils/project.js";
+import { resolveAutoProxy } from "../utils/projectConfig.js";
 import {
   openBrowser,
   parseRemoteDebuggingPort,
@@ -27,8 +33,22 @@ import {
   resolvePlayerPath,
   listenOnFreePort,
   injectRuntime,
+  injectMediaCodecMap,
+  buildRangeResponse,
   assetContentType,
 } from "../utils/compositionServer.js";
+import {
+  resolveProxy,
+  ProxyCapacityError,
+  ProxyTranscodeError,
+} from "@hyperframes/studio-server/proxy-transcoder";
+import {
+  decideMediaProxyEligibility,
+  isProxyVariantRequest,
+  probeAssetCodec,
+  resolveProxyVariantRequest,
+  PROXY_VARIANT_CONFIG,
+} from "@hyperframes/studio-server/media-codec-map";
 
 export default defineCommand({
   meta: { name: "play", description: "Play a composition in a lightweight browser player" },
@@ -51,6 +71,12 @@ export default defineCommand({
     "remote-debugging-port": {
       type: "string",
       description: "Chromium remote debugging port (requires --browser-path and --user-data-dir)",
+    },
+    proxy: {
+      type: "boolean",
+      description:
+        "Auto-transcode browser-hostile video codecs (HEVC, ProRes, AV1) to a cached authoring proxy for preview (default: on; overrides hyperframes.json's media.autoProxy)",
+      negativeDescription: "Disable auto-proxying of browser-hostile video codecs",
     },
   },
   async run({ args }) {
@@ -107,7 +133,6 @@ export default defineCommand({
 
     const { Hono } = await import("hono");
     const { createAdaptorServer } = await import("@hono/node-server");
-    const { isSafePath } = await import("@hyperframes/core/studio-api");
 
     const app = new Hono();
 
@@ -127,23 +152,8 @@ export default defineCommand({
       });
     });
 
-    // Serve composition files (HTML + assets)
-    app.get("/composition/*", (ctx) => {
-      const reqPath = ctx.req.path.replace("/composition/", "");
-      const filePath = resolve(project.dir, reqPath);
-
-      // Security: don't allow path traversal outside project dir. isSafePath
-      // canonicalizes symlinks and applies a trailing-separator guard, so neither
-      // an in-project symlink to an external target nor a sibling dir whose name
-      // shares the project-dir prefix (e.g. `<dir>-evil`) can escape.
-      if (!isSafePath(project.dir, filePath)) return ctx.text("Forbidden", 403);
-      if (!existsSync(filePath)) return ctx.text("Not found", 404);
-      // HTML gets the runtime injected; other assets pass through with a guessed type.
-      if (filePath.endsWith(".html")) {
-        return ctx.html(injectRuntime(readFileSync(filePath, "utf-8")));
-      }
-      return ctx.body(readFileSync(filePath), 200, { "Content-Type": assetContentType(filePath) });
-    });
+    const autoProxy = resolveAutoProxy(project.dir, args.proxy as boolean | undefined);
+    await registerCompositionRoute(app, project, autoProxy);
 
     // Main page — the player wrapper
     app.get("/", (ctx) => {
@@ -180,6 +190,85 @@ export default defineCommand({
     return new Promise<void>(() => {});
   },
 });
+
+/**
+ * Registers the `/composition/*` route: serves composition HTML (runtime +
+ * `__HF_MEDIA_CODEC_MAP__` injected) and asset files, with byte-Range support
+ * (`play` previously did a whole-file `readFileSync`, so seeking/duration
+ * probing on media elements never worked) and a `?hf-proxy=` branch that
+ * serves the alpha-aware authoring proxy for a browser-hostile video asset
+ * (per docs/plans/2026-07-14-002-feat-transparent-media-proxies-plan.md,
+ * unit U4). Exported standalone (rather than inlined in `run()`) so tests can
+ * exercise it via `app.request(...)` without booting a real HTTP listener,
+ * `clack` UI, or `openBrowser`.
+ */
+export async function registerCompositionRoute(
+  app: Hono,
+  project: ProjectDir,
+  autoProxy: boolean,
+): Promise<void> {
+  const { isSafePath } = await import("@hyperframes/core/studio-api");
+
+  // fallow-ignore-next-line complexity
+  app.get("/composition/*", async (ctx) => {
+    const reqPath = ctx.req.path.replace("/composition/", "");
+    const filePath = resolve(project.dir, reqPath);
+
+    // Security: don't allow path traversal outside project dir. isSafePath
+    // canonicalizes symlinks and applies a trailing-separator guard, so neither
+    // an in-project symlink to an external target nor a sibling dir whose name
+    // shares the project-dir prefix (e.g. `<dir>-evil`) can escape.
+    if (!isSafePath(project.dir, filePath)) return ctx.text("Forbidden", 403);
+    if (!existsSync(filePath)) return ctx.text("Not found", 404);
+
+    // HTML gets the runtime + codec-map injected; other assets pass through.
+    if (filePath.endsWith(".html")) {
+      let html = injectRuntime(readFileSync(filePath, "utf-8"));
+      if (autoProxy) {
+        html = await injectMediaCodecMap(html, project.dir, [{ html, compSrcPath: reqPath }]);
+      }
+      return ctx.html(html);
+    }
+
+    const contentType = assetContentType(filePath);
+    const proxyParam = ctx.req.query("hf-proxy");
+    if (proxyParam !== undefined && isProxyVariantRequest(proxyParam)) {
+      // Opt-out (or a non-video asset) 404s the param without attempting a
+      // transcode; a missing asset already 404'd above.
+      if (!autoProxy || !contentType.startsWith("video/")) return ctx.text("Not found", 404);
+      try {
+        const facts = await probeAssetCodec(filePath);
+        const eligibility = decideMediaProxyEligibility(facts);
+        if (!eligibility.eligible) {
+          return ctx.text(`Media proxy unavailable: ${eligibility.reason}`, 422);
+        }
+        if (!facts) return ctx.text("Media proxy unavailable: unknown_codec", 422);
+        const proxyVariant = resolveProxyVariantRequest(proxyParam, facts);
+        if (!proxyVariant) {
+          return ctx.text("Media proxy variant does not match asset", 422);
+        }
+        const proxyPath = await resolveProxy(project.dir, filePath, proxyVariant);
+        return buildRangeResponse(
+          proxyPath,
+          PROXY_VARIANT_CONFIG[proxyVariant].contentType,
+          ctx.req.header("Range"),
+        );
+      } catch (err) {
+        if (err instanceof ProxyCapacityError) {
+          return ctx.text(`Proxy transcode deferred: ${err.message}`, 503, {
+            "Retry-After": "1",
+          });
+        }
+        if (err instanceof ProxyTranscodeError) {
+          return ctx.text(`Proxy transcode failed: ${err.message}`, 502);
+        }
+        throw err;
+      }
+    }
+
+    return buildRangeResponse(filePath, contentType, ctx.req.header("Range"));
+  });
+}
 
 function buildPlayerPage(projectName: string): string {
   return `<!doctype html>

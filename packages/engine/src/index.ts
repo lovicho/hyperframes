@@ -52,7 +52,11 @@ export {
   scaleProtocolTimeoutForComposition,
   shouldClampToScreenshotForConcreteGpu,
   applyConcreteGpuScreenshotClamp,
+  resolveExtractCacheDir,
+  defaultExtractCacheDir,
+  EXTRACT_CACHE_DIR_DISABLED_ALIASES,
   type EngineConfig,
+  type ExtractCacheDirResolution,
 } from "./config.js";
 export {
   DEFAULT_VP9_CPU_USED,
@@ -120,6 +124,13 @@ export {
   type BeforeCaptureHook,
   type DiscardWarmupInnerCapture,
 } from "./services/frameCapture.js";
+export {
+  CaptureFailure,
+  classifyCaptureFailure,
+  isFatalCaptureFailure,
+  type CaptureFailureKind,
+  type CaptureWorkerDiagnostic,
+} from "./services/captureFailure.js";
 
 // ── Screenshot (BeginFrame) ─────────────────────────────────────────────────────
 export {
@@ -242,6 +253,12 @@ export {
   type RunFfmpegOptions,
   type RunFfmpegResult,
 } from "./utils/runFfmpeg.js";
+export {
+  ManagedChildProcess,
+  type ManagedChildProcessOptions,
+  type ManagedChildProcessOutcome,
+  type ManagedProcessTerminationReason,
+} from "./utils/managedChildProcess.js";
 export {
   assertConfiguredFfmpegBinariesExist,
   getFfmpegBinary,

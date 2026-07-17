@@ -420,6 +420,69 @@ export function shouldAutoDisableStreamingEncodeOnWin32Compound(opts: {
   return true;
 }
 
+/**
+ * Result of resolving the extract cache directory from the env, decoupled from
+ * the wider {@link resolveConfig} pipeline so `hyperframes doctor` (and any
+ * other diagnostic surface) can report the exact same effective value the
+ * renderer will use — including whether the user has explicitly disabled the
+ * cache via `off`/`none`/`false`/`0`.
+ *
+ * - `dir: string` + `disabled: false`  → renderer will use this directory.
+ *   `source` reports whether the value came from the env or the OS default.
+ * - `dir: undefined` + `disabled: true` → user explicitly turned caching off;
+ *   frames extract into the per-render workDir (auto-cleaned when the render
+ *   ends). `rawValue` carries the exact string the user set.
+ */
+export type ExtractCacheDirResolution =
+  | { dir: string; disabled: false; source: "env" | "default"; rawValue?: string }
+  | { dir: undefined; disabled: true; source: "env"; rawValue: string };
+
+/**
+ * Env-var values that disable the extract cache entirely. Case-insensitive;
+ * whitespace-trimmed. Kept as an exported constant so the CLI can echo the
+ * accepted alias set in `--frames-cache-dir` help text without drift.
+ */
+export const EXTRACT_CACHE_DIR_DISABLED_ALIASES: readonly string[] = ["off", "none", "false", "0"];
+
+/**
+ * Compute the default extract-cache directory when the user has NOT set
+ * `HYPERFRAMES_EXTRACT_CACHE_DIR`. Exported so downstream tests can reproduce
+ * the exact path without duplicating the uid-suffix idiom.
+ */
+export function defaultExtractCacheDir(): string {
+  return join(tmpdir(), `hyperframes-extract-cache-${process.getuid?.() ?? "u"}`);
+}
+
+/**
+ * Resolve the extract-cache directory from an environment (defaults to
+ * `process.env`). Mirrors the internal helper used by {@link resolveConfig},
+ * but returns a rich resolution object so callers can distinguish "disabled by
+ * user" from "default location" without re-parsing the env value.
+ *
+ * See {@link ExtractCacheDirResolution} for the shape and its two states.
+ */
+export function resolveExtractCacheDir(
+  env: Record<string, string | undefined> = process.env,
+): ExtractCacheDirResolution {
+  const raw = env["HYPERFRAMES_EXTRACT_CACHE_DIR"];
+  if (raw === undefined) {
+    return { dir: defaultExtractCacheDir(), disabled: false, source: "default" };
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (EXTRACT_CACHE_DIR_DISABLED_ALIASES.includes(normalized)) {
+    return { dir: undefined, disabled: true, source: "env", rawValue: raw };
+  }
+  return { dir: raw, disabled: false, source: "env", rawValue: raw };
+}
+
+function resolveExtractCacheDirFromEnv(
+  env: (key: string) => string | undefined,
+): string | undefined {
+  const raw = env("HYPERFRAMES_EXTRACT_CACHE_DIR");
+  return resolveExtractCacheDir(raw === undefined ? {} : { HYPERFRAMES_EXTRACT_CACHE_DIR: raw })
+    .dir;
+}
+
 function memoryAdaptiveCacheLimit(): number {
   const total = getSystemTotalMb();
   if (total < 4096) return 32;
@@ -473,23 +536,6 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
   const resolveStaticFrameDedup = (): boolean => {
     const raw = env("HF_STATIC_DEDUP")?.trim().toLowerCase();
     return !(raw === "false" || raw === "off" || raw === "0");
-  };
-  const resolveExtractCacheDir = (): string | undefined => {
-    const raw = env("HYPERFRAMES_EXTRACT_CACHE_DIR");
-    if (raw === undefined) {
-      return join(tmpdir(), `hyperframes-extract-cache-${process.getuid?.() ?? "u"}`);
-    }
-    const trimmed = raw.trim();
-    const normalized = trimmed.toLowerCase();
-    if (
-      normalized === "off" ||
-      normalized === "none" ||
-      normalized === "false" ||
-      normalized === "0"
-    ) {
-      return undefined;
-    }
-    return raw;
   };
 
   // Env-var layer (backward compat)
@@ -589,7 +635,7 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
     verifyRuntime: env("PRODUCER_VERIFY_HYPERFRAME_RUNTIME") !== "false",
     runtimeManifestPath: env("PRODUCER_HYPERFRAME_MANIFEST_PATH"),
 
-    extractCacheDir: resolveExtractCacheDir(),
+    extractCacheDir: resolveExtractCacheDirFromEnv(env),
     extractCacheMaxBytes:
       envNum("HYPERFRAMES_EXTRACT_CACHE_MAX_MB", DEFAULT_CONFIG.extractCacheMaxBytes / 1024 ** 2) *
       1024 ** 2,

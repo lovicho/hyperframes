@@ -488,6 +488,17 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
         label: "crypto.getRandomValues()",
         hint: "Remove time-dependent code. Use a seeded PRNG for deterministic renders.",
       },
+      {
+        pattern: /gsap\.utils\.random\s*\(/,
+        label: "gsap.utils.random()",
+        hint: "Each render worker initializes independently, so random values diverge across chunks. Use a seeded PRNG or fixed values.",
+      },
+      {
+        // GSAP string form: "random(...)" / "+=random(...)" — re-rolls at tween init.
+        pattern: /["'`](?:[+-]=)?random\(\s*[-\d[]/,
+        label: '"random(...)" tween value',
+        hint: "GSAP random string values re-roll at tween init and each render worker initializes independently. Use fixed values or precompute with a seeded PRNG.",
+      },
     ];
 
     for (const script of scripts) {
