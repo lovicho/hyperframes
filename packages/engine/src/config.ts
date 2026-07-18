@@ -317,6 +317,212 @@ export const DEFAULT_CONFIG: EngineConfig = {
   debug: false,
 };
 
+const OPTIONAL_ENGINE_CONFIG_FIELDS = [
+  "chromePath",
+  "expectedChromiumMajor",
+  "pageSideCompositingAutoDisabled",
+  "forceScreenshotExplicitlyOptedOut",
+  "streamingEncodeAutoDisabledOnWin32Compound",
+  "runtimeManifestPath",
+  "extractCacheDir",
+] as const;
+
+const BOOLEAN_ENGINE_CONFIG_FIELDS = [
+  "disableGpu",
+  "enableBrowserPool",
+  "forceScreenshot",
+  "staticFrameDedup",
+  "useDrawElement",
+  "enableDrawElementWorkerEncode",
+  "lowMemoryMode",
+  "enablePageSideCompositing",
+  "enableChunkedEncode",
+  "enableStreamingEncode",
+  "hdrAutoDetect",
+  "verifyRuntime",
+  "debug",
+] as const;
+
+const POSITIVE_NUMBER_ENGINE_CONFIG_FIELDS = [
+  "browserTimeout",
+  "protocolTimeout",
+  "chunkSizeFrames",
+  "ffmpegEncodeTimeout",
+  "ffmpegProcessTimeout",
+  "ffmpegStreamingTimeout",
+  "frameDataUriCacheLimit",
+  "frameDataUriCacheBytesLimitMb",
+  "playerReadyTimeout",
+  "renderReadyTimeout",
+  "pageNavigationTimeout",
+  "extractCacheMaxBytes",
+] as const;
+
+const ENUM_ENGINE_CONFIG_FIELDS = {
+  fps: [24, 30, 60],
+  quality: ["draft", "standard", "high"],
+  format: ["jpeg", "png"],
+  browserGpuMode: ["software", "hardware", "auto"],
+} as const;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(value))
+  );
+}
+
+function assertEngineConfigNumber(
+  config: Record<string, unknown>,
+  field: string,
+  min: number,
+  integer = false,
+): void {
+  const value = config[field];
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < min ||
+    (integer && !Number.isInteger(value))
+  ) {
+    throw new Error(
+      `Engine config ${field} must be a ${integer ? "finite integer" : "finite number"} >= ${min}`,
+    );
+  }
+}
+
+function assertPositiveEngineConfigNumber(config: Record<string, unknown>, field: string): void {
+  const value = config[field];
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Engine config ${field} must be a finite number > 0`);
+  }
+}
+
+function assertEngineConfigEnum(
+  config: Record<string, unknown>,
+  field: string,
+  values: readonly unknown[],
+): void {
+  if (!values.includes(config[field])) throw new Error(`Engine config ${field} is invalid`);
+}
+
+function validateRequiredEngineConfigFields(config: Record<string, unknown>): void {
+  const requiredFields = Object.keys(DEFAULT_CONFIG);
+  for (const field of requiredFields) {
+    if (!Object.hasOwn(config, field)) {
+      throw new Error(`Engine config snapshot is missing required field ${field}`);
+    }
+  }
+  const allowedFields = new Set([...requiredFields, ...OPTIONAL_ENGINE_CONFIG_FIELDS]);
+  for (const field of Object.keys(config)) {
+    if (!allowedFields.has(field))
+      throw new Error(`Engine config snapshot has unknown field ${field}`);
+  }
+}
+
+function validateEngineConfigScalars(config: Record<string, unknown>): void {
+  for (const [field, values] of Object.entries(ENUM_ENGINE_CONFIG_FIELDS)) {
+    assertEngineConfigEnum(config, field, values);
+  }
+  assertEngineConfigNumber(config, "jpegQuality", 0);
+  if (typeof config.jpegQuality === "number" && config.jpegQuality > 100) {
+    throw new Error("Engine config jpegQuality must be <= 100");
+  }
+}
+
+function validateEngineConfigParallelism(config: Record<string, unknown>): void {
+  if (
+    config.concurrency !== "auto" &&
+    (typeof config.concurrency !== "number" ||
+      !Number.isInteger(config.concurrency) ||
+      config.concurrency < 1)
+  ) {
+    throw new Error("Engine config concurrency must be a positive integer or auto");
+  }
+  assertPositiveEngineConfigNumber(config, "coresPerWorker");
+  for (const field of ["minParallelFrames", "largeRenderThreshold"] as const) {
+    assertEngineConfigNumber(config, field, 0, true);
+  }
+}
+
+function validateEngineConfigVp9(config: Record<string, unknown>): void {
+  if (
+    typeof config.vp9CpuUsed !== "number" ||
+    !Number.isInteger(config.vp9CpuUsed) ||
+    config.vp9CpuUsed < -8 ||
+    config.vp9CpuUsed > 8
+  ) {
+    throw new Error("Engine config vp9CpuUsed must be an integer in [-8, 8]");
+  }
+}
+
+function validateEngineConfigRuntime(config: Record<string, unknown>): void {
+  for (const field of BOOLEAN_ENGINE_CONFIG_FIELDS) {
+    if (typeof config[field] !== "boolean")
+      throw new Error(`Engine config ${field} must be a boolean`);
+  }
+  for (const field of POSITIVE_NUMBER_ENGINE_CONFIG_FIELDS) {
+    assertEngineConfigNumber(config, field, 1, field === "frameDataUriCacheLimit");
+  }
+  assertEngineConfigNumber(config, "streamingEncodeMaxDurationSeconds", 0);
+  assertEngineConfigNumber(config, "audioGain", 0);
+}
+
+function validateEngineConfigHdr(config: Record<string, unknown>): void {
+  const { hdr } = config;
+  if (
+    hdr !== false &&
+    (!isPlainObject(hdr) ||
+      Object.keys(hdr).length !== 1 ||
+      (hdr.transfer !== "hlg" && hdr.transfer !== "pq"))
+  ) {
+    throw new Error("Engine config hdr must be false or an hlg/pq transfer object");
+  }
+}
+
+function validateOptionalEngineConfigFields(config: Record<string, unknown>): void {
+  for (const field of ["chromePath", "runtimeManifestPath", "extractCacheDir"] as const) {
+    if (
+      config[field] !== undefined &&
+      (typeof config[field] !== "string" || config[field].length === 0)
+    ) {
+      throw new Error(`Engine config ${field} must be a non-empty string`);
+    }
+  }
+  if (config.expectedChromiumMajor !== undefined) {
+    assertEngineConfigNumber(config, "expectedChromiumMajor", 1, true);
+  }
+  for (const field of [
+    "pageSideCompositingAutoDisabled",
+    "forceScreenshotExplicitlyOptedOut",
+    "streamingEncodeAutoDisabledOnWin32Compound",
+  ] as const) {
+    if (config[field] !== undefined && typeof config[field] !== "boolean") {
+      throw new Error(`Engine config ${field} must be a boolean`);
+    }
+  }
+}
+
+/**
+ * Validate a complete EngineConfig crossing a JSON wire boundary.
+ *
+ * `resolveConfig()` intentionally accepts partial programmatic overrides, but
+ * a serialized render request stores a resolved snapshot. Accepting a partial
+ * snapshot would skip the orchestrator's `resolveConfig()` fallback entirely.
+ */
+export function validateEngineConfigSnapshot(value: unknown): asserts value is EngineConfig {
+  if (!isPlainObject(value)) throw new Error("Engine config snapshot must be a plain object");
+  validateRequiredEngineConfigFields(value);
+  validateEngineConfigScalars(value);
+  validateEngineConfigParallelism(value);
+  validateEngineConfigVp9(value);
+  validateEngineConfigRuntime(value);
+  validateEngineConfigHdr(value);
+  validateOptionalEngineConfigFields(value);
+}
+
 /**
  * Reference canvas area for the baseline `protocolTimeout`: 1080p. A single CDP
  * call (`Runtime.callFunctionOn` seek+paint, or `Page.captureScreenshot`)

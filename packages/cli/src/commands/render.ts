@@ -1494,6 +1494,8 @@ async function renderDocker(
       bestEffort: options.bestEffort,
       experimentalFastCapture: options.experimentalFastCapture,
       pageNavigationTimeoutMs: options.pageNavigationTimeoutMs,
+      protocolTimeoutMs: options.protocolTimeout,
+      playerReadyTimeoutMs: options.playerReadyTimeout,
     },
   });
 
@@ -1629,34 +1631,39 @@ export async function renderLocal(
     producer.createConsoleLogger?.(options.debug ? "debug" : "info") ?? createNoopProducerLogger(),
   );
 
-  const job = producer.createRenderJob({
-    fps: options.fps,
-    quality: options.quality,
-    format: options.format,
-    gifLoop: options.gifLoop,
-    workers: options.workers,
-    useGpu: options.gpu,
-    logger,
-    producerConfig: producer.resolveConfig({
-      browserGpuMode: options.browserGpuMode ?? "software",
-      ...(options.pageNavigationTimeoutMs != null
-        ? { pageNavigationTimeout: options.pageNavigationTimeoutMs }
-        : {}),
-      ...(options.protocolTimeout != null && { protocolTimeout: options.protocolTimeout }),
-      ...(options.playerReadyTimeout != null && { playerReadyTimeout: options.playerReadyTimeout }),
-      ...(options.vp9CpuUsed != null ? { vp9CpuUsed: options.vp9CpuUsed } : {}),
-    }),
-    hdrMode: options.hdrMode,
-    crf: options.crf,
-    videoBitrate: options.videoBitrate,
-    videoFrameFormat: options.videoFrameFormat,
-    variables: options.variables,
-    entryFile: options.entryFile,
-    outputResolution: options.outputResolution,
-    outputResolutionAspectAgnostic: options.outputResolutionAspectAgnostic,
-    debug: options.debug,
-    strictness: options.bestEffort === false ? "strict" : "best-effort",
+  const engineConfig = producer.resolveConfig({
+    browserGpuMode: options.browserGpuMode ?? "software",
+    ...(options.pageNavigationTimeoutMs != null
+      ? { pageNavigationTimeout: options.pageNavigationTimeoutMs }
+      : {}),
+    ...(options.protocolTimeout != null && { protocolTimeout: options.protocolTimeout }),
+    ...(options.playerReadyTimeout != null && { playerReadyTimeout: options.playerReadyTimeout }),
+    ...(options.vp9CpuUsed != null ? { vp9CpuUsed: options.vp9CpuUsed } : {}),
   });
+  const request = producer.createRenderRequest({
+    projectDir,
+    outputPath,
+    engineConfig,
+    options: {
+      fps: options.fps,
+      quality: options.quality,
+      format: options.format,
+      gifLoop: options.gifLoop,
+      workers: options.workers,
+      useGpu: options.gpu,
+      hdrMode: options.hdrMode,
+      crf: options.crf,
+      videoBitrate: options.videoBitrate,
+      videoFrameFormat: options.videoFrameFormat,
+      variables: options.variables,
+      entryFile: options.entryFile,
+      outputResolution: options.outputResolution,
+      outputResolutionAspectAgnostic: options.outputResolutionAspectAgnostic,
+      debug: options.debug,
+      strictness: options.bestEffort === false ? "strict" : "best-effort",
+    },
+  });
+  const job = producer.createRenderJob(producer.renderConfigFromRequest(request, { logger }));
 
   const onProgress = options.quiet
     ? undefined

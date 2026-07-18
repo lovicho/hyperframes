@@ -2,6 +2,8 @@
 
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
+import postcss from "postcss";
+import tailwindcss from "tailwindcss";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FlatTextLayerList, FlatTextSection } from "./propertyPanelFlatTextSection";
 import type { DomEditSelection, DomEditTextField } from "./domEditingTypes";
@@ -463,6 +465,43 @@ describe("FlatTextSection — multi-field", () => {
     const contentTextarea = host.querySelector("textarea");
     expect(contentTextarea).not.toBeNull();
     expect(document.activeElement).toBe(contentTextarea);
+
+    act(() => root.unmount());
+  });
+
+  it("keeps Content expandable and grows it with multiline text", async () => {
+    const element = makeMultiFieldElement();
+    element.textFields[0].value = "First line\nSecond line\nThird line";
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => {
+      root.render(
+        <FlatTextSection
+          element={element}
+          styles={{}}
+          fontAssets={[]}
+          onSetText={vi.fn()}
+          onSetTextFieldStyle={vi.fn()}
+          onAddTextField={vi.fn()}
+          onRemoveTextField={vi.fn()}
+        />,
+      );
+    });
+
+    const contentTextarea = host.querySelector<HTMLTextAreaElement>("textarea");
+    expect(contentTextarea?.value).toBe("First line\nSecond line\nThird line");
+    expect(contentTextarea?.classList).toContain("resize-y");
+    expect(contentTextarea?.classList).toContain("overflow-y-auto");
+
+    const compiled = await postcss([
+      tailwindcss({
+        content: [{ raw: host.innerHTML, extension: "html" }],
+        corePlugins: { preflight: false },
+      }),
+    ]).process("@tailwind utilities;", { from: undefined });
+    expect(compiled.css).toContain("field-sizing: content");
 
     act(() => root.unmount());
   });

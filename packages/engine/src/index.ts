@@ -48,6 +48,7 @@ export type {
 // ── Configuration ──────────────────────────────────────────────────────────────
 export {
   resolveConfig,
+  validateEngineConfigSnapshot,
   DEFAULT_CONFIG,
   scaleProtocolTimeoutForComposition,
   shouldClampToScreenshotForConcreteGpu,

@@ -1063,7 +1063,9 @@ hyperframes cloud list                          # browse recent renders
 
 #### `cloud render [<projectDir>]`
 
-End-to-end render: zips the project (excluding `.git`, `node_modules`, `dist`, `.next`, `coverage`, dotfiles), uploads it via `POST /v3/assets`, submits `POST /v3/hyperframes/renders`, polls `GET /v3/hyperframes/renders/{id}` until the render completes or fails, and streams the resulting video to disk.
+End-to-end render: zips the project (excluding root `renders`/`snapshots`, `.git`, `node_modules`, `dist`, `.next`, `coverage`, dotfiles, and project `.hyperframesignore` rules), uploads it through the direct-to-S3 asset flow, submits `POST /v3/hyperframes/renders`, polls `GET /v3/hyperframes/renders/{id}` until the render completes or fails, and streams the resulting video to disk.
+
+Use `hyperframes cloud render --dry-run` to inspect the compressed size and largest included files without authenticating, uploading, or starting a render. Project-specific `.hyperframesignore` rules use gitignore syntax and also apply to `hyperframes publish`; keep rules narrow because dynamically selected assets may not have obvious static references.
 
 Render parameters mirror the local `hyperframes render` UX where they overlap:
 
@@ -1080,6 +1082,7 @@ Render parameters mirror the local `hyperframes render` UX where they overlap:
 | `--strict-variables` | off | Fail when variables are undeclared or have the wrong type. |
 | `--title` | — | Free-text label echoed back in detail responses. |
 | `--output` / `-o` | `renders/<render_id>.<ext>` | Local destination for the downloaded video. |
+| `--dry-run` | off | Build and inspect a local project zip without authenticating, uploading, or rendering. |
 
 Lifecycle / control flags:
 
