@@ -47,4 +47,10 @@ describe("CLI command registration", () => {
     expect(condition).toContain('command !== "events"');
     expect(condition).toContain('command !== "skills"');
   });
+
+  it("reports each command failure only at the executable boundary", () => {
+    expect(cliSource).toContain("trackCommandFailures(load)");
+    expect(cliSource).not.toContain("trackCommandFailures(load,");
+    expect(cliSource.match(/reportCommandFailure\(command, error\)/g)).toHaveLength(1);
+  });
 });

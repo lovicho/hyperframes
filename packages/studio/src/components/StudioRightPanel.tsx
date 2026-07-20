@@ -5,7 +5,7 @@ import { CaptionPropertyPanel } from "../captions/components/CaptionPropertyPane
 import { BlockParamsPanel } from "./editor/BlockParamsPanel";
 import { RenderQueue } from "./renders/RenderQueue";
 import { SlideshowPanel } from "./panels/SlideshowPanel";
-import { VariablesPanel } from "./panels/VariablesPanel";
+import { VariablesPanel, type StudioEditPersistenceProps } from "./panels/VariablesPanel";
 import { PanelTabButton } from "./PanelTabButton";
 import { usePreviewVariablesStore } from "../hooks/previewVariablesStore";
 import type { RenderJob } from "./renders/useRenderQueue";
@@ -35,7 +35,7 @@ import type { BackgroundRemovalProgress } from "./editor/propertyPanelTypes";
 import { timelineKeysForSelections, type ToggleHiddenHandler } from "../utils/studioHelpers";
 import { useInspectorSplitResize } from "../hooks/useInspectorSplitResize";
 
-export interface StudioRightPanelProps {
+export interface StudioRightPanelProps extends StudioEditPersistenceProps {
   designPanelActive: boolean;
   activeBlockParams?: {
     blockName: string;

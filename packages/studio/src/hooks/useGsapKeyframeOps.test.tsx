@@ -25,6 +25,7 @@ function renderKeyframeOps(over: {
 }) {
   const captured: { api: HookApi | null } = { api: null };
   function Probe() {
+    // fallow-ignore-next-line code-duplication
     captured.api = useGsapKeyframeOps({
       activeCompPath: "index.html",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test doubles
