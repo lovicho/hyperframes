@@ -51,6 +51,8 @@ export interface KeyframeRetimeResult {
 const NOOP_EPSILON_PCT = 0.1;
 /** Slack (seconds) for the within-tween boundary test. */
 const EPSILON_TIME = 1e-4;
+/** Smallest authored tween window; avoids sub-millisecond/round-to-zero durations. */
+const MIN_TWEEN_DURATION = 0.01;
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
 const round1 = (n: number) => Math.round(n * 10) / 10; // 0.1% precision
@@ -65,16 +67,20 @@ function resolveFlatTweenBoundaryRetime(opts: {
   dropAbsTime: number;
 }): KeyframeRetimeResult | null {
   const { keyframeCount, draggedTweenPct, tweenStart, tweenEnd, dropAbsTime } = opts;
-  if (keyframeCount > 0 || (draggedTweenPct !== 0 && draggedTweenPct !== 100)) return null;
+  if (keyframeCount > 0) return null;
+  // Flat tweens have only synthesized boundary diamonds. Never delegate an
+  // unexpected interior percentage to the authored-keyframe move path.
+  if (draggedTweenPct !== 0 && draggedTweenPct !== 100) return { kind: "noop" };
   const draggedTime = draggedTweenPct === 0 ? tweenStart : tweenEnd;
   if (Math.abs(dropAbsTime - draggedTime) <= EPSILON_TIME) return { kind: "noop" };
   const newStart = draggedTweenPct === 0 ? dropAbsTime : tweenStart;
   const newEnd = draggedTweenPct === 100 ? dropAbsTime : tweenEnd;
-  if (newEnd <= newStart + EPSILON_TIME) return { kind: "noop" };
+  const newDuration = newEnd - newStart;
+  if (newDuration < MIN_TWEEN_DURATION) return { kind: "noop" };
   return {
     kind: "resize",
     position: round3(newStart),
-    duration: round3(newEnd - newStart),
+    duration: round3(newDuration),
     pctRemap: [],
   };
 }
@@ -127,7 +133,7 @@ export function resolveKeyframeRetime(opts: {
 
   const newStart = Math.min(dropAbsTime, tweenStart);
   const newEnd = Math.max(dropAbsTime, tweenEnd);
-  const newDuration = Math.max(0.01, newEnd - newStart);
+  const newDuration = Math.max(MIN_TWEEN_DURATION, newEnd - newStart);
 
   // The dragged keyframe is the one whose tween-% is closest to draggedTweenPct.
   let draggedIdx = 0;

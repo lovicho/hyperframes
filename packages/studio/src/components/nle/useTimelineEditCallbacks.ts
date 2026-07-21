@@ -51,9 +51,10 @@ interface TimelineCachedKeyframe {
 /**
  * Resolve a rendered timeline diamond back to the animation that authored it.
  * Flat tweens use synthesized diamonds, so a mixed flat tween may have neither
- * a property group nor real keyframes. It is safe to fall back only when that
- * flat tween is the selection's sole animation; multiple candidates remain
- * unresolved rather than retiming an arbitrary tween.
+ * a property group nor real keyframes. The cache currently carries a property
+ * group, not an animation id, so resolution is safe only when that group has a
+ * single candidate. Ambiguous candidates remain unresolved rather than
+ * retiming an arbitrary tween.
  */
 export function resolveTimelineKeyframeTarget(
   pct: number,
@@ -61,19 +62,13 @@ export function resolveTimelineKeyframeTarget(
   animations: ReadonlyArray<TimelineKeyframeTargetAnimation>,
 ): { animId: string; tweenPct: number } | null {
   const kf = keyframes.find((item) => Math.abs(item.percentage - pct) < 0.2);
+  if (!kf) return null;
   const group = kf?.propertyGroup;
-  const groupedCandidates = group
+  const candidates = group
     ? animations.filter((animation) => animation.propertyGroup === group)
-    : [];
-  const groupedKeyframed = groupedCandidates.find((animation) => animation.keyframes);
-  const soleGroupedFlat =
-    groupedCandidates.length === 1 && !groupedCandidates[0]?.keyframes
-      ? groupedCandidates[0]
-      : undefined;
-  const keyframed = animations.find((animation) => animation.keyframes);
-  const soleFlat = animations.length === 1 && !animations[0]?.keyframes ? animations[0] : undefined;
-  const animation = groupedKeyframed ?? soleGroupedFlat ?? keyframed ?? soleFlat;
-  return animation ? { animId: animation.id, tweenPct: kf?.tweenPercentage ?? pct } : null;
+    : animations.filter((animation) => !animation.propertyGroup);
+  const animation = candidates.length === 1 ? candidates[0] : undefined;
+  return animation ? { animId: animation.id, tweenPct: kf.tweenPercentage ?? pct } : null;
 }
 
 /**
@@ -197,6 +192,9 @@ export function useTimelineEditCallbacks({
               decision.pctRemap,
             );
           } else {
+            // resize-keyframed-tween requires an authored `keyframes` AST node
+            // and intentionally no-ops for a flat tween. Update its real tween
+            // window through the metadata writer (and SDK cutover path) instead.
             handleGsapUpdateMeta(target.animId, {
               position: decision.position,
               duration: decision.duration,

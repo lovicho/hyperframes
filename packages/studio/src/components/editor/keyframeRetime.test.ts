@@ -58,6 +58,29 @@ describe("resolveKeyframeRetime — move (within the tween window)", () => {
     expect(r.duration).toBe(3);
     expect(r.pctRemap).toEqual([]);
   });
+
+  it("no-ops an unexpected interior percentage on a flat tween", () => {
+    expect(
+      resolveKeyframeRetime({
+        ...WINDOW,
+        keyframes: [],
+        draggedTweenPct: 50,
+        dropAbsTime: 5,
+      }).kind,
+    ).toBe("noop");
+  });
+
+  it("no-ops instead of rounding a sub-10ms flat tween to zero", () => {
+    expect(
+      resolveKeyframeRetime({
+        tweenStart: 2,
+        tweenDuration: 4,
+        keyframes: [],
+        draggedTweenPct: 100,
+        dropAbsTime: 2.0004,
+      }).kind,
+    ).toBe("noop");
+  });
 });
 
 describe("resolveKeyframeRetime — resize (past the tween boundary)", () => {

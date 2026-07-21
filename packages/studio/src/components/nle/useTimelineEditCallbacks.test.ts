@@ -40,7 +40,37 @@ describe("resolveTimelineKeyframeTarget", () => {
     ).toBeNull();
   });
 
-  it("prefers an explicit property-group match", () => {
+  it("keeps a keyframed and flat tween in the same property group unresolved", () => {
+    expect(
+      resolveTimelineKeyframeTarget(
+        50,
+        [{ percentage: 50, tweenPercentage: 25, propertyGroup: "position" }],
+        [
+          { id: "position-keyframed", propertyGroup: "position", keyframes: {} },
+          { id: "position-flat", propertyGroup: "position" },
+        ],
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps multiple ungrouped keyframed tweens unresolved", () => {
+    expect(
+      resolveTimelineKeyframeTarget(
+        50,
+        [{ percentage: 50, tweenPercentage: 25 }],
+        [
+          { id: "ungrouped-a", keyframes: {} },
+          { id: "ungrouped-b", keyframes: {} },
+        ],
+      ),
+    ).toBeNull();
+  });
+
+  it("does not infer an animation when the rendered diamond misses the cache", () => {
+    expect(resolveTimelineKeyframeTarget(60, [], [FLAT_ANIMATION])).toBeNull();
+  });
+
+  it("resolves the sole candidate in an explicit property group", () => {
     expect(
       resolveTimelineKeyframeTarget(
         50,
