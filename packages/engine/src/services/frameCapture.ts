@@ -1716,6 +1716,53 @@ function recordSubTimelineWarning(session: CaptureSession, timeoutMs: number): v
   ]);
 }
 
+/**
+ * Runtime-mounted map-viewport markers, keyed by the CSS selector each map
+ * library stamps on its live container. Selector presence means an actual map
+ * INSTANCE is rendering in the page — not merely that a map library script
+ * loaded — which keeps false positives low (a baked map video carries none of
+ * these).
+ */
+const LIVE_MAP_MARKERS: ReadonlyArray<{ selector: string; library: string }> = [
+  { selector: ".leaflet-container", library: "Leaflet" },
+  { selector: ".maplibregl-map", library: "MapLibre GL" },
+  { selector: ".mapboxgl-map", library: "Mapbox GL" },
+  { selector: ".gm-style", library: "Google Maps" },
+  { selector: ".ol-viewport", library: "OpenLayers" },
+];
+
+/**
+ * Build the `live_map_detected` warning for the detected map libraries.
+ * A live tile map violates the deterministic-render contract (tiles are
+ * render-time network fetches): none of the readiness polls cover late-added
+ * tile images or map canvases, so frames captured before tiles arrive ship a
+ * blank/partial map with no error — the render exits success. Wild signature:
+ * PRINFRA-300 (blank hook scene, zero diagnostics, "fixed" by re-render).
+ */
+export function buildLiveMapWarning(libraries: readonly string[]): CaptureWarning {
+  return {
+    code: "live_map_detected",
+    message:
+      `Live map viewport(s) detected in the composition (${libraries.join(", ")}). ` +
+      `Map tiles load over the network at render time, which the deterministic-render ` +
+      `contract forbids — frames captured before tiles arrive ship a blank or partial map ` +
+      `with no error. Bake the map to a video first (see the motion-graphics maps skill / ` +
+      `bake-basemap.mjs) and use the baked file as the imagery layer.`,
+    details: { sources: [...libraries] },
+  };
+}
+
+/** Detect live map viewports in the page and record the warning. */
+async function recordLiveMapWarning(session: CaptureSession, page: Page): Promise<void> {
+  const libraries = (await page.evaluate(
+    (markers: ReadonlyArray<{ selector: string; library: string }>) =>
+      markers.filter((m) => document.querySelector(m.selector) !== null).map((m) => m.library),
+    LIVE_MAP_MARKERS,
+  )) as string[];
+  if (libraries.length === 0) return;
+  recordCaptureWarnings(session, [buildLiveMapWarning(libraries)]);
+}
+
 // Force every successfully-loaded `<img>` to be GPU-uploaded before the first
 // frame capture. `naturalWidth > 0` means the bitmap has been decoded into
 // CPU memory, but compositor-side GPU upload can still happen lazily on first
@@ -2002,6 +2049,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       session,
       await collectMediaReadinessWarnings(page, skipVideoIds, pageReadyTimeout),
     );
+    await recordLiveMapWarning(session, page);
 
     await recordSessionInitTelemetry(session, initStart);
 
@@ -2164,6 +2212,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     session,
     await collectMediaReadinessWarnings(page, bfSkipVideoIds, pageReadyTimeout),
   );
+  await recordLiveMapWarning(session, page);
 
   await recordSessionInitTelemetry(session, initStart);
 
