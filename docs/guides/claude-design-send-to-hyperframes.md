@@ -371,7 +371,7 @@ The cloud renderer seeks the timeline frame-by-frame. Non-deterministic or self-
 | `Date.now()`, `performance.now()` | hard-coded timing or `tl.time()` in `onUpdate` |
 | `setInterval`, `setTimeout` | timeline tweens + `onUpdate` |
 | `requestAnimationFrame` | GSAP tweens |
-| `repeat: -1` | `repeat: Math.ceil(duration / cycle) - 1` |
+| `repeat: -1` | `repeat: Math.max(0, Math.floor(duration / cycle) - 1)` |
 | `stagger: { from: "random" }` | `from: "start"`, `"center"`, or `"end"` |
 | async timeline construction | build synchronously at page load |
 | `video.play()` / `audio.play()` | the framework owns playback |
