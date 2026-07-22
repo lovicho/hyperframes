@@ -9,6 +9,7 @@ import { cpus, freemem } from "os";
 import { existsSync, mkdirSync, readdirSync } from "fs";
 import { copyFile, rename } from "fs/promises";
 import { join } from "path";
+import { getHeapStatistics } from "v8";
 
 import {
   createCaptureSession,
@@ -108,7 +109,22 @@ type WorkerBrowserPoolDecision = {
   headlessShellPath?: string;
 };
 
-const MEMORY_PER_WORKER_MB = 256;
+// System-memory budget per parallel worker. Each worker is a full Chrome
+// process (SwiftShader compositor + raster threads) plus its share of parent-
+// process frame buffering — the old 256MB figure was ~6× under a measured
+// Chrome-under-capture RSS and let memory-constrained hosts overcommit (wild
+// 16GB black-slab report; 0.7.66 heap-OOM report on 24GB with 6 auto workers).
+const MEMORY_PER_WORKER_MB = 1536;
+// Parent-process V8 heap the coordinator itself needs regardless of worker
+// count (compile artifacts, puppeteer sessions, encoder state).
+const HEAP_RESERVED_MB = 1024;
+// Parent-process V8 heap consumed per worker (protocol buffers + in-flight
+// frame buffers). Derived from the field OOM: 6 workers exhausted a ~4GB
+// default heap ⇒ >~500MB/worker + base. ponytail: advisory-only until the
+// workers_heap_* telemetry added alongside this constant validates the figure
+// — enforcing a guessed budget could silently cut worker counts fleet-wide.
+// TODO(PRINFRA-341): decide enforcement after ~2 weeks of fleet soak.
+const HEAP_PER_WORKER_MB = 640;
 const MIN_WORKERS = 1;
 const MAX_WORKER_DIAGNOSTIC_LINES = 8;
 // Hard ceiling on explicit `--workers N` requests. Above this, the cost of
@@ -229,13 +245,95 @@ export function formatWorkerFailure(result: WorkerResult): string {
   return `${base}; diagnostics: ${diagnostics}`;
 }
 
-export function calculateOptimalWorkers(
+/** Which constraint produced the final auto-sized worker count. */
+export type WorkerSizingBound =
+  | "explicit"
+  | "too_few_frames"
+  | "cpu"
+  | "memory"
+  | "frames"
+  | "max_workers"
+  | "min_parallel_floor"
+  | "contention";
+
+/**
+ * Full provenance of a worker-sizing decision. Threaded into render
+ * observability/telemetry so fleet data can answer "why N workers?" and
+ * "would the heap budget have prevented this OOM?" without a repro.
+ */
+export interface WorkerSizing {
+  workers: number;
+  boundBy: WorkerSizingBound;
+  cpuBasedWorkers: number;
+  memoryBasedWorkers: number;
+  frameBasedWorkers: number;
+  effectiveMaxWorkers: number;
+  /**
+   * ADVISORY, not enforced (see HEAP_PER_WORKER_MB): how many workers the
+   * parent process's V8 heap could feed. Compare against `workers` in
+   * telemetry to validate the budget before enforcement.
+   */
+  heapBasedWorkers: number;
+  /** V8 `heap_size_limit` for the parent process, MB. */
+  heapLimitMb: number;
+  totalMemoryMb: number;
+  cpuCount: number;
+  captureCostMultiplier: number;
+  /** true when the chosen count exceeds the advisory heap budget. */
+  exceedsHeapAdvisory: boolean;
+}
+
+/**
+ * Compute the auto worker count together with the full sizing provenance.
+ * `calculateOptimalWorkers` is the thin legacy wrapper returning `.workers`.
+ */
+// The branch count is the decision provenance itself — each if records WHICH
+// constraint bound, which is the entire point of the function.
+// fallow-ignore-next-line complexity
+export function computeWorkerSizing(
   totalFrames: number,
   requested?: number,
   config?: WorkerSizingConfig,
-): number {
+): WorkerSizing {
+  const cpuCount = cpus().length;
+  // Use total memory instead of free memory — macOS reports misleadingly low
+  // freemem() because it aggressively caches files in "inactive" memory that
+  // is immediately reclaimable.
+  const totalMemoryMb = getSystemTotalMb();
+  const heapLimitMb = Math.round(getHeapStatistics().heap_size_limit / (1024 * 1024));
+  const heapBasedWorkers = Math.max(
+    1,
+    Math.floor((heapLimitMb - HEAP_RESERVED_MB) / HEAP_PER_WORKER_MB),
+  );
+  const cpuBasedWorkers = Math.max(1, cpuCount - 2);
+  const memoryBasedWorkers = Math.max(1, Math.floor((totalMemoryMb * 0.5) / MEMORY_PER_WORKER_MB));
+  const frameBasedWorkers = Math.floor(totalFrames / MIN_FRAMES_PER_WORKER);
+  const captureCostMultiplier = Math.max(1, config?.captureCostMultiplier ?? 1);
+
+  const base = {
+    cpuBasedWorkers,
+    memoryBasedWorkers,
+    frameBasedWorkers,
+    heapBasedWorkers,
+    heapLimitMb,
+    totalMemoryMb,
+    cpuCount,
+    captureCostMultiplier,
+  };
+  const finish = (workers: number, boundBy: WorkerSizingBound, effectiveMaxWorkers: number) => ({
+    workers,
+    boundBy,
+    effectiveMaxWorkers,
+    ...base,
+    exceedsHeapAdvisory: workers > heapBasedWorkers,
+  });
+
   if (requested !== undefined) {
-    return Math.max(MIN_WORKERS, Math.min(ABSOLUTE_MAX_WORKERS, requested));
+    return finish(
+      Math.max(MIN_WORKERS, Math.min(ABSOLUTE_MAX_WORKERS, requested)),
+      "explicit",
+      ABSOLUTE_MAX_WORKERS,
+    );
   }
 
   // Resolve effective values: config overrides → DEFAULT_CONFIG fallback.
@@ -250,24 +348,22 @@ export function calculateOptimalWorkers(
   const effectiveMinParallelFrames = config?.minParallelFrames ?? DEFAULT_CONFIG.minParallelFrames;
   const effectiveLargeRenderThreshold =
     config?.largeRenderThreshold ?? DEFAULT_CONFIG.largeRenderThreshold;
-  const captureCostMultiplier = Math.max(1, config?.captureCostMultiplier ?? 1);
 
-  if (totalFrames < MIN_FRAMES_PER_WORKER * 2) return 1;
-
-  const cpuCount = cpus().length;
-  const cpuBasedWorkers = Math.max(1, cpuCount - 2);
-
-  // Use total memory instead of free memory — macOS reports misleadingly low
-  // freemem() because it aggressively caches files in "inactive" memory that
-  // is immediately reclaimable.
-  const totalMemoryMB = getSystemTotalMb();
-  const memoryBasedWorkers = Math.max(1, Math.floor((totalMemoryMB * 0.5) / MEMORY_PER_WORKER_MB));
-
-  const frameBasedWorkers = Math.floor(totalFrames / MIN_FRAMES_PER_WORKER);
+  if (totalFrames < MIN_FRAMES_PER_WORKER * 2) {
+    return finish(1, "too_few_frames", effectiveMaxWorkers);
+  }
 
   const optimal = Math.min(cpuBasedWorkers, memoryBasedWorkers, frameBasedWorkers);
+  const optimalBound: WorkerSizingBound =
+    optimal === cpuBasedWorkers ? "cpu" : optimal === memoryBasedWorkers ? "memory" : "frames";
   const minWorkersForJob = totalFrames >= effectiveMinParallelFrames ? 2 : MIN_WORKERS;
   let finalWorkers = Math.max(minWorkersForJob, Math.min(effectiveMaxWorkers, optimal));
+  let boundBy: WorkerSizingBound =
+    finalWorkers === optimal
+      ? optimalBound
+      : finalWorkers === effectiveMaxWorkers && effectiveMaxWorkers < optimal
+        ? "max_workers"
+        : "min_parallel_floor";
 
   // Adaptive scaling: cap workers for large or expensive renders to prevent
   // CPU contention. Each Chrome process (with SwiftShader) is CPU-heavy; too
@@ -284,10 +380,19 @@ export function calculateOptimalWorkers(
     const cpuScaledMax = Math.max(MIN_WORKERS, Math.floor(cpuCount / weightedCoresPerWorker));
     if (finalWorkers > cpuScaledMax) {
       finalWorkers = cpuScaledMax;
+      boundBy = "contention";
     }
   }
 
-  return finalWorkers;
+  return finish(finalWorkers, boundBy, effectiveMaxWorkers);
+}
+
+export function calculateOptimalWorkers(
+  totalFrames: number,
+  requested?: number,
+  config?: WorkerSizingConfig,
+): number {
+  return computeWorkerSizing(totalFrames, requested, config).workers;
 }
 
 export function distributeFrames(

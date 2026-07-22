@@ -149,6 +149,17 @@ export function trackRenderComplete(
     /** Authoring workflow skill that drove this render (e.g. "product-launch-video"). */
     authoringSkill?: string;
     workers?: number;
+    // Worker auto-sizing provenance (RenderPerfSummary.workerSizing). Answers
+    // "why N workers?" fleet-wide, and validates the advisory per-worker heap
+    // budget before it's enforced (field OOM: 6 auto workers on a 24GB/4GB-heap
+    // machine — see computeWorkerSizing in @hyperframes/engine).
+    workersBoundBy?: string;
+    workersCpuBased?: number;
+    workersMemoryBased?: number;
+    workersHeapBased?: number;
+    workersFrameBased?: number;
+    workersHeapLimitMb?: number;
+    workersExceedHeapAdvisory?: boolean;
     docker: boolean;
     gpu: boolean;
     // Static-frame dedup outcome (opt-out HF_STATIC_DEDUP=false). Undefined on
@@ -245,6 +256,13 @@ export function trackRenderComplete(
       quality: props.quality,
       authoring_skill: props.authoringSkill,
       workers: props.workers,
+      workers_bound_by: props.workersBoundBy,
+      workers_cpu_based: props.workersCpuBased,
+      workers_memory_based: props.workersMemoryBased,
+      workers_heap_based: props.workersHeapBased,
+      workers_frame_based: props.workersFrameBased,
+      workers_heap_limit_mb: props.workersHeapLimitMb,
+      workers_exceed_heap_advisory: props.workersExceedHeapAdvisory,
       docker: props.docker,
       gpu: props.gpu,
       static_dedup_enabled: props.staticDedupEnabled,
@@ -609,6 +627,14 @@ export function trackRenderFeedback(props: {
   renderDurationMs?: number;
   comment?: string;
   doctorSummary?: string;
+  /**
+   * Join key shared with the forwarded feedback report (Slack/backend): the
+   * same uuid rides in the report's env string as `fid=…`, so a wild report
+   * resolves to exactly one PostHog "survey sent" event and vice versa.
+   */
+  feedbackId?: string;
+  /** render_job_id values of this install's recent renders (newest last). */
+  recentRenderIds?: string[];
 }): void {
   trackEvent("survey sent", {
     $survey_id: "render_satisfaction",
@@ -617,6 +643,11 @@ export function trackRenderFeedback(props: {
     ...(props.comment ? { $survey_response_2: props.comment } : {}),
     ...(props.renderDurationMs !== undefined ? { render_duration_ms: props.renderDurationMs } : {}),
     ...(props.doctorSummary ? { doctor_summary: props.doctorSummary } : {}),
+    ...(props.feedbackId ? { feedback_id: props.feedbackId } : {}),
+    // Comma-joined: EventProperties values are scalars only.
+    ...(props.recentRenderIds?.length
+      ? { recent_render_ids: props.recentRenderIds.join(",") }
+      : {}),
   });
 }
 

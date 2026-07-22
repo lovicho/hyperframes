@@ -61,7 +61,12 @@ import {
   trackRenderObservation,
 } from "../telemetry/events.js";
 import { maybePromptRenderFeedback } from "../telemetry/feedback.js";
-import { readConfigFresh, writeConfig, type HyperframesConfig } from "../telemetry/config.js";
+import {
+  readConfigFresh,
+  recordRecentRender,
+  writeConfig,
+  type HyperframesConfig,
+} from "../telemetry/config.js";
 import { shouldTrack } from "../telemetry/client.js";
 import { renderJobObservabilityTelemetryPayload } from "../telemetry/renderObservability.js";
 import { bytesToMb } from "../telemetry/system.js";
@@ -1339,6 +1344,9 @@ function handleRenderError(
     ...renderJobObservabilityTelemetryPayload(job),
     ...getMemorySnapshot(),
   });
+  // Failed renders join the recent-renders ring too — a bug report filed via
+  // `hyperframes feedback` is MOST likely to be about a failed render.
+  if (job?.id) recordRecentRender(job.id, false);
   if (options.throwOnError) {
     throw new Error(message);
   }
@@ -1376,6 +1384,9 @@ function trackRenderMetrics(
   options: RenderOptions,
   docker: boolean,
 ): void {
+  // Successful render → recent-renders ring, so a later `hyperframes
+  // feedback` can attach this render's telemetry id to the report.
+  recordRecentRender(job.id, true);
   const perf = job.perfSummary;
   const compositionDurationMs = perf
     ? Math.round(perf.compositionDurationSeconds * 1000)
@@ -1393,6 +1404,13 @@ function trackRenderMetrics(
     fps: fpsToNumber(options.fps),
     quality: options.quality,
     workers: options.workers ?? perf?.workers,
+    workersBoundBy: perf?.workerSizing?.boundBy,
+    workersCpuBased: perf?.workerSizing?.cpuBasedWorkers,
+    workersMemoryBased: perf?.workerSizing?.memoryBasedWorkers,
+    workersHeapBased: perf?.workerSizing?.heapBasedWorkers,
+    workersFrameBased: perf?.workerSizing?.frameBasedWorkers,
+    workersHeapLimitMb: perf?.workerSizing?.heapLimitMb,
+    workersExceedHeapAdvisory: perf?.workerSizing?.exceedsHeapAdvisory,
     docker,
     gpu: options.gpu,
     authoringSkill: options.authoringSkill,

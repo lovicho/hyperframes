@@ -208,6 +208,7 @@ export type {
 // ── Parallel rendering ─────────────────────────────────────────────────────────
 export {
   calculateOptimalWorkers,
+  computeWorkerSizing,
   distributeFrames,
   distributeFramesInterleaved,
   executeParallelCapture,
@@ -215,6 +216,8 @@ export {
   getSystemResources,
   type WorkerTask,
   type WorkerResult,
+  type WorkerSizing,
+  type WorkerSizingBound,
   type ParallelProgress,
 } from "./services/parallelCoordinator.js";
 

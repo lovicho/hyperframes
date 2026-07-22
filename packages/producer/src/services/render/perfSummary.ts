@@ -4,7 +4,7 @@
  */
 
 import { fpsToNumber } from "@hyperframes/core";
-import type { CapturePerfSummary, SubTimelineWaitOutcome } from "@hyperframes/engine";
+import type { CapturePerfSummary, SubTimelineWaitOutcome, WorkerSizing } from "@hyperframes/engine";
 import type { CaptureCalibrationSample, CaptureCostEstimate } from "./captureCost.js";
 import type {
   CaptureAttemptSummary,
@@ -181,6 +181,8 @@ function aggregateBeginFrameReuse(
 export function buildRenderPerfSummary(input: {
   job: RenderJob;
   workerCount: number;
+  /** Auto-sizing provenance; undefined when a pin (htmlInCanvas / low-memory) short-circuited sizing. */
+  workerSizing?: WorkerSizing;
   enableChunkedEncode: boolean;
   chunkedEncodeSize: number;
   compositionDurationSeconds: number;
@@ -217,6 +219,7 @@ export function buildRenderPerfSummary(input: {
     fps: fpsToNumber(input.job.config.fps),
     quality: input.job.config.quality,
     workers: input.workerCount,
+    workerSizing: input.workerSizing,
     chunkedEncode: input.enableChunkedEncode,
     chunkSizeFrames: input.enableChunkedEncode ? input.chunkedEncodeSize : null,
     compositionDurationSeconds: input.compositionDurationSeconds,

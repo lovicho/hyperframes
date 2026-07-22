@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   calculateOptimalWorkers,
+  computeWorkerSizing,
   distributeFrames,
   expectedFramesForTask,
   flagSilentWorkerExits,
@@ -90,6 +91,50 @@ describe("calculateOptimalWorkers", () => {
 
   it("caps explicit worker requests at the documented 24-worker ceiling", () => {
     expect(calculateOptimalWorkers(900, 25, { concurrency: "auto" })).toBe(24);
+  });
+});
+
+describe("computeWorkerSizing", () => {
+  it("matches calculateOptimalWorkers and reports every constraint", () => {
+    const config = { concurrency: "auto" as const };
+    const sizing = computeWorkerSizing(900, undefined, config);
+    expect(sizing.workers).toBe(calculateOptimalWorkers(900, undefined, config));
+    expect(sizing.cpuBasedWorkers).toBeGreaterThanOrEqual(1);
+    expect(sizing.memoryBasedWorkers).toBeGreaterThanOrEqual(1);
+    expect(sizing.heapBasedWorkers).toBeGreaterThanOrEqual(1);
+    expect(sizing.frameBasedWorkers).toBe(30); // 900 / MIN_FRAMES_PER_WORKER(30)
+    expect(sizing.heapLimitMb).toBeGreaterThan(0);
+    expect(sizing.totalMemoryMb).toBeGreaterThan(0);
+    expect(sizing.cpuCount).toBeGreaterThan(0);
+  });
+
+  it("labels explicit requests and clamps them like the legacy wrapper", () => {
+    const sizing = computeWorkerSizing(900, 25, { concurrency: "auto" });
+    expect(sizing.workers).toBe(24);
+    expect(sizing.boundBy).toBe("explicit");
+  });
+
+  it("labels tiny renders as too_few_frames", () => {
+    const sizing = computeWorkerSizing(30, undefined, { concurrency: "auto" });
+    expect(sizing.workers).toBe(1);
+    expect(sizing.boundBy).toBe("too_few_frames");
+  });
+
+  it("labels the contention cap when high capture cost binds", () => {
+    const sizing = computeWorkerSizing(180, undefined, {
+      concurrency: 6,
+      coresPerWorker: 100,
+      minParallelFrames: 120,
+      largeRenderThreshold: 1000,
+      captureCostMultiplier: 4,
+    });
+    expect(sizing.workers).toBe(1);
+    expect(sizing.boundBy).toBe("contention");
+  });
+
+  it("flags exceedsHeapAdvisory exactly when workers exceed the heap budget", () => {
+    const sizing = computeWorkerSizing(900, 24, { concurrency: "auto" });
+    expect(sizing.exceedsHeapAdvisory).toBe(sizing.workers > sizing.heapBasedWorkers);
   });
 });
 
