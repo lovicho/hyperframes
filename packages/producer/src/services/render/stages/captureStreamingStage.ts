@@ -63,6 +63,7 @@ import {
   executeParallelCapture,
   getCapturePerfSummary,
   psnrDb,
+  resolveDeVerifyMinDb,
   recaptureDrawElementFrameForVerify,
   completeDeferredDrawElementInit,
   initializeSession,
@@ -257,14 +258,14 @@ function createDrainFrameGuard(args: {
   // check stops meaning anything); above ~60dB natural DE-vs-screenshot
   // encoder differences (~45dB+) would force a screenshot fallback on every
   // verified render. Out-of-range or malformed values fall back to 32.
-  const verifyMinDbRaw = Number(process.env.HF_DE_VERIFY_MIN_DB ?? "32");
-  const verifyMinDb =
-    Number.isFinite(verifyMinDbRaw) && verifyMinDbRaw >= 10 && verifyMinDbRaw <= 60
-      ? verifyMinDbRaw
-      : 32;
-  if (process.env.HF_DE_VERIFY_MIN_DB !== undefined && verifyMinDb !== verifyMinDbRaw) {
-    log.warn("[Render] HF_DE_VERIFY_MIN_DB out of range [10,60]; using 32", {
-      raw: process.env.HF_DE_VERIFY_MIN_DB,
+  // Single-sourced clamp (psnr.ts) so the disk and streaming verify paths can
+  // never apply different PSNR floors to the same composition. The warn stays
+  // here because only this path has a logger in scope.
+  const verifyMinDb = resolveDeVerifyMinDb();
+  const rawEnv = process.env.HF_DE_VERIFY_MIN_DB;
+  if (rawEnv !== undefined && Number(rawEnv) !== verifyMinDb) {
+    log.warn(`[Render] HF_DE_VERIFY_MIN_DB out of range [10,60]; using ${verifyMinDb}`, {
+      raw: rawEnv,
     });
   }
   const sizes: number[] = [];
