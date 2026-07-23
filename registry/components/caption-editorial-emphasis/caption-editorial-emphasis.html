@@ -586,9 +586,14 @@
           var start = blockStart(bi);
           var nextStart = bi < BLOCKS.length - 1 ? blockStart(bi + 1) : DURATION;
 
-          allEls.forEach(function (other, oi) {
-            if (oi !== bi) tl.set(other, { opacity: 0 }, start);
-          });
+          // Each block already owns its full opacity lifecycle (set 1 at its
+          // own start, then set back to 0 at its own nextStart below), and
+          // blocks occupy non-overlapping windows, so explicitly hiding every
+          // OTHER block here was redundant and made timeline construction
+          // O(blocks^2) — this collapsed under dense stress transcripts (many
+          // single-word emphasis blocks). Removed; behavior is unchanged
+          // (verified against templates.test.ts).
+
           tl.set(el, { opacity: 1 }, start);
 
           block.line1.forEach(function (pair, wi) {

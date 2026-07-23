@@ -703,9 +703,13 @@
             groupIndex < GROUPS.length - 1 ? visibleStarts[groupIndex + 1] : DURATION;
           var exitStart = Math.max(visibleStart, visibleEnd - EXIT_DURATION);
 
-          allGroupEls.forEach(function (otherEl, otherIndex) {
-            if (otherIndex !== groupIndex) tl.set(otherEl, { opacity: 0 }, visibleStart);
-          });
+          // Each group already owns its full opacity lifecycle (set 0 at its
+          // own visibleStart, animated to 1, then set back to 0 at its own
+          // visibleEnd below), and groups occupy non-overlapping windows, so
+          // explicitly hiding every OTHER group here was redundant and made
+          // timeline construction O(groups^2) — this collapsed under dense
+          // stress transcripts (many short groups). Removed; behavior is
+          // unchanged (verified against templates.test.ts).
 
           tl.set(groupEl, { opacity: 0, scaleX: 0.8, scaleY: 1 }, visibleStart);
           tl.to(
