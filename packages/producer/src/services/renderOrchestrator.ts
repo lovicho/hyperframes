@@ -109,6 +109,7 @@ import {
   createCapturePlan,
   replanAfterFailure,
   type CapturePlan,
+  type SdrDiskCapturePlan,
   type CaptureRouting,
 } from "./render/capturePlan.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
@@ -3144,34 +3145,92 @@ async function executeRenderPipeline(input: {
         if (capturePlan.kind !== "sdr_disk") {
           throw new Error(`Disk capture requires sdr_disk plan; got ${capturePlan.kind}`);
         }
-        const diskPlan = capturePlan;
         // ── Disk-based capture (original flow) ────────────────────────────
         resetCaptureAttemptProgress(job);
         const captureFrameStart = Date.now();
-        const captureRes = await observeRenderStage(
-          observability,
-          "capture_disk",
-          captureStageObservationData({ needsAlpha: diskPlan.needsAlpha }),
-          () =>
-            runCaptureStage({
-              fileServer: activeFileServer,
-              workDir,
-              framesDir,
-              job,
-              totalFrames,
-              cfg,
-              plan: diskPlan,
-              log,
-              probeSession,
-              captureAttempts,
-              dedupPerfs,
-              buildCaptureOptions,
-              createRenderVideoFrameInjector,
-              abortSignal: executionSignal,
-              assertNotAborted,
-              onProgress,
-            }),
-        );
+        const invokeDiskCapture = (diskPlan: SdrDiskCapturePlan) =>
+          observeRenderStage(
+            observability,
+            "capture_disk",
+            captureStageObservationData({ needsAlpha: diskPlan.needsAlpha }),
+            () =>
+              runCaptureStage({
+                fileServer: activeFileServer,
+                workDir,
+                framesDir,
+                job,
+                totalFrames,
+                cfg,
+                plan: diskPlan,
+                log,
+                probeSession,
+                captureAttempts,
+                dedupPerfs,
+                buildCaptureOptions,
+                createRenderVideoFrameInjector,
+                abortSignal: executionSignal,
+                assertNotAborted,
+                onProgress,
+              }),
+          );
+        let captureRes;
+        try {
+          captureRes = await invokeDiskCapture(capturePlan);
+        } catch (err) {
+          // Disk-path drawElement self-verification tripped (a parallel disk
+          // worker's sampled frame diverged from its pre-injection ground
+          // truth — reachable only under the explicit fast-capture opt-in).
+          // Same recovery contract as the streaming drain: re-render on the
+          // screenshot baseline. Anything else keeps its existing semantics.
+          if (
+            !isDrawElementVerificationError(err) ||
+            err instanceof RenderCancelledError ||
+            executionSignal?.aborted === true
+          ) {
+            throw err;
+          }
+          const verifyDetails = getDrawElementVerificationDetails(err);
+          deSelfVerifyFallback = true;
+          deFallbackReason = verifyDetails?.kind ?? "psnr";
+          deFallbackFailedDb = roundDb(verifyDetails?.failedDb);
+          deFallbackFrameIndex = verifyDetails?.frameIndex;
+          deFallbackThresholdDb = roundDb(verifyDetails?.verifyThresholdDb);
+          log.warn(
+            "[Render] drawElement self-verification failed on the parallel disk path; " +
+              "re-rendering via screenshot",
+            { error: err instanceof Error ? err.message : String(err) },
+          );
+          observability.checkpoint(
+            "capture_disk",
+            "drawElement self-verify failed; retrying with forceScreenshot",
+          );
+          // The failed attempt's frames are untrusted BUT satisfy the
+          // completeness check — wipe them so the retry re-captures everything
+          // instead of silently keeping damaged files.
+          rmSync(framesDir, { recursive: true, force: true });
+          mkdirSync(framesDir, { recursive: true });
+          resetCaptureAttemptProgress(job);
+          dedupPerfs.length = 0;
+          cfg.useDrawElement = false;
+          probeSession = null;
+          capturePlan = replanAfterFailure(capturePlan, { kind: "draw_element_verification" });
+          syncCapturePlan();
+          updateCaptureObservability({
+            forceScreenshot: capturePlan.forceScreenshot,
+            deSelfVerifyFallback,
+            deFallbackReason,
+            deFallbackFailedDb,
+            deFallbackFrameIndex,
+            deFallbackThresholdDb,
+          });
+          if (capturePlan.kind !== "sdr_disk") {
+            throw new Error(`Disk verify retry requires sdr_disk plan; got ${capturePlan.kind}`);
+          }
+          captureRes = await invokeDiskCapture(capturePlan);
+          // The first attempt's error marked the phase failed; the retry
+          // recovered it — don't brand the render as failed in telemetry.
+          observability.clearFailure("capture_disk");
+        }
         const captureFrameMs = Date.now() - captureFrameStart;
         workerCount = captureRes.workerCount;
         updateCaptureObservability({ workerCount });
