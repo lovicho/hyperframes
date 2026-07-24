@@ -5,14 +5,17 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { getFfmpegBinary } from "./ffmpegBinaries.js";
 
-const execFileP = promisify(execFile);
-
 /**
  * PSNR (average, dB) between two same-dimension encoded images via ffmpeg.
  * Infinity means bit-identical pixels. Single source of truth for every
  * drawElement self-verify comparison (streaming drain + parallel disk path).
  */
 export async function psnrDb(a: Buffer, b: Buffer): Promise<number> {
+  // promisify(execFile) lazily, not at module load: this module is in the
+  // engine's parallel-capture import chain, and a top-level call to a builtin
+  // crashes any downstream test that partially mocks node:child_process
+  // without an execFile export (vitest surfaces it as a load-time error).
+  const execFileP = promisify(execFile);
   const dir = await mkdtemp(join(tmpdir(), "hf-de-verify-"));
   try {
     const pa = join(dir, "a.jpg");
