@@ -11,12 +11,10 @@ const LUT_DIR = join(SKILL_DIR, "luts");
 const LUT_INDEX = join(LUT_DIR, "index.json");
 export const LIBRARY_LUT_OFFLINE_CODE = "MEDIA_USE_LIBRARY_LUT_OFFLINE";
 
-// Mirrored from packages/core/src/colorGrading.ts HfColorGradingPresetId.
-// Keep this list in lockstep with the core runtime contract.
-export const CORE_PRESET_IDS = [
+// Presets this released resolver can safely emit at this stack layer.
+// Effect-backed treatment presets join after their runtime support lands.
+export const RESOLVABLE_PRESET_IDS = [
   "neutral",
-  "natural-lift",
-  "fresh-pop",
   "warm-daylight",
   "clean-studio",
   "skin-soft",
@@ -26,8 +24,6 @@ export const CORE_PRESET_IDS = [
   "vintage-wash",
   "mono-clean",
   "mono-fade",
-  "warm-clean",
-  "cool-clean",
   "soft-boost",
   "bright-pop",
   "deep-contrast",
@@ -35,16 +31,25 @@ export const CORE_PRESET_IDS = [
 
 const PRESET_SYNONYMS = {
   neutral: ["neutral", "identity", "none", "ungraded", "natural base"],
-  "natural-lift": ["natural lift", "natural light", "gentle lift", "soft natural"],
-  "fresh-pop": ["fresh pop", "fresh", "bright fresh", "clean colorful"],
   "warm-daylight": [
     "warm daylight",
     "warm natural light",
     "golden daylight",
     "sunlit",
     "warm sunny",
+    "warm clean",
+    "clean warm",
+    "warm product",
   ],
-  "clean-studio": ["clean studio", "studio clean", "cool studio", "product studio"],
+  "clean-studio": [
+    "clean studio",
+    "studio clean",
+    "cool studio",
+    "product studio",
+    "cool clean",
+    "clean cool",
+    "cool crisp",
+  ],
   "skin-soft": ["skin soft", "soft skin", "portrait soft", "beauty skin"],
   "food-pop": ["food pop", "food vibrant", "appetizing", "restaurant color"],
   "night-lift": ["night lift", "night", "low light lift", "city night"],
@@ -52,15 +57,29 @@ const PRESET_SYNONYMS = {
   "vintage-wash": ["vintage wash", "vintage", "retro wash", "aged film"],
   "mono-clean": ["mono clean", "black white clean", "monochrome clean"],
   "mono-fade": ["mono fade", "black white fade", "faded monochrome"],
-  "warm-clean": ["warm clean", "clean warm", "warm product"],
-  "cool-clean": ["cool clean", "clean cool", "cool crisp"],
-  "soft-boost": ["soft boost", "soft bright", "gentle boost"],
-  "bright-pop": ["bright pop", "bright punchy", "vivid bright"],
+  "soft-boost": [
+    "soft boost",
+    "soft bright",
+    "gentle boost",
+    "natural lift",
+    "natural light",
+    "gentle lift",
+    "soft natural",
+  ],
+  "bright-pop": [
+    "bright pop",
+    "bright punchy",
+    "vivid bright",
+    "fresh pop",
+    "fresh",
+    "bright fresh",
+    "clean colorful",
+  ],
   "deep-contrast": ["deep contrast", "high contrast punchy", "punchy contrast", "bold contrast"],
 };
 
 function presetCandidates() {
-  return CORE_PRESET_IDS.map((id) => ({
+  return RESOLVABLE_PRESET_IDS.map((id) => ({
     kind: "preset",
     preset: id,
     synonyms: PRESET_SYNONYMS[id] ?? [],

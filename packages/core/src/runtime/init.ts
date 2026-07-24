@@ -1793,8 +1793,10 @@ export function initSandboxRuntimeModular(): void {
   const dataHiddenDisplayRestores = new WeakMap<HTMLElement, string>();
   const dataHiddenDisplayNodes = new WeakSet<HTMLElement>();
 
-  const syncTimedElementVisibility = (currentTime: number) => {
-    const visibilityNodes = Array.from(document.querySelectorAll("[data-start]"));
+  const syncTimedElementVisibility = (
+    currentTime: number,
+    visibilityNodes: Element[] = Array.from(document.querySelectorAll("[data-start]")),
+  ) => {
     const rootComp = resolveRootCompositionElement();
     for (const rawNode of visibilityNodes) {
       if (!(rawNode instanceof HTMLElement)) continue;
@@ -2174,6 +2176,10 @@ export function initSandboxRuntimeModular(): void {
   });
   picker.installPickerApi();
 
+  syncTimedElementVisibility(
+    state.currentTime,
+    Array.from(document.querySelectorAll("video[data-start], img[data-start]")),
+  );
   const colorGrading = createColorGradingRuntime();
   colorGradingRuntime = colorGrading;
   registerRuntimeCleanup(() => {
@@ -2838,6 +2844,9 @@ export function initSandboxRuntimeModular(): void {
       // affected — the seek runs whenever the clock is playing.
       if (clock.isPlaying() || !hasActiveStudioManualEditGesture()) {
         seekTimelineAndAdapters(t);
+      }
+      if (clock.isPlaying()) {
+        colorGrading.redrawAnimated();
       }
 
       // Looping is handled at the player layer (<hyperframes-player>),
