@@ -123,6 +123,20 @@ vi.mock("../telemetry/config.js", () => ({
     configState.cache = { ...configState.disk };
     return { ...configState.disk };
   }),
+  recordRecentRender: vi.fn((id: string, ok: boolean) => {
+    // Mirrors the real ring update (readConfigFresh → append, cap 5 → write)
+    // against the mock's disk state, so a render's recent-renders write is
+    // modeled like every other config mutation here. Fixed timestamp keeps it
+    // deterministic (tests never assert on `at`).
+    const disk = configState.disk as Record<string, unknown>;
+    const ring = [
+      ...((disk.recentRenders as unknown[]) ?? []),
+      { id, at: "2026-01-01T00:00:00Z", ok },
+    ];
+    const next = { ...disk, recentRenders: ring.slice(-5) };
+    configState.disk = next;
+    configState.cache = { ...next };
+  }),
   writeConfig: vi.fn((config: Record<string, unknown>) => {
     configState.writeConfigCalls.push({ ...config });
     if (configState.failWrites > 0) {

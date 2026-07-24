@@ -6,6 +6,7 @@ import {
   expectedFramesForTask,
   flagSilentWorkerExits,
   formatWorkerFailure,
+  selectVerifySampleIndicesForTask,
   selectWorkerDiagnostics,
   shouldDisableBrowserPoolForParallelWorker,
   shouldVerifyWorkerGpu,
@@ -346,6 +347,35 @@ describe("flagSilentWorkerExits", () => {
     ];
     flagSilentWorkerExits(results);
     expect(results[0]?.error).toBe("Protocol error (Page.captureScreenshot): Target closed");
+  });
+});
+
+describe("selectVerifySampleIndicesForTask", () => {
+  it("keeps only samples inside the task's contiguous range, sorted", () => {
+    // 2-worker split of 3032 frames: worker 1 owns [1516, 3032).
+    expect(
+      selectVerifySampleIndicesForTask([2274, 758, 1516, 3031, 3032], {
+        startFrame: 1516,
+        endFrame: 3032,
+      }),
+    ).toEqual([1516, 2274, 3031]);
+  });
+
+  it("respects the stride lattice for interleaved tasks", () => {
+    // Worker 1 of a 3-way interleave over [1, 30): captures 1, 4, 7, ...
+    expect(
+      selectVerifySampleIndicesForTask([1, 2, 4, 6, 7, 28, 29], {
+        startFrame: 1,
+        endFrame: 30,
+        frameStride: 3,
+      }),
+    ).toEqual([1, 4, 7, 28]);
+  });
+
+  it("returns empty when no samples fall in the range", () => {
+    expect(
+      selectVerifySampleIndicesForTask([0, 10, 20], { startFrame: 100, endFrame: 200 }),
+    ).toEqual([]);
   });
 });
 

@@ -7,7 +7,7 @@
 
 import { cpus, freemem } from "os";
 import { existsSync, mkdirSync, readdirSync } from "fs";
-import { copyFile, rename } from "fs/promises";
+import { copyFile, readFile, rename } from "fs/promises";
 import { join } from "path";
 import { getHeapStatistics } from "v8";
 
@@ -19,11 +19,13 @@ import {
   captureFrameToBufferPipelined,
   captureFrameToBuffer,
   getCapturePerfSummary,
+  DrawElementVerificationError,
   type CaptureSession,
   type CaptureOptions,
   type CapturePerfSummary,
   type BeforeCaptureHook,
 } from "./frameCapture.js";
+import { psnrDb, resolveDeVerifyMinDb } from "../utils/psnr.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { assertSwiftShader } from "../utils/assertSwiftShader.js";
 import { readWebGlVendorInfoFromCanvas } from "../utils/readWebGlVendorInfoFromCanvas.js";
@@ -551,6 +553,126 @@ async function captureFrameRange(
   return framesCaptured;
 }
 
+/**
+ * The armed self-verify sample indices this task actually captured: inside
+ * `[startFrame, endFrame)` and on the task's stride lattice. Mirrors the
+ * capture loop in `captureFrameRange` (`i += stride` from `startFrame`).
+ */
+export function selectVerifySampleIndicesForTask(
+  sampleIndices: Iterable<number>,
+  task: Pick<WorkerTask, "startFrame" | "endFrame" | "frameStride">,
+): number[] {
+  const stride = task.frameStride ?? 1;
+  const selected: number[] = [];
+  for (const idx of sampleIndices) {
+    if (idx < task.startFrame || idx >= task.endFrame) continue;
+    if ((idx - task.startFrame) % stride !== 0) continue;
+    selected.push(idx);
+  }
+  return selected.sort((a, b) => a - b);
+}
+
+/**
+ * Disk-path drawElement self-verification (PRINFRA-352). Parallel DISK
+ * workers arm the same pre-injection ground-truth samples as the streaming
+ * path (`resolveParallelDeVerifySamples` even raises the density for
+ * multi-worker capture) — but only the streaming drain ever CHECKED them,
+ * so an explicit `--experimental-fast-capture --workers N` render shipped
+ * unverified drawElement frames. On a 16GB host, two concurrent
+ * hardware-GPU Chrome instances hit the documented compositor-tile-eviction
+ * damage class (frames displaced into vertical strips for one worker's
+ * whole range — reads as "corruption from the exact worker boundary").
+ *
+ * After a worker's range completes, re-read its captured files for the
+ * sampled indices and PSNR-compare against the session's ground truth.
+ * A breach throws `DrawElementVerificationError`, which the orchestrator's
+ * existing pinned-fallback retry converts into a screenshot re-render —
+ * the same recovery the streaming drain gets.
+ */
+/** HF_DE_PAR_DEBUG=1 gated per-worker trace line (message built lazily). */
+function logParDebug(message: () => string): void {
+  if (process.env.HF_DE_PAR_DEBUG === "1") console.log(message());
+}
+
+/**
+ * Throw the verification error for a sample below the PSNR floor; log the
+ * pass otherwise. Split from the sampling loop for the complexity gate.
+ */
+function assertDiskSampleAboveFloor(
+  db: number,
+  verifyMinDb: number,
+  idx: number,
+  workerId: number,
+): void {
+  if (db < verifyMinDb) {
+    // Message keeps the contiguous "drawElement self-verify" phrase —
+    // captureFailure's VERIFICATION_ERROR_PATTERNS classifies on it.
+    throw new DrawElementVerificationError(
+      `drawElement self-verify failed at frame ${idx} (disk path, worker ${workerId}): ` +
+        `${db.toFixed(1)}dB < ${verifyMinDb}dB vs pre-injection screenshot`,
+      { kind: "psnr", frameIndex: idx, failedDb: db, verifyThresholdDb: verifyMinDb },
+    );
+  }
+  console.log(
+    `[Parallel] drawElement disk self-verify passed (worker ${workerId}, frame ${idx}, ` +
+      `${db === Infinity ? "inf" : db.toFixed(1)}dB)`,
+  );
+}
+
+/**
+ * Compare one captured frame file against its ground truth. Returns the
+ * PSNR, or null on infrastructure failure (missing file already surfaces
+ * via the frame completeness check; ffmpeg spawn/tmpdir here) — a skipped
+ * sample is not damage evidence and must not fail the capture.
+ */
+async function psnrForDiskSample(
+  framePath: string,
+  truth: Buffer,
+  workerId: number,
+  idx: number,
+): Promise<number | null> {
+  try {
+    return await psnrDb(await readFile(framePath), truth);
+  } catch (err) {
+    console.warn(
+      `[Parallel] drawElement disk self-verify sample skipped (worker ${workerId}, ` +
+        `frame ${idx}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+// Branches are the gate conditions themselves (mode/armed/streaming guards +
+// per-sample skip/breach) — already decomposed into psnrForDiskSample +
+// assertDiskSampleAboveFloor; further splitting obscures the check.
+// fallow-ignore-next-line complexity
+export async function verifyDiskDrawElementSamples(
+  session: CaptureSession,
+  task: WorkerTask,
+  streaming: boolean,
+): Promise<void> {
+  // Streaming capture verifies every sampled frame in the drain guard already.
+  if (streaming || session.captureMode !== "drawelement") return;
+  const truths = session.deVerifyFrames;
+  if (!truths || truths.size === 0) return;
+  const verifyMinDb = resolveDeVerifyMinDb();
+  const ext = session.options.format === "png" ? "png" : "jpg";
+  const offset = task.outputFrameOffset ?? 0;
+  for (const idx of selectVerifySampleIndicesForTask(truths.keys(), task)) {
+    const truth = truths.get(idx);
+    if (!truth) continue;
+    const framePath = join(task.outputDir, `frame_${String(idx - offset).padStart(6, "0")}.${ext}`);
+    const db = await psnrForDiskSample(framePath, truth, task.workerId, idx);
+    if (db === null) continue;
+    assertDiskSampleAboveFloor(db, verifyMinDb, idx, task.workerId);
+  }
+}
+
+// Inherited worker-lifecycle shape (session create → verify GPU → init →
+// capture → self-verify → perf, with a classifying catch + closing finally);
+// flagged only because the disk self-verify call shifted its line range into
+// the changed-code audit. Not restructured by this PR.
+// fallow-ignore-next-line complexity
 async function executeWorkerTask(
   task: WorkerTask,
   serverUrl: string,
@@ -590,19 +712,16 @@ async function executeWorkerTask(
       createBeforeCaptureHook(),
       workerConfig,
     );
-    if (process.env.HF_DE_PAR_DEBUG === "1") {
-      console.log(`[par:w${task.workerId}] session created`);
-    }
+    logParDebug(() => `[par:w${task.workerId}] session created`);
     // Worker-0-only SwiftShader assertion — see `shouldVerifyWorkerGpu` and #955.
     if (shouldVerifyWorkerGpu(task.workerId, workerConfig)) {
       await assertSwiftShader(session.page, readWebGlVendorInfoFromCanvas);
     }
     await initializeSession(session);
-    if (process.env.HF_DE_PAR_DEBUG === "1") {
-      console.log(
-        `[par:w${task.workerId}] init done (mode=${session.captureMode} workerEncode=${session.workerEncodeEnabled === true})`,
-      );
-    }
+    logParDebug(
+      () =>
+        `[par:w${task.workerId}] init done (mode=${session?.captureMode} workerEncode=${session?.workerEncodeEnabled === true})`,
+    );
     framesCaptured = await captureFrameRange(
       session,
       task,
@@ -611,6 +730,8 @@ async function executeWorkerTask(
       onFrameCaptured,
       onFrameBuffer,
     );
+
+    await verifyDiskDrawElementSamples(session, task, Boolean(onFrameBuffer));
 
     perf = getCapturePerfSummary(session);
     return {

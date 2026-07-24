@@ -109,6 +109,7 @@ import {
   createCapturePlan,
   replanAfterFailure,
   type CapturePlan,
+  type SdrDiskCapturePlan,
   type CaptureRouting,
 } from "./render/capturePlan.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
@@ -1017,6 +1018,20 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
       if (failure.kind === "cancelled") {
         throw error;
       }
+      // A drawElement self-verify breach (a parallel disk worker's sampled
+      // frame diverged from its pre-injection ground truth) is a CORRECTNESS
+      // failure, not a missing-frame one: the damaged frames are written
+      // complete to disk, so the presence/size-only findMissingFrameRanges
+      // below would count them present and wrongly return success — shipping
+      // the exact compositor damage this verify exists to catch. Rethrow so
+      // the orchestrator's disk-stage screenshot retry fires (mirrors the
+      // `cancelled` guard; a worker-halving retry here would only re-run
+      // drawElement and re-damage). Structural detection walks the aggregated
+      // CaptureFailure → worker CaptureFailure → DrawElementVerificationError
+      // cause chain.
+      if (isDrawElementVerificationError(error)) {
+        throw error;
+      }
       const remaining = findMissingFrameRanges(
         options.totalFrames,
         options.framesDir,
@@ -1454,6 +1469,31 @@ export function shouldRetryViaPinnedFallback(args: {
 }
 
 /**
+ * When a self-verify (or pinned-fallback) retry is triggered mid-capture, the
+ * caller may still hold a live probe session that the failed stage was passed
+ * but did not (or could not) close in its own `finally` before it threw. Left
+ * behind, that session's Chrome process orphans until the containing render
+ * exits — precisely when we are recovering from GPU/memory pressure and can
+ * least afford an unaccounted Chrome. Close it before the caller clears its
+ * reference; swallow any close error with a warn so the retry itself is never
+ * derailed by a shutdown hiccup.
+ */
+export async function closeOrphanedProbeForRetry(
+  probe: CaptureSession,
+  closer: (session: CaptureSession) => Promise<void>,
+  log: Pick<ProducerLogger, "warn">,
+  retryContext: string,
+): Promise<void> {
+  try {
+    await closer(probe);
+  } catch (closeErr) {
+    log.warn(`[Render] probe close before ${retryContext} retry failed; continuing with retry`, {
+      error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+    });
+  }
+}
+
+/**
  * Parallel-streaming router for NON-drawElement capture (screenshot on
  * macOS/Windows/forced-screenshot, BeginFrame on Linux): should this
  * multi-worker render stream captured frame buffers straight into the single
@@ -1557,6 +1597,29 @@ export function extractStandaloneEntryFromIndex(
   replaceBodyWithRenderClone(body, renderClone);
 
   return document.toString();
+}
+
+/**
+ * Telemetry fields a drawElement self-verify failure contributes to the
+ * fallback record. Shared by the streaming and parallel-disk verify catches
+ * so the `verifyDetails` → `de_fallback_*` mapping lives in one place — a new
+ * field is added once, not once per capture path. `kind` is read structurally
+ * off the error (never from message text), so a reworded/translated/
+ * cross-module-serialized error can't flip "blank" into "psnr".
+ */
+function deVerifyFallbackTelemetry(err: unknown): {
+  reason: "psnr" | "blank";
+  failedDb?: number;
+  frameIndex?: number;
+  thresholdDb?: number;
+} {
+  const details = getDrawElementVerificationDetails(err);
+  return {
+    reason: details?.kind ?? "psnr",
+    failedDb: roundDb(details?.failedDb),
+    frameIndex: details?.frameIndex,
+    thresholdDb: roundDb(details?.verifyThresholdDb),
+  };
 }
 
 /**
@@ -3011,20 +3074,14 @@ async function executeRenderPipeline(input: {
             throw err;
           const isMemoryExhaustion = !isVerifyError && isMemoryExhaustionError(err);
           deSelfVerifyFallback = isVerifyError;
-          // `kind` is a structural field on the error (DrawElementVerificationDetails),
-          // never derived from message text — a reworded message, a translated
-          // string, or a cross-module/serialized error must never be able to
-          // flip "blank" into "psnr" or vice versa (review finding).
-          const verifyDetails = isVerifyError ? getDrawElementVerificationDetails(err) : undefined;
-          deFallbackReason = isVerifyError
-            ? (verifyDetails?.kind ?? "psnr")
-            : isMemoryExhaustion
-              ? "oom"
-              : "capture_error";
           if (isVerifyError) {
-            deFallbackFailedDb = roundDb(verifyDetails?.failedDb);
-            deFallbackFrameIndex = verifyDetails?.frameIndex;
-            deFallbackThresholdDb = roundDb(verifyDetails?.verifyThresholdDb);
+            const t = deVerifyFallbackTelemetry(err);
+            deFallbackReason = t.reason;
+            deFallbackFailedDb = t.failedDb;
+            deFallbackFrameIndex = t.frameIndex;
+            deFallbackThresholdDb = t.thresholdDb;
+          } else {
+            deFallbackReason = isMemoryExhaustion ? "oom" : "capture_error";
           }
           log.warn(
             isVerifyError
@@ -3058,7 +3115,16 @@ async function executeRenderPipeline(input: {
             deWorkerInversion,
             deParallelRouter,
           });
-          probeSession = null;
+          // Streaming stage aims to close the probe in its own finally; if it
+          // threw before doing so, the Chrome process would orphan through the
+          // pinned-fallback retry. Close defensively before we release the
+          // reference — see closeOrphanedProbeForRetry.
+          if (probeSession) {
+            lastBrowserConsole = probeSession.browserConsoleBuffer;
+            const orphaned = probeSession;
+            probeSession = null;
+            await closeOrphanedProbeForRetry(orphaned, closeCaptureSession, log, "streaming");
+          }
           if (failedRouting === "worker_inversion") {
             // The inversion bet on drawElement and lost — re-render on the
             // pre-inversion parallel screenshot path instead of single-worker
@@ -3144,34 +3210,102 @@ async function executeRenderPipeline(input: {
         if (capturePlan.kind !== "sdr_disk") {
           throw new Error(`Disk capture requires sdr_disk plan; got ${capturePlan.kind}`);
         }
-        const diskPlan = capturePlan;
         // ── Disk-based capture (original flow) ────────────────────────────
         resetCaptureAttemptProgress(job);
         const captureFrameStart = Date.now();
-        const captureRes = await observeRenderStage(
-          observability,
-          "capture_disk",
-          captureStageObservationData({ needsAlpha: diskPlan.needsAlpha }),
-          () =>
-            runCaptureStage({
-              fileServer: activeFileServer,
-              workDir,
-              framesDir,
-              job,
-              totalFrames,
-              cfg,
-              plan: diskPlan,
-              log,
-              probeSession,
-              captureAttempts,
-              dedupPerfs,
-              buildCaptureOptions,
-              createRenderVideoFrameInjector,
-              abortSignal: executionSignal,
-              assertNotAborted,
-              onProgress,
-            }),
-        );
+        const invokeDiskCapture = (diskPlan: SdrDiskCapturePlan) =>
+          observeRenderStage(
+            observability,
+            "capture_disk",
+            captureStageObservationData({ needsAlpha: diskPlan.needsAlpha }),
+            () =>
+              runCaptureStage({
+                fileServer: activeFileServer,
+                workDir,
+                framesDir,
+                job,
+                totalFrames,
+                cfg,
+                plan: diskPlan,
+                log,
+                probeSession,
+                captureAttempts,
+                dedupPerfs,
+                buildCaptureOptions,
+                createRenderVideoFrameInjector,
+                abortSignal: executionSignal,
+                assertNotAborted,
+                onProgress,
+              }),
+          );
+        let captureRes;
+        try {
+          captureRes = await invokeDiskCapture(capturePlan);
+        } catch (err) {
+          // Disk-path drawElement self-verification tripped (a parallel disk
+          // worker's sampled frame diverged from its pre-injection ground
+          // truth — reachable only under the explicit fast-capture opt-in).
+          // Same recovery contract as the streaming drain: re-render on the
+          // screenshot baseline. Anything else keeps its existing semantics.
+          if (
+            !isDrawElementVerificationError(err) ||
+            err instanceof RenderCancelledError ||
+            executionSignal?.aborted === true
+          ) {
+            throw err;
+          }
+          deSelfVerifyFallback = true;
+          const t = deVerifyFallbackTelemetry(err);
+          deFallbackReason = t.reason;
+          deFallbackFailedDb = t.failedDb;
+          deFallbackFrameIndex = t.frameIndex;
+          deFallbackThresholdDb = t.thresholdDb;
+          log.warn(
+            "[Render] drawElement self-verification failed on the parallel disk path; " +
+              "re-rendering via screenshot",
+            { error: err instanceof Error ? err.message : String(err) },
+          );
+          observability.checkpoint(
+            "capture_disk",
+            "drawElement self-verify failed; retrying with forceScreenshot",
+          );
+          // The failed attempt's frames are untrusted BUT satisfy the
+          // completeness check — wipe them so the retry re-captures everything
+          // instead of silently keeping damaged files.
+          rmSync(framesDir, { recursive: true, force: true });
+          mkdirSync(framesDir, { recursive: true });
+          resetCaptureAttemptProgress(job);
+          dedupPerfs.length = 0;
+          cfg.useDrawElement = false;
+          // Same shape as the streaming retry above: `runCaptureStage` was
+          // passed the probe and threw before it could close it, so we must
+          // release the Chrome process ourselves before starting the
+          // screenshot-baseline retry — otherwise it orphans until render
+          // exit. See closeOrphanedProbeForRetry.
+          if (probeSession) {
+            lastBrowserConsole = probeSession.browserConsoleBuffer;
+            const orphaned = probeSession;
+            probeSession = null;
+            await closeOrphanedProbeForRetry(orphaned, closeCaptureSession, log, "disk verify");
+          }
+          capturePlan = replanAfterFailure(capturePlan, { kind: "draw_element_verification" });
+          syncCapturePlan();
+          updateCaptureObservability({
+            forceScreenshot: capturePlan.forceScreenshot,
+            deSelfVerifyFallback,
+            deFallbackReason,
+            deFallbackFailedDb,
+            deFallbackFrameIndex,
+            deFallbackThresholdDb,
+          });
+          if (capturePlan.kind !== "sdr_disk") {
+            throw new Error(`Disk verify retry requires sdr_disk plan; got ${capturePlan.kind}`);
+          }
+          captureRes = await invokeDiskCapture(capturePlan);
+          // The first attempt's error marked the phase failed; the retry
+          // recovered it — don't brand the render as failed in telemetry.
+          observability.clearFailure("capture_disk");
+        }
         const captureFrameMs = Date.now() - captureFrameStart;
         workerCount = captureRes.workerCount;
         updateCaptureObservability({ workerCount });
