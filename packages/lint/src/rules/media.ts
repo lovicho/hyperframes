@@ -1,5 +1,6 @@
 import type { LintContext, HyperframeLintFinding } from "../context";
 import { readAttr, readDecodedAttr, truncateSnippet, isMediaTag } from "../utils";
+import { validateColorGradingContract } from "@hyperframes/parsers/color-grading-contract";
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -243,6 +244,59 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
           `${tagName} src=${src} data-start=${dataStart} data-duration=${dataDuration}`,
         ),
       });
+    }
+    return findings;
+  },
+
+  // color_grading_* — grading is a structured media-only contract. Unknown
+  // keys are ignored by the runtime, so catch them before an agent can report
+  // controls that never actually rendered.
+  ({ tags }) => {
+    const findings: HyperframeLintFinding[] = [];
+    for (const tag of tags) {
+      const raw = readDecodedAttr(tag.raw, "data-color-grading");
+      if (raw === null) continue;
+      const elementId = readAttr(tag.raw, "id") || undefined;
+      const report = (code: string, message: string, fixHint: string) => {
+        findings.push({
+          code,
+          severity: "error",
+          message,
+          elementId,
+          fixHint,
+          snippet: truncateSnippet(tag.raw),
+        });
+      };
+      if (tag.name !== "video" && tag.name !== "img") {
+        report(
+          "color_grading_non_media",
+          `data-color-grading on <${tag.name}> has no effect. The shader runtime only grades real <video> and <img> elements.`,
+          "Move the grading attribute to the real <video> or <img> media element. Do not attach it to a wrapper or CSS background.",
+        );
+        continue;
+      }
+
+      const trimmed = raw.trim();
+      if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        report(
+          "color_grading_invalid_json",
+          "data-color-grading contains malformed JSON and will not render.",
+          'Use valid JSON, for example {"preset":"skin-soft","intensity":0.6,"adjust":{"highlights":-0.08}}.',
+        );
+        continue;
+      }
+      for (const issue of validateColorGradingContract(parsed)) {
+        report(
+          "color_grading_invalid_structure",
+          `data-color-grading ${issue.path} ${issue.message}.`,
+          issue.hint ??
+            "Use the documented media-treatment contract and correct or remove the invalid value.",
+        );
+      }
     }
     return findings;
   },

@@ -139,6 +139,20 @@ export function isColorGradingVariableRef(value: unknown): value is string {
   return typeof value === "string" && VARIABLE_REF.test(value.trim());
 }
 
+function unknownKeysHint(path: string, unknown: readonly string[]): string {
+  if (path !== "grading") return `Correct or remove the unsupported "${path}" keys.`;
+  const sections = new Set(
+    unknown.flatMap((key) =>
+      OBJECT_SECTIONS.filter(([, keys]) => (keys as readonly string[]).includes(key)).map(
+        ([section]) => section,
+      ),
+    ),
+  );
+  return sections.size === 1
+    ? `Move those controls under "${[...sections][0]}".`
+    : "Use only the documented media-treatment keys at the top level.";
+}
+
 function validateObject(
   value: unknown,
   path: string,
@@ -153,7 +167,11 @@ function validateObject(
   const allowed = new Set(keys);
   const unknown = Object.keys(value).filter((key) => !allowed.has(key));
   if (unknown.length > 0) {
-    issues.push({ path, message: `has unsupported key(s): ${unknown.join(", ")}` });
+    issues.push({
+      path,
+      message: `has unsupported key(s): ${unknown.join(", ")}`,
+      hint: unknownKeysHint(path, unknown),
+    });
   }
   return value;
 }
@@ -192,13 +210,19 @@ function validateNumericSection(
 
 function validatePalette(value: unknown, issues: ColorGradingContractIssue[]): void {
   if (value === undefined || value === null || isColorGradingVariableRef(value)) return;
+  const hint =
+    'Use 2 to 6 colors in the intended mapping order, each written as exact "#RRGGBB", or use a project variable reference.';
   if (!Array.isArray(value) || value.length < 2 || value.length > 6) {
-    issues.push({ path: "palette", message: "must contain 2 to 6 hex colors" });
+    issues.push({ path: "palette", message: "must contain 2 to 6 hex colors", hint });
     return;
   }
   value.forEach((color, index) => {
     if (typeof color !== "string" || !PALETTE_COLOR.test(color)) {
-      issues.push({ path: `palette[${index}]`, message: "must be a six-digit hex color" });
+      issues.push({
+        path: `palette[${index}]`,
+        message: "must be a six-digit hex color",
+        hint,
+      });
     }
   });
 }
