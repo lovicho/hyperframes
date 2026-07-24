@@ -5,15 +5,15 @@ describe("patchMediaColorGradingInHtml", () => {
   it("adds color grading to video and image tags only", () => {
     const { html, count } = patchMediaColorGradingInHtml(
       `<div><video id="v"></video><img id="i" /><audio id="a"></audio></div>`,
-      `{"preset":"natural-lift"}`,
+      `{"preset":"warm-daylight"}`,
     );
 
     expect(count).toBe(2);
     expect(html).toContain(
-      `video id="v" data-color-grading="{&quot;preset&quot;:&quot;natural-lift&quot;}"`,
+      `video id="v" data-color-grading="{&quot;preset&quot;:&quot;warm-daylight&quot;}"`,
     );
     expect(html).toContain(
-      `img id="i" data-color-grading="{&quot;preset&quot;:&quot;natural-lift&quot;}"`,
+      `img id="i" data-color-grading="{&quot;preset&quot;:&quot;warm-daylight&quot;}"`,
     );
     expect(html).toContain(`<audio id="a"></audio>`);
   });
