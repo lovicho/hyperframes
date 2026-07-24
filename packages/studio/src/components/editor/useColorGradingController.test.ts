@@ -7,15 +7,15 @@ import { normalizeHfColorGrading } from "@hyperframes/core/color-grading";
 import { useColorGradingController } from "./useColorGradingController";
 import type { DomEditSelection } from "./domEditing";
 
-function freshPopGrading() {
-  const next = normalizeHfColorGrading({ preset: "fresh-pop", intensity: 1 });
-  if (!next) throw new Error("expected fresh-pop preset to normalize");
+function brightPopGrading() {
+  const next = normalizeHfColorGrading({ preset: "bright-pop", intensity: 1 });
+  if (!next) throw new Error("expected bright-pop preset to normalize");
   return next;
 }
 
-function naturalLiftGrading() {
-  const next = normalizeHfColorGrading({ preset: "natural-lift", intensity: 1 });
-  if (!next) throw new Error("expected natural-lift preset to normalize");
+function warmDaylightGrading() {
+  const next = normalizeHfColorGrading({ preset: "warm-daylight", intensity: 1 });
+  if (!next) throw new Error("expected warm-daylight preset to normalize");
   return next;
 }
 
@@ -120,9 +120,9 @@ describe("useColorGradingController", () => {
     const onSetAttributeLive = vi.fn();
     const { root, getState } = renderHook(onSetAttributeLive);
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
-    expect(getState().grading.preset).toBe("fresh-pop");
+    expect(getState().grading.preset).toBe("bright-pop");
     expect(onSetAttributeLive).not.toHaveBeenCalled();
     act(() => {
       vi.advanceTimersByTime(400);
@@ -130,7 +130,7 @@ describe("useColorGradingController", () => {
     expect(onSetAttributeLive).toHaveBeenCalledTimes(1);
     const [attr, value] = onSetAttributeLive.mock.calls[0] as [string, string];
     expect(attr).toBe("color-grading");
-    expect(value).toContain("fresh-pop");
+    expect(value).toContain("bright-pop");
     act(() => root.unmount());
     vi.useRealTimers();
   });
@@ -149,9 +149,9 @@ describe("useColorGradingController", () => {
     );
     const { root, getState } = renderHook(onSetAttributeLive);
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
-    expect(getState().grading.preset).toBe("fresh-pop");
+    expect(getState().grading.preset).toBe("bright-pop");
     act(() => {
       vi.advanceTimersByTime(400);
     });
@@ -170,9 +170,9 @@ describe("useColorGradingController", () => {
     const onSetAttributeLive = vi.fn().mockRejectedValue(new Error("disk full"));
     const { root, getState } = renderHook(onSetAttributeLive);
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
-    expect(getState().grading.preset).toBe("fresh-pop");
+    expect(getState().grading.preset).toBe("bright-pop");
     act(() => {
       vi.advanceTimersByTime(400);
     });
@@ -182,7 +182,7 @@ describe("useColorGradingController", () => {
       await Promise.resolve();
     });
     // Reverted to "neutral" (the last confirmed-good value, from before this
-    // commit) instead of permanently showing "fresh-pop" as if it had saved.
+    // commit) instead of permanently showing "bright-pop" as if it had saved.
     expect(getState().grading.preset).toBe("neutral");
     expect(getState().runtimeStatus.state).toBe("unavailable");
     act(() => root.unmount());
@@ -206,7 +206,7 @@ describe("useColorGradingController", () => {
       makeElement({ id: "s1-bg" }),
     );
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
     // Let the debounce fire while still on s1-bg — the persist call is now
     // genuinely in flight (its promise won't settle until resolveA() below).
@@ -243,7 +243,7 @@ describe("useColorGradingController", () => {
     let capturedOnSettledA: ((ok: boolean) => void) | undefined;
     const onSetAttributeLive = vi
       .fn()
-      // Edit A (fresh-pop): captures its onSettled and never resolves until
+      // Edit A (bright-pop): captures its onSettled and never resolves until
       // resolveA() is called below — simulates a slow persist.
       .mockImplementationOnce(
         (_attr: string, _value: string | null, onSettled?: (ok: boolean) => void) => {
@@ -253,7 +253,7 @@ describe("useColorGradingController", () => {
           });
         },
       )
-      // Edit B (natural-lift): settles immediately and successfully.
+      // Edit B (warm-daylight): settles immediately and successfully.
       .mockImplementationOnce(
         (_attr: string, _value: string | null, onSettled?: (ok: boolean) => void) => {
           onSettled?.(true);
@@ -263,7 +263,7 @@ describe("useColorGradingController", () => {
     const { root, getState } = renderHook(onSetAttributeLive);
 
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
     act(() => {
       vi.advanceTimersByTime(400);
@@ -272,13 +272,13 @@ describe("useColorGradingController", () => {
 
     // B commits on the SAME element before A's persist has settled.
     act(() => {
-      getState().commitColorGrading(naturalLiftGrading());
+      getState().commitColorGrading(warmDaylightGrading());
     });
     act(() => {
       vi.advanceTimersByTime(400);
     });
     expect(onSetAttributeLive).toHaveBeenCalledTimes(2); // B's persist has already settled (mock resolves sync)
-    expect(getState().grading.preset).toBe("natural-lift");
+    expect(getState().grading.preset).toBe("warm-daylight");
 
     // NOW A's stale persist finally settles as a FAILURE — must not revert
     // `grading` (which now correctly shows B's newer edit) back to the
@@ -292,7 +292,7 @@ describe("useColorGradingController", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(getState().grading.preset).toBe("natural-lift");
+    expect(getState().grading.preset).toBe("warm-daylight");
     act(() => root.unmount());
     vi.useRealTimers();
   });
@@ -300,7 +300,7 @@ describe("useColorGradingController", () => {
   it("resetGrading returns to the neutral preset", () => {
     const { root, getState } = renderHook(vi.fn());
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
     act(() => {
       getState().resetGrading();
@@ -315,9 +315,9 @@ describe("useColorGradingController", () => {
       makeElement({ id: "s1-bg" }),
     );
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
-    expect(getState().grading.preset).toBe("fresh-pop");
+    expect(getState().grading.preset).toBe("bright-pop");
     // A different element, with no persisted grading of its own — without a
     // reset, this hook (unlike the legacy component it was extracted from,
     // which remounts via a `key={selectionIdentityKey}`) would keep showing
@@ -337,9 +337,9 @@ describe("useColorGradingController", () => {
       makeElement({ id: "bg", sourceFile: "index.html" }),
     );
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
-    expect(getState().grading.preset).toBe("fresh-pop");
+    expect(getState().grading.preset).toBe("bright-pop");
     rerenderWithElement(makeElement({ id: "bg", sourceFile: "sub-comp.html" }));
     expect(getState().grading.preset).toBe("neutral");
     act(() => root.unmount());
@@ -353,7 +353,7 @@ describe("useColorGradingController", () => {
       makeElement({ id: "s1-bg" }),
     );
     act(() => {
-      getState().commitColorGrading(freshPopGrading());
+      getState().commitColorGrading(brightPopGrading());
     });
     // Switch selection before the 350ms debounce fires — the in-flight edit
     // must be written immediately (targeting the OUTGOING element's own
@@ -366,7 +366,7 @@ describe("useColorGradingController", () => {
     expect(onSetAttributeLive).toHaveBeenCalledTimes(1);
     const [attr, value] = onSetAttributeLive.mock.calls[0] as [string, string];
     expect(attr).toBe("color-grading");
-    expect(value).toContain("fresh-pop");
+    expect(value).toContain("bright-pop");
     // And it must not ALSO fire again once the (now-cleared) original timer
     // window would have elapsed.
     act(() => {

@@ -243,11 +243,11 @@ describe("FlatColorGradingSection — Preset + LUT", () => {
     // needs its own accessible name via the dedicated ariaLabel prop.
     expect(presetSelect.getAttribute("aria-label")).toBe("Preset");
     act(() => {
-      presetSelect.value = "fresh-pop";
+      presetSelect.value = "bright-pop";
       presetSelect.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(onCommitColorGrading).toHaveBeenCalledTimes(1);
-    expect(onCommitColorGrading.mock.calls[0][0].preset).toBe("fresh-pop");
+    expect(onCommitColorGrading.mock.calls[0][0].preset).toBe("bright-pop");
     act(() => root.unmount());
   });
 
