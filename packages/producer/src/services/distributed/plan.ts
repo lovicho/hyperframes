@@ -42,6 +42,7 @@ import {
   getEncoderPreset,
   normalizeVp9CpuUsed,
   resolveConfig,
+  type AudioProcessingFailure,
 } from "@hyperframes/engine";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import {
@@ -74,11 +75,13 @@ import { snapshotRuntimeEnv } from "../render/runtimeEnvSnapshot.js";
 import {
   buildSyntheticRenderJob,
   type DistributedFormat,
+  PLAN_AUDIO_RELATIVE_PATH,
   PLAN_VIDEOS_META_RELATIVE_PATH,
   type PlanVideosJson,
   readFfmpegVersion,
   readProducerVersion,
 } from "./shared.js";
+import { CURRENT_PLAN_PROTOCOL, type PlanProtocolV1Descriptor } from "./planProtocol.js";
 
 /**
  * Caller-supplied configuration for a distributed render. `fps`, `width`,
@@ -223,7 +226,8 @@ export interface DistributedRenderConfig {
    * 10 GB `/tmp` budget alongside the chunk worker's frame buffer +
    * ffmpeg working set). Adapters that deploy onto storage with
    * tighter ceilings can pass a smaller cap; tests pass a tiny cap to
-   * exercise the throw path.
+   * exercise the throw path. This applies to the monolithic v1 transport;
+   * `planV2()` emits content-addressed role dependencies and bypasses it.
    */
   planDirSizeLimitBytes?: number;
 
@@ -254,6 +258,7 @@ export interface DistributedRenderConfig {
  */
 export interface PlanResult {
   planDir: string;
+  planProtocol: Readonly<PlanProtocolV1Descriptor>;
   planHash: string;
   chunkCount: number;
   totalFrames: number;
@@ -269,15 +274,30 @@ export interface PlanResult {
 export function applyDistributedAudioWarningPolicy(
   job: RenderJob,
   audioError: string,
+  audioFailures: readonly AudioProcessingFailure[] = [],
   log: ProducerLogger = defaultLogger,
 ): void {
+  const failureOwner =
+    audioFailures.length === 0
+      ? undefined
+      : audioFailures.some((failure) => failure.owner === "system")
+        ? "system"
+        : "user";
+  const retryable =
+    audioFailures.length === 0 ? undefined : audioFailures.every((failure) => failure.retryable);
   applyRenderWarningPolicy(
     job,
     [
       {
         code: "audio_processing_failed",
         message: `Audio mix failed; output would be video-only: ${audioError}`,
-        details: { mediaType: "audio" },
+        details: {
+          mediaType: "audio",
+          failureReasons: [...new Set(audioFailures.map((failure) => failure.reason))],
+          failureStages: [...new Set(audioFailures.map((failure) => failure.stage))],
+          failureOwner,
+          retryable,
+        },
       },
     ],
     log,
@@ -322,9 +342,8 @@ export const MIN_CHUNK_SIZE = 10;
 /**
  * Default hard ceiling on `<planDir>/` size in bytes. 2 GB fits inside
  * AWS Lambda's 10 GB `/tmp` alongside the chunk worker's captured frames
- * and ffmpeg's temporary files. Compositions that exceed this have to
- * fall back to the in-process renderer until per-chunk video-frame
- * slicing lands.
+ * and ffmpeg's temporary files. Compositions that exceed this can opt into
+ * `planV2()` or fall back to the in-process renderer.
  */
 export const PLAN_DIR_SIZE_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -346,8 +365,9 @@ export class PlanTooLargeError extends Error {
       `[plan] planDir size ${formatBytes(sizeBytes)} exceeds the configured ceiling ` +
         `${formatBytes(limitBytes)} (PLAN_TOO_LARGE). The default 2 GB cap fits inside AWS ` +
         `Lambda's 10 GB /tmp budget alongside the chunk worker's frame buffer and ffmpeg's ` +
-        `working set. To unblock: shorten the composition, lower the framerate, or use the ` +
-        `in-process renderer (\`executeRenderJob\`) — it has no planDir size cap.`,
+        `working set. To unblock: use the content-addressed \`planV2()\` transport, shorten ` +
+        `the composition, lower the framerate, or use the in-process renderer ` +
+        `(\`executeRenderJob\`) — it has no planDir size cap.`,
     );
     this.name = "PlanTooLargeError";
     this.sizeBytes = sizeBytes;
@@ -943,7 +963,7 @@ export async function plan(
     assertNotAborted,
   });
   if (audioResult.audioError) {
-    applyDistributedAudioWarningPolicy(job, audioResult.audioError, log);
+    applyDistributedAudioWarningPolicy(job, audioResult.audioError, audioResult.audioFailures, log);
   }
 
   // Promote staged artifacts from the temp work tree into the final planDir
@@ -988,7 +1008,7 @@ export async function plan(
     "utf-8",
   );
 
-  const planAudioPath = join(planDir, "audio.aac");
+  const planAudioPath = join(planDir, PLAN_AUDIO_RELATIVE_PATH);
   if (audioResult.hasAudio && existsSync(audioResult.audioOutputPath)) {
     renameSync(audioResult.audioOutputPath, planAudioPath);
   }
@@ -1084,6 +1104,7 @@ export async function plan(
 
   return {
     planDir,
+    planProtocol: CURRENT_PLAN_PROTOCOL,
     planHash,
     chunkCount,
     totalFrames,

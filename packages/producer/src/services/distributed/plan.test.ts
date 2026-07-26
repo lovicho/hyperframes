@@ -1,3 +1,4 @@
+// fallow-ignore-file code-duplication
 /**
  * Unit tests for `services/distributed/plan.ts`.
  *
@@ -20,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recomputePlanHashFromPlanDir } from "../render/stages/freezePlan.js";
 import { RenderQualityError } from "../renderOrchestrator.js";
+import { CURRENT_PLAN_PROTOCOL } from "./planProtocol.js";
 import {
   applyDistributedAudioWarningPolicy,
   buildChunkSlices,
@@ -76,8 +78,63 @@ describe("distributed warning policy", () => {
 
   it("rejects distributed audio degradation in best-effort mode", () => {
     const job = createJob("best-effort");
-    expect(() => applyDistributedAudioWarningPolicy(job, "mix failed")).toThrow(RenderQualityError);
+    expect(() =>
+      applyDistributedAudioWarningPolicy(job, "mix failed", [
+        {
+          stage: "mix",
+          reason: "ffmpeg_unsupported",
+          owner: "system",
+          retryable: false,
+          detail: "Option not found",
+        },
+      ]),
+    ).toThrow(RenderQualityError);
     expect(job.warnings.map((warning) => warning.code)).toEqual(["audio_processing_failed"]);
+    expect(job.warnings[0]?.details).toEqual(
+      expect.objectContaining({
+        failureReasons: ["ffmpeg_unsupported"],
+        failureStages: ["mix"],
+        failureOwner: "system",
+        retryable: false,
+      }),
+    );
+  });
+
+  it("only marks a multi-cause audio failure retryable when every cause is retryable", () => {
+    const job = createJob("best-effort");
+    expect(() =>
+      applyDistributedAudioWarningPolicy(job, "mixed failure", [
+        {
+          stage: "download",
+          reason: "download_failed",
+          owner: "system",
+          retryable: true,
+          detail: "temporary download failure",
+        },
+        {
+          stage: "prepare",
+          reason: "invalid_media",
+          owner: "user",
+          retryable: false,
+          detail: "invalid media",
+        },
+      ]),
+    ).toThrow(RenderQualityError);
+    expect(job.warnings[0]?.details).toEqual(
+      expect.objectContaining({
+        failureOwner: "system",
+        retryable: false,
+      }),
+    );
+  });
+
+  it("does not invent ownership or retryability for legacy untyped failures", () => {
+    const job = createJob("best-effort");
+    expect(() => applyDistributedAudioWarningPolicy(job, "legacy failure")).toThrow(
+      RenderQualityError,
+    );
+    expect(job.warnings[0]?.details?.failureOwner).toBeUndefined();
+    expect(job.warnings[0]?.details?.retryable).toBeUndefined();
   });
 });
 
@@ -345,6 +402,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
 
       // ── PlanResult contract ─────────────────────────────────────────────
       expect(result.planDir).toBe(planDir);
+      expect(result.planProtocol).toEqual(CURRENT_PLAN_PROTOCOL);
       expect(result.planHash).toMatch(/^[0-9a-f]{64}$/);
       expect(result.chunkCount).toBe(1);
       expect(result.totalFrames).toBe(30); // 1s @ 30fps
@@ -373,6 +431,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
         unknown
       >;
       expect(planJson.planHash).toBe(result.planHash);
+      expect(planJson.protocol).toEqual(CURRENT_PLAN_PROTOCOL);
       expect(planJson.hasAudio).toBe(false);
       expect(planJson.totalFrames).toBe(result.totalFrames);
     },
@@ -460,8 +519,18 @@ describe("plan() — golden planDir + planHash determinism", () => {
       expect(recomputed).toBe(result.planHash);
       const planJson = JSON.parse(readFileSync(join(planDir, "plan.json"), "utf-8")) as {
         planHash: string;
+        protocol?: unknown;
       };
       expect(planJson.planHash).toBe(result.planHash);
+      expect(planJson.protocol).toEqual(CURRENT_PLAN_PROTOCOL);
+
+      delete planJson.protocol;
+      writeFileSync(join(planDir, "plan.json"), `${JSON.stringify(planJson, null, 2)}\n`, "utf-8");
+      expect(recomputePlanHashFromPlanDir(planDir)).toBe(result.planHash);
+
+      planJson.protocol = CURRENT_PLAN_PROTOCOL;
+      writeFileSync(join(planDir, "plan.json"), `${JSON.stringify(planJson, null, 2)}\n`, "utf-8");
+      expect(recomputePlanHashFromPlanDir(planDir)).toBe(result.planHash);
     },
     TIMEOUT_MS,
   );
