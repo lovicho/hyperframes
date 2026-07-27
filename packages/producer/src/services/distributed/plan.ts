@@ -778,6 +778,20 @@ function resolveNonMp4EncoderTriple(
   return { encoder: "png-sequence", pixelFormat: "rgba", preset: "lossless" };
 }
 
+/** Test-visible construction of the engine config used by distributed planning. */
+export function resolveDistributedEngineConfig(config: DistributedRenderConfig): EngineConfig {
+  return {
+    ...(config.producerConfig ?? config.engineConfig ?? resolveConfig()),
+    browserGpuMode: "software",
+    forceScreenshot: false,
+    // Distributed rendering deliberately opts into deterministic BeginFrame
+    // on Linux SwiftShader. Preserve the provenance bit consumed by the
+    // engine's software-GPU screenshot clamp; assigning the boolean alone
+    // loses the distinction between a default false and this explicit opt-out.
+    forceScreenshotExplicitlyOptedOut: true,
+  };
+}
+
 /**
  * Activity A of the distributed render pipeline. Produces a self-contained
  * `<planDir>/` from a project + config. See module docstring for the
@@ -808,11 +822,7 @@ export async function plan(
       throw new Error("[plan] render_cancelled");
     }
   };
-  const cfg: EngineConfig = {
-    ...(config.producerConfig ?? config.engineConfig ?? resolveConfig()),
-    browserGpuMode: "software",
-    forceScreenshot: false,
-  };
+  const cfg = resolveDistributedEngineConfig(config);
 
   const job = buildSyntheticRenderJob({
     fps: { num: config.fps, den: 1 },
@@ -996,6 +1006,7 @@ export async function plan(
     assertNotAborted,
     materializeSymlinks: true,
   });
+  if (extractResult.failureToEnforce) throw extractResult.failureToEnforce;
   // Skip `extractResult.frameLookup.cleanup()`: it would rm-rf each
   // video's outputDir, but in `plan()` those directories ARE the source
   // material the renames below move into `planDir/video-frames/`.

@@ -15,6 +15,7 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -53,6 +54,11 @@ import {
 } from "./shared.js";
 
 const PLAN_V2_HASH_PREFIX = "hyperframes-plan-manifest-hash-v2\x00";
+// The engine's content-addressed extraction cache keeps this ownership marker
+// beside numbered frames. Distributed plan() materializes the cache directory
+// recursively, so v2 must recognize (and omit) the marker without weakening
+// fail-closed handling for any other unexpected filename.
+const EXTRACTION_CACHE_COMPLETE_SENTINEL = ".hf-complete";
 export const PLAN_V2_MATERIALIZATION_MARKER = ".hyperframes-plan-v2.json";
 export { PLAN_V2_INTEGRITY_UNRECOVERABLE, PlanV2IntegrityError };
 
@@ -209,6 +215,48 @@ function sha256File(path: string): string {
   return hash.digest("hex");
 }
 
+function assertValidExtractionCacheCompleteSentinel(path: string): void {
+  const sentinel = lstatSync(path);
+  if (!sentinel.isFile() || sentinel.size !== 0) {
+    throw new PlanV2IntegrityError(
+      `${EXTRACTION_CACHE_COMPLETE_SENTINEL} must be a zero-byte regular file`,
+    );
+  }
+}
+
+function validateExtractionCacheCompleteSentinels(planV1Dir: string): void {
+  const videoRoot = join(planV1Dir, "video-frames");
+  if (!existsSync(videoRoot)) return;
+
+  for (const videoEntry of readdirSync(videoRoot, { withFileTypes: true })) {
+    if (!videoEntry.isDirectory()) continue;
+    const videoDir = join(videoRoot, videoEntry.name);
+    if (readdirSync(videoDir).includes(EXTRACTION_CACHE_COMPLETE_SENTINEL)) {
+      const sentinelPath = join(videoDir, EXTRACTION_CACHE_COMPLETE_SENTINEL);
+      assertValidExtractionCacheCompleteSentinel(sentinelPath);
+    }
+  }
+}
+
+function isExtractionCacheCompleteSentinelPath(path: string): boolean {
+  const segments = path.split("/");
+  return (
+    segments.length === 3 &&
+    segments[0] === "video-frames" &&
+    segments[1] !== "" &&
+    segments[2] === EXTRACTION_CACHE_COMPLETE_SENTINEL
+  );
+}
+
+function resolveExtractedVideoOutputDir(planDir: string, videoId: string): string {
+  const videoRoot = resolve(planDir, "video-frames");
+  const outputDir = resolve(videoRoot, videoId);
+  if (outputDir === videoRoot || !outputDir.startsWith(`${videoRoot}${sep}`)) {
+    throw new PlanV2IntegrityError(`unsafe extracted video id: ${JSON.stringify(videoId)}`);
+  }
+  return outputDir;
+}
+
 // This is the fail-safe policy table for every v1 artifact class. Keeping the
 // branches together makes new artifact classes visibly fall through to both roles.
 // fallow-ignore-next-line complexity
@@ -240,10 +288,14 @@ function artifactTargets(
 
 function listVideoFramePaths(planV1Dir: string, videos: PlanVideosJson): ExtractedFrames[] {
   return videos.extracted.map((video) => {
-    const outputDir = join(planV1Dir, "video-frames", video.videoId);
+    const outputDir = resolveExtractedVideoOutputDir(planV1Dir, video.videoId);
     const frameNames = readdirSync(outputDir).sort();
     const framePaths = new Map<number, string>();
     for (const frameName of frameNames) {
+      if (frameName === EXTRACTION_CACHE_COMPLETE_SENTINEL) {
+        assertValidExtractionCacheCompleteSentinel(join(outputDir, frameName));
+        continue;
+      }
       // ffmpeg's image sequence starts at 1. Preserve sparse indexes so a
       // materialized chunk can carry only the frames it actually requests.
       const match = /(\d+)(?=\.[^.]+$)/.exec(frameName);
@@ -300,9 +352,15 @@ function readVideoMetadata(
       throw new PlanV2IntegrityError(`${field}.colorSpace must be an object or null`);
     }
     colorSpace = {
-      colorTransfer: readString(value.colorSpace.colorTransfer, `${field}.colorTransfer`),
-      colorPrimaries: readString(value.colorSpace.colorPrimaries, `${field}.colorPrimaries`),
-      colorSpace: readString(value.colorSpace.colorSpace, `${field}.colorSpace`),
+      colorTransfer: readColorComponent(
+        value.colorSpace.colorTransfer,
+        `${field}.colorSpace.colorTransfer`,
+      ),
+      colorPrimaries: readColorComponent(
+        value.colorSpace.colorPrimaries,
+        `${field}.colorSpace.colorPrimaries`,
+      ),
+      colorSpace: readColorComponent(value.colorSpace.colorSpace, `${field}.colorSpace.colorSpace`),
     };
   }
   return {
@@ -352,6 +410,15 @@ function parsePlanVideosJson(value: unknown): PlanVideosJson {
     };
   });
   return { videos, extracted };
+}
+
+function materializeExtractedVideoDirectories(planDir: string): void {
+  const videosPath = join(planDir, PLAN_VIDEOS_META_RELATIVE_PATH);
+  if (!existsSync(videosPath)) return;
+  const videos = parsePlanVideosJson(readJsonFile(videosPath, PLAN_VIDEOS_META_RELATIVE_PATH));
+  for (const video of videos.extracted) {
+    mkdirSync(resolveExtractedVideoOutputDir(planDir, video.videoId), { recursive: true });
+  }
 }
 
 function parseChunkSlices(value: unknown): ChunkSliceJson[] {
@@ -481,8 +548,10 @@ function buildPlanV2Publication(planV1Dir: string): PlanV2Publication {
   if (!isRecord(dimensions)) {
     throw new PlanV2IntegrityError("v1 plan.json.dimensions must be an object");
   }
+  validateExtractionCacheCompleteSentinels(planV1Dir);
   const videoDependencyPlan = buildVideoChunkDependencies(planV1Dir, dimensions);
   for (const file of listFiles(planV1Dir)) {
+    if (isExtractionCacheCompleteSentinelPath(file.path)) continue;
     const targets = artifactTargets(file.path, videoDependencyPlan.dependencies);
     if (
       file.path.startsWith("video-frames/") &&
@@ -653,6 +722,13 @@ function resultFromManifest(planV2Dir: string, manifest: PlanV2Manifest): PlanV2
 function readString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new PlanV2IntegrityError(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function readColorComponent(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new PlanV2IntegrityError(`${field} must be a string`);
   }
   return value;
 }
@@ -861,6 +937,12 @@ export function materializePlanV2Target(
       mkdirSync(dirname(destinationPath), { recursive: true });
       copyFileSync(sourcePath, destinationPath);
     }
+    // Plan v2 transports only files, so a chunk where a video is inactive has
+    // no selected frame artifact from which to create its per-video directory.
+    // renderChunk consumes a v1-compatible layout and intentionally validates
+    // every extracted-video directory from meta/videos.json. Recreate those
+    // zero-byte structural directories without downloading unused frame data.
+    if (target.role === "chunk") materializeExtractedVideoDirectories(tempDir);
     writeFileSync(
       join(tempDir, PLAN_V2_MATERIALIZATION_MARKER),
       canonicalJsonStringify({ manifest, target }),
