@@ -1,3 +1,4 @@
+import { scopedElementKey } from "../../hooks/gsapKeyframeCacheHelpers";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Move } from "../../icons/SystemIcons";
 import { InspectorHeaderActions } from "./InspectorHeaderActions";
@@ -16,7 +17,7 @@ import {
 } from "./propertyPanelHelpers";
 import { MetricField, Section } from "./propertyPanelPrimitives";
 import { createTransformCommitHandlers } from "./propertyPanelTransformCommit";
-import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
+import { resolveAnimIdForProperty } from "../../player/components/TimelinePropertyLanes";
 import { resolveEditingSections } from "@hyperframes/core/editing";
 import { MediaSection } from "./propertyPanelMediaSection";
 import { ColorGradingSection } from "./propertyPanelColorGradingSection";
@@ -101,6 +102,7 @@ export const PropertyPanel = memo(function PropertyPanel(props: PropertyPanelPro
     onUpdateArcSegment,
     onUnroll,
     onUpdateKeyframeEase,
+    onUpdateSegmentEase,
     onSetAllKeyframeEases,
     onAddKeyframe,
     onRemoveKeyframe,
@@ -241,12 +243,8 @@ export const PropertyPanel = memo(function PropertyPanel(props: PropertyPanelPro
   const navKeyframes = cacheEntry?.keyframes ?? gsapKeyframes;
   const seekFromKfPct = (pct: number) => onSeekToTime?.(elStart + (pct / 100) * elDuration);
 
-  const animIdForProp = (prop: string): string => {
-    const group = classifyPropertyGroup(prop);
-    const groupAnim = gsapAnimations?.find((a) => a.propertyGroup === group);
-    if (groupAnim) return groupAnim.id;
-    return gsapAnimId ?? "";
-  };
+  const animIdForProp = (prop: string): string =>
+    resolveAnimIdForProperty(prop, gsapAnimations, gsapAnimId);
 
   const displayX = gsapRuntimeValues?.x ?? manualOffset.x;
   const displayY = gsapRuntimeValues?.y ?? manualOffset.y;
@@ -560,6 +558,7 @@ export const PropertyPanel = memo(function PropertyPanel(props: PropertyPanelPro
           onAddGsapProperty &&
           onAddGsapAnimation && (
             <GsapAnimationSection
+              elementId={scopedElementKey(element)}
               animations={gsapAnimations}
               multipleTimelines={gsapMultipleTimelines}
               unsupportedTimelinePattern={gsapUnsupportedTimelinePattern}
@@ -577,6 +576,7 @@ export const PropertyPanel = memo(function PropertyPanel(props: PropertyPanelPro
               onUnroll={onUnroll}
               onUpdateKeyframeEase={onUpdateKeyframeEase}
               onSetAllKeyframeEases={onSetAllKeyframeEases}
+              onUpdateSegmentEase={onUpdateSegmentEase}
             />
           )}
 

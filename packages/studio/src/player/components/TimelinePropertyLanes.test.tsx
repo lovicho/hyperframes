@@ -7,10 +7,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TimelineClipDiamonds } from "./TimelineClipDiamonds";
 import {
   getTimelinePropertyLanes,
+  resolveAnimIdForProperty,
   TimelinePropertyLanes,
   type TimelinePropertyLanesProps,
 } from "./TimelinePropertyLanes";
 import { timelineKeyframeSelectionKey } from "./timelineKeyframeIdentity";
+import { LANE_H, getTimelineLaneTop } from "./timelineLayout";
+import { groupLabel } from "./trackHeaderLaneValues";
+import { clipTimingStart } from "../../hooks/gsapShared";
+import { resolveTimelineKeyframeTarget } from "../../components/nle/useTimelineEditCallbacks";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -121,7 +126,111 @@ const POSITION_SEGMENT_ANIMATION = animation("position-tween", "position", [
   { percentage: 50, properties: { x: 50 } },
 ]);
 
+/** A tween the parser leaves unclassified because it spans several groups. */
+function ungroupedAnimation(
+  id: string,
+  properties: Record<string, number | string>,
+): GsapAnimation {
+  return {
+    id,
+    targetSelector: "#clip-1",
+    method: "to",
+    position: 0,
+    duration: 1,
+    properties,
+  };
+}
+
 describe("TimelinePropertyLanes", () => {
+  // `{ x, opacity }` is the canonical HyperFrames entrance tween. The parser
+  // classifies it to `undefined` (two groups), which used to erase it from the
+  // lanes entirely — no caret, no reserved row, nothing to edit.
+  it("lanes a mixed-group tween once per group it animates", () => {
+    const lanes = getTimelinePropertyLanes(
+      [ungroupedAnimation("entrance", { x: 0, opacity: 1 })],
+      0,
+      1,
+    );
+
+    expect(lanes.map((lane) => lane.group).sort()).toEqual(["position", "visual"]);
+    for (const lane of lanes) {
+      expect(lane.keyframes.map((keyframe) => keyframe.percentage)).toEqual([0, 100]);
+      expect(lane.keyframes.every((keyframe) => keyframe.animationId === "entrance")).toBe(true);
+    }
+  });
+
+  it("lanes a tween whose properties are all unknown as one 'other' lane", () => {
+    const lanes = getTimelinePropertyLanes(
+      [ungroupedAnimation("rounded", { borderRadius: 12, fontSize: 24 })],
+      0,
+      1,
+    );
+
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0]?.group).toBe("other");
+    expect(groupLabel("other", lanes[0]!.keyframes[0]!.properties)).toBe("BorderRadius");
+  });
+
+  // An expanded sub-composition child sits on the MASTER timeline at a
+  // host-absolute start while its tweens are parsed from its own file and are
+  // local to it. clipTimingStart is what brings the two into one frame.
+  it("keeps an expanded sub-comp child's lane percentages inside the clip", () => {
+    const child = { start: 16.5, duration: 2, expandedParentStart: 16 };
+    const local = animation("pill-tween", "position", [
+      { percentage: 0, properties: { x: 0 } },
+      { percentage: 100, properties: { x: 100 } },
+    ]);
+    local.position = 0.5;
+    local.resolvedStart = 0.5;
+    local.duration = 2;
+
+    const percentages = getTimelinePropertyLanes(
+      [local],
+      clipTimingStart(child),
+      child.duration,
+    ).flatMap((lane) => lane.keyframes.map((keyframe) => keyframe.percentage));
+
+    expect(percentages).toHaveLength(2);
+    for (const percentage of percentages) {
+      expect(percentage).toBeGreaterThanOrEqual(0);
+      expect(percentage).toBeLessThanOrEqual(100);
+    }
+    // Falsifier: the raw host-absolute start is what used to be passed.
+    expect(
+      getTimelinePropertyLanes([local], child.start, child.duration)[0]?.keyframes[0]?.percentage,
+    ).toBeLessThan(0);
+  });
+
+  it("still lanes a single-group tween exactly once", () => {
+    const lanes = getTimelinePropertyLanes(
+      [animation("position-tween", "position", [{ percentage: 0, properties: { x: 0, y: 0 } }])],
+      0,
+      1,
+    );
+
+    expect(lanes.map((lane) => lane.group)).toEqual(["position"]);
+  });
+
+  // A lane can merge several tweens, so an edit routed from it must carry the
+  // clicked keyframe's own animation identity — group matching alone is
+  // ambiguous once two tweens feed the same lane.
+  it("routes a mixed-tween lane edit to the tween that owns the keyframe", () => {
+    const mixed = ungroupedAnimation("entrance", { x: 40, opacity: 1 });
+    const sibling = animation("drift", "position", [
+      { percentage: 0, properties: { x: 0 } },
+      { percentage: 100, properties: { x: 9 } },
+    ]);
+    const lanes = getTimelinePropertyLanes([mixed, sibling], 0, 1);
+    const position = lanes.find((lane) => lane.group === "position");
+
+    expect(
+      resolveTimelineKeyframeTarget(100, position?.keyframes ?? [], [
+        { id: "entrance" },
+        { id: "drift", propertyGroup: "position" },
+      ]),
+    ).toEqual({ animId: "entrance", tweenPct: 100 });
+  });
+
   it("returns a position lane with synthesized endpoints for a flat tween", () => {
     const lanes = getTimelinePropertyLanes(
       [flatAnimation("position-tween", "position", { x: 420 })],
@@ -399,6 +508,68 @@ describe("TimelinePropertyLanes", () => {
     act(() => root.unmount());
   });
 
+  // The disclosure caret's aria-controls used to name a div in the STICKY LABEL
+  // COLUMN whose children are all absolutely positioned: it computed to 0x0 and
+  // held no diamonds. The real lanes had no wrapper at all to point at.
+  it("wraps the lanes in the identified element so aria-controls resolves to the diamonds", () => {
+    const animations = [
+      animation("position-tween", "position", [
+        { percentage: 0, properties: { x: 0 } },
+        { percentage: 100, properties: { x: 100 } },
+      ]),
+      animation("visual-tween", "visual", [
+        { percentage: 0, properties: { opacity: 0 } },
+        { percentage: 100, properties: { opacity: 1 } },
+      ]),
+    ];
+    const { host, root } = renderPropertyLanes({ id: "timeline-lanes-track-0", animations });
+    const wrapper = host.querySelector("#timeline-lanes-track-0");
+
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.querySelectorAll("[data-timeline-property-lane]")).toHaveLength(2);
+    expect(wrapper?.querySelectorAll("button[data-keyframe-percentage]").length).toBeGreaterThan(0);
+    // Load-bearing: a `position: relative` wrapper would become the containing
+    // block for the absolute lanes below and shift every one of them.
+    expect((wrapper as HTMLElement).style.position).toBe("");
+    act(() => root.unmount());
+  });
+
+  // happy-dom has no CSS engine, so measured geometry is always 0x0. The lanes'
+  // own inline offsets are what the component actually computes, so pin those.
+  it("leaves every lane's inline offsets untouched by the wrapper", () => {
+    const animations = [
+      animation("position-tween", "position", [{ percentage: 0, properties: { x: 0 } }]),
+      animation("visual-tween", "visual", [{ percentage: 0, properties: { opacity: 0 } }]),
+    ];
+    const { host, root } = renderPropertyLanes({
+      id: "timeline-lanes-track-0",
+      animations,
+      clipLeftPx: 120,
+      clipWidthPx: 200,
+    });
+
+    const lanes = Array.from(host.querySelectorAll<HTMLElement>("[data-timeline-property-lane]"));
+    expect(lanes.map((lane) => lane.style.top)).toEqual([
+      `${getTimelineLaneTop(0)}px`,
+      `${getTimelineLaneTop(1)}px`,
+    ]);
+    expect(lanes.map((lane) => lane.style.left)).toEqual(["120px", "120px"]);
+    expect(lanes.map((lane) => lane.style.width)).toEqual(["200px", "200px"]);
+    expect(lanes.map((lane) => lane.style.height)).toEqual([`${LANE_H}px`, `${LANE_H}px`]);
+    act(() => root.unmount());
+  });
+
+  // The wrapper is the aria-controls target in BOTH disclosure states, so a
+  // collapsed layer (no animations reach it) must still resolve the id.
+  it("still renders the identified wrapper when there are no lanes to show", () => {
+    const { host, root } = renderPropertyLanes({ id: "timeline-lanes-track-0", animations: [] });
+
+    const wrapper = host.querySelector("#timeline-lanes-track-0");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.querySelectorAll("[data-timeline-property-lane]")).toHaveLength(0);
+    act(() => root.unmount());
+  });
+
   it("keeps the collapsed TimelineClipDiamonds positions and callback contract unchanged", () => {
     const onClickKeyframe = vi.fn();
     const COLLAPSED_IDENTITY = { animationId: "position-tween", propertyGroup: "position" };
@@ -446,5 +617,51 @@ describe("TimelinePropertyLanes", () => {
     // diamond-identity refactor added are dropped on the way out.
     expect(onClickKeyframe).toHaveBeenCalledWith("clip-1", COLLAPSED_TARGET);
     act(() => root.unmount());
+  });
+});
+
+describe("resolveAnimIdForProperty", () => {
+  /** A legacy mixed tween: the parser leaves propertyGroup undefined for it. */
+  const mixed = {
+    id: "mixed-1",
+    targetSelector: "#box",
+    method: "to",
+    position: 0,
+    properties: {},
+    keyframes: {
+      keyframes: [
+        { percentage: 0, properties: { x: 0, opacity: 0 } },
+        { percentage: 100, properties: { x: 40, opacity: 1 } },
+      ],
+    },
+  } as unknown as GsapAnimation;
+
+  it("routes both groups of a mixed tween to that tween, not the fallback", () => {
+    expect(mixed.propertyGroup).toBeUndefined();
+
+    expect(resolveAnimIdForProperty("x", [mixed], "fallback")).toBe("mixed-1");
+    expect(resolveAnimIdForProperty("opacity", [mixed], "fallback")).toBe("mixed-1");
+  });
+
+  it("falls back only when no tween animates the property's group", () => {
+    expect(resolveAnimIdForProperty("rotation", [mixed], "fallback")).toBe("fallback");
+    expect(resolveAnimIdForProperty("rotation", [mixed], undefined)).toBe("");
+  });
+
+  it("prefers a single-group tween that owns the lane", () => {
+    const opacityOnly = {
+      ...mixed,
+      id: "opacity-1",
+      propertyGroup: "visual",
+      keyframes: {
+        keyframes: [
+          { percentage: 0, properties: { opacity: 0 } },
+          { percentage: 100, properties: { opacity: 1 } },
+        ],
+      },
+    } as unknown as GsapAnimation;
+
+    expect(resolveAnimIdForProperty("opacity", [opacityOnly, mixed], "fallback")).toBe("opacity-1");
+    expect(resolveAnimIdForProperty("x", [opacityOnly, mixed], "fallback")).toBe("mixed-1");
   });
 });

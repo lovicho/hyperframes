@@ -1,60 +1,22 @@
 /**
- * Reading a composition file's GSAP tweens into the keyframe cache: fetch,
- * selector -> element id resolution, and the clip-relative timing basis.
+ * Reading a composition file's GSAP tweens into the keyframe cache: fetch and
+ * selector -> element id resolution.
  * Split from useGsapTweenCache to keep that file under the 600-line limit.
  */
 import type { GsapAnimation, GsapKeyframesData, ParsedGsap } from "@hyperframes/core/gsap-parser";
 import { isStudioHoldSet } from "@hyperframes/core/gsap-parser";
 import { usePlayerStore } from "../player/store/playerStore";
-import {
-  clearKeyframeCacheForFile,
-  elementCacheKeys,
-  writeGsapAnimationsForElement,
-} from "./gsapKeyframeCacheHelpers";
-import { idFromSelector, toClipKeyframes } from "./gsapShared";
+import { replaceKeyframeCacheForFile } from "./gsapKeyframeCacheHelpers";
+import { resolveClipTimingBasis, resolveSelectorElementIds, toClipKeyframes } from "./gsapShared";
 import {
   deduplicateKeyframes,
   isStaticPositionHold,
   synthesizeFlatTweenKeyframes,
+  type MergeableKeyframe,
 } from "./gsapTweenSynth";
 
-/**
- * Resolve a tween's target selector to the ids of the element(s) it animates.
- * A bare `#id` resolves directly; anything else (a class like `.dot`, a group
- * `.a, .b`, or a descendant selector) is matched against the live preview DOM so
- * class/selector tweens (e.g. `gsap.from(".dot", {stagger})`) attribute to every
- * element they animate — not just one parsed from the string. Falls back to a
- * leading `#id` when there's no DOM (so the cache still populates pre-iframe).
- */
-// fallow-ignore-next-line complexity
-export function resolveSelectorElementIds(
-  selector: string,
-  doc: Document | null | undefined,
-): string[] {
-  // A whole-selector id match (either shape) addresses exactly one element.
-  const bareId = /^(#[\w-]+|\[id="(?:\\.|[^"\\])*"\])$/.test(selector)
-    ? idFromSelector(selector)
-    : null;
-  if (bareId) return [bareId];
-  if (!doc) {
-    const lead = idFromSelector(selector);
-    return lead ? [lead] : [];
-  }
-  const ids = new Set<string>();
-  for (const part of selector.split(",")) {
-    const sel = part.trim();
-    if (!sel) continue;
-    try {
-      for (const el of Array.from(doc.querySelectorAll(sel))) {
-        if (el.id) ids.add(el.id);
-      }
-    } catch {
-      const lead = idFromSelector(sel);
-      if (lead) ids.add(lead);
-    }
-  }
-  return Array.from(ids);
-}
+export { resolveSelectorElementIds };
+
 /**
  * The slice of the parse response callers actually read. The endpoint returns
  * the full `ParsedGsap` (preamble/postamble and all), but nothing downstream of
@@ -104,37 +66,6 @@ export async function fetchParsedAnimations(
 }
 
 /**
- * Clip-relative timing basis for an element. Sub-composition internals (e.g. pills
- * inside a scene) aren't timeline clips themselves — they're derived at expand time
- * — so they're absent from `elements`. Without a basis, elDuration defaulted to 1
- * and clip-relative keyframe percentages blew past 100% (rendering off the clip).
- * Fall back to the sub-comp HOST's bounds, resolved via domClipChildren (the host's
- * data-composition-src is stripped in the rendered DOM, so we can't query it).
- */
-export function resolveClipTimingBasis(
-  elementId: string,
-  sourceFile: string,
-  elements: ReadonlyArray<{
-    domId?: string;
-    key?: string;
-    id: string;
-    start: number;
-    duration: number;
-  }>,
-  domClipChildren: ReadonlyArray<{ id: string; hostId: string }>,
-): { elStart: number; elDuration: number } {
-  const direct = elements.find(
-    (el) => el.domId === elementId || (el.key ?? el.id) === `${sourceFile}#${elementId}`,
-  );
-  if (direct) return { elStart: direct.start, elDuration: direct.duration };
-  const hostId = domClipChildren.find((c) => c.id === elementId)?.hostId;
-  const host = hostId
-    ? elements.find((el) => el.domId === hostId || (el.key ?? el.id) === `index.html#${hostId}`)
-    : undefined;
-  return { elStart: host?.start ?? 0, elDuration: host?.duration ?? 1 };
-}
-
-/**
  * Read one composition file's tweens into the keyframe cache. Split out of the
  * hook so the effect can run it per file without re-nesting the whole body.
  */
@@ -146,10 +77,8 @@ export async function populateKeyframeCacheFromAst(
 ): Promise<void> {
   const parsed = await fetchParsedAnimations(projectId, sf);
   if (!parsed) return;
-  const { setKeyframeCache } = usePlayerStore.getState();
-  clearKeyframeCacheForFile(sf);
   const { elements, domClipChildren } = usePlayerStore.getState();
-  const mergedByElement = new Map<string, GsapKeyframesData>();
+  const mergedByElement = new Map<string, GsapKeyframesData<MergeableKeyframe>>();
   const sourceByElement = new Map<string, GsapAnimation[]>();
   for (const anim of parsed.animations) {
     if (anim.hasUnresolvedKeyframes) continue;
@@ -174,8 +103,5 @@ export async function populateKeyframeCacheFromAst(
       }
     }
   }
-  for (const [id, kfData] of mergedByElement) {
-    for (const key of elementCacheKeys(sf, id)) setKeyframeCache(key, kfData);
-    writeGsapAnimationsForElement(sf, id, sourceByElement.get(id));
-  }
+  replaceKeyframeCacheForFile(sf, mergedByElement, sourceByElement);
 }

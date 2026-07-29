@@ -3,8 +3,8 @@ import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import { usePlayerStore, type KeyframeCacheEntry } from "../player/store/playerStore";
 import {
   clearKeyframeCacheForElement,
-  clearKeyframeCacheForFile,
   pruneKeyframeCacheToFiles,
+  replaceKeyframeCacheForFile,
   updateKeyframeCacheFromParsed,
 } from "./gsapKeyframeCacheHelpers";
 
@@ -70,48 +70,6 @@ describe("clearKeyframeCacheForElement", () => {
   });
 });
 
-describe("clearKeyframeCacheForFile", () => {
-  it("clears the prefixed, fallback, and bare keys for every element of the file", () => {
-    seed("comp.html#a");
-    seed("index.html#a");
-    seed("a");
-    seed("comp.html#b");
-    seed("b");
-
-    clearKeyframeCacheForFile("comp.html");
-
-    for (const key of ["comp.html#a", "index.html#a", "a", "comp.html#b", "b"]) {
-      expect(cache().has(key)).toBe(false);
-    }
-  });
-
-  // Several composition files re-scan concurrently, so a clear that walked the
-  // index.html alias would delete rows a sibling file had just written.
-  it("leaves an index.html-owned element alone when another file re-scans", () => {
-    seed("index.html#title");
-    seed("title");
-    seed("comp.html#a");
-
-    clearKeyframeCacheForFile("comp.html");
-
-    expect(cache().has("index.html#title")).toBe(true);
-    expect(cache().has("title")).toBe(true);
-    expect(cache().has("comp.html#a")).toBe(false);
-  });
-
-  it("leaves entries that belong to a different source file", () => {
-    seed("comp.html#a");
-    seed("a");
-    seed("other.html#z");
-    seed("z");
-
-    clearKeyframeCacheForFile("comp.html");
-
-    expect(cache().has("other.html#z")).toBe(true);
-    expect(cache().has("z")).toBe(true);
-  });
-});
-
 describe("pruneKeyframeCacheToFiles", () => {
   // Switching composition leaves the previous comp's elements cached with no
   // owner left to clear them: each file only ever clears its own entries.
@@ -152,9 +110,140 @@ describe("pruneKeyframeCacheToFiles", () => {
     expect(cache().has("index.html#hero")).toBe(true);
     expect(cache().has("comp.html#a")).toBe(true);
   });
+
+  // The prune runs immediately before the atomic repopulate on every
+  // composition switch. One notification per stale element put every subscriber
+  // through a cache that was progressively emptier, which is the flash the
+  // atomic repopulate exists to avoid.
+  it("drops every stale file in one notification", () => {
+    seed("old.html#a");
+    seed("old.html#b");
+    seed("older.html#c");
+    seed("kept.html#k");
+    let notifications = 0;
+    const unsubscribe = usePlayerStore.subscribe(() => {
+      notifications += 1;
+    });
+
+    pruneKeyframeCacheToFiles(["kept.html"]);
+    unsubscribe();
+
+    expect(notifications).toBe(1);
+    expect([...cache().keys()]).toEqual(["kept.html#k"]);
+  });
+
+  // A prune that finds nothing stale must not hand subscribers a fresh Map
+  // identity: every keyframe consumer re-renders on cache identity alone.
+  it("does not publish when nothing is stale", () => {
+    seed("kept.html#k");
+    const before = cache();
+    let notifications = 0;
+    const unsubscribe = usePlayerStore.subscribe(() => {
+      notifications += 1;
+    });
+
+    pruneKeyframeCacheToFiles(["kept.html"]);
+    unsubscribe();
+
+    expect(notifications).toBe(0);
+    expect(cache()).toBe(before);
+  });
+});
+
+describe("replaceKeyframeCacheForFile", () => {
+  it("publishes complete keyframe and animation maps in one notification", () => {
+    const staleEntry = entry();
+    const otherEntry = entry();
+    const staleAnimation = animWithKeyframes("stale");
+    const freshAnimation = animWithKeyframes("fresh");
+    usePlayerStore.setState({
+      keyframeCache: new Map([
+        ["scene.html#stale", staleEntry],
+        ["index.html#stale", staleEntry],
+        ["stale", staleEntry],
+        ["other.html#other", otherEntry],
+        ["other", otherEntry],
+      ]),
+      gsapAnimations: new Map([
+        ["scene.html#stale", [staleAnimation]],
+        ["index.html#stale", [staleAnimation]],
+        ["stale", [staleAnimation]],
+        ["other.html#other", [staleAnimation]],
+        ["other", [staleAnimation]],
+      ]),
+    });
+    const snapshots: Array<{ cacheKeys: string[]; animationKeys: string[] }> = [];
+    const unsubscribe = usePlayerStore.subscribe((state) => {
+      snapshots.push({
+        cacheKeys: [...state.keyframeCache.keys()].sort(),
+        animationKeys: [...state.gsapAnimations.keys()].sort(),
+      });
+    });
+
+    replaceKeyframeCacheForFile(
+      "scene.html",
+      new Map([["fresh", entry()]]),
+      new Map([["fresh", [freshAnimation]]]),
+    );
+    unsubscribe();
+
+    expect(snapshots).toEqual([
+      {
+        cacheKeys: ["fresh", "index.html#fresh", "other", "other.html#other", "scene.html#fresh"],
+        animationKeys: [
+          "fresh",
+          "index.html#fresh",
+          "other",
+          "other.html#other",
+          "scene.html#fresh",
+        ],
+      },
+    ]);
+    expect(usePlayerStore.getState().gsapAnimations.get("scene.html#fresh")).toEqual([
+      freshAnimation,
+    ]);
+  });
 });
 
 describe("updateKeyframeCacheFromParsed", () => {
+  it("records colliding animation targets with their own tween percentages", () => {
+    const animation = (
+      id: string,
+      propertyGroup: string,
+      properties: Record<string, number>,
+      percentage: number,
+      resolvedStart: number,
+    ): GsapAnimation => ({
+      ...animWithKeyframes(id),
+      targetSelector: "#hero",
+      propertyGroup,
+      resolvedStart,
+      keyframes: { format: "percentage", keyframes: [{ percentage, properties }] },
+    });
+
+    usePlayerStore.setState({
+      elements: [{ id: "hero", domId: "hero", tag: "div", start: 0, duration: 4, track: 0 }],
+    });
+
+    updateKeyframeCacheFromParsed(
+      [
+        animation("hero-position", "position", { x: 100 }, 50, 0.5),
+        animation("hero-visual", "visual", { opacity: 1 }, 80, 0.2),
+        animation("hero-position", "position", { y: 50 }, 25, 0.75),
+        animation("hero-scale", "scale", { scale: 2 }, 60, 0.4),
+      ],
+      "scene.html",
+      "hero",
+      {},
+    );
+
+    expect(cache().get("scene.html#hero")?.keyframes[0]?.collidingAnimationTargets).toEqual([
+      { animationId: "hero-position", tweenPercentage: 50 },
+      { animationId: "hero-visual", tweenPercentage: 80 },
+      { animationId: "hero-scale", tweenPercentage: 60 },
+    ]);
+  });
+
   it("serializes a multi-keyframe tween with a stable shape and animation identity", () => {
     const animation: GsapAnimation = {
       ...animWithKeyframes("hero"),
@@ -274,6 +363,69 @@ describe("updateKeyframeCacheFromParsed", () => {
 
     expect(cache().has("scene.html#box")).toBe(true);
     expect(usePlayerStore.getState().gsapAnimations.get("scene.html#box")).toEqual([animation]);
+  });
+
+  // `#stat3 .block` animates the BLOCK inside #stat3, not #stat3. An unanchored
+  // `^#([\w-]+)/` prefix match filed it under "stat3", which both stole the
+  // child's diamonds and collided with #stat3's own tween at the shared
+  // percentage (dropping #stat3's ease as ambiguous).
+  it("attributes a descendant selector to the child, not to its ancestor", () => {
+    const parent: GsapAnimation = {
+      id: "stat3-fromTo",
+      targetSelector: "#stat3",
+      method: "fromTo",
+      position: 8.88,
+      resolvedStart: 8.88,
+      duration: 0.25,
+      fromProperties: { y: 20 },
+      properties: { y: 0 },
+      ease: "power2.out",
+      propertyGroup: "position",
+    };
+    const child: GsapAnimation = {
+      id: "block-from",
+      targetSelector: "#stat3 .block",
+      method: "from",
+      position: 9.13,
+      resolvedStart: 9.13,
+      duration: 0.3,
+      properties: { opacity: 0 },
+      ease: "power2.in",
+      propertyGroup: "visual",
+    };
+    usePlayerStore.setState({
+      elements: [
+        { id: "stat3-clip", domId: "stat3", tag: "div", start: 8.88, duration: 1, track: 0 },
+      ],
+    });
+    const doc = {
+      querySelectorAll: (selector: string) =>
+        (selector === "#stat3 .block"
+          ? [{ id: "stat3-block" }]
+          : []) as unknown as NodeListOf<Element>,
+    } as unknown as Document;
+
+    updateKeyframeCacheFromParsed([parent, child], "scene.html", "stat3", {}, doc);
+
+    expect(usePlayerStore.getState().gsapAnimations.get("scene.html#stat3")).toEqual([parent]);
+    expect(usePlayerStore.getState().gsapAnimations.get("scene.html#stat3-block")).toEqual([child]);
+    // With the collision gone, #stat3's own curve survives instead of being
+    // deleted as an ambiguous same-percentage merge.
+    const parentKeyframes = cache().get("scene.html#stat3")?.keyframes ?? [];
+    expect(parentKeyframes.at(-1)?.ease).toBe("power2.out");
+    expect(parentKeyframes.some((keyframe) => "easeAmbiguous" in keyframe)).toBe(false);
+  });
+
+  it("attributes a descendant selector to nothing when there is no document", () => {
+    const child: GsapAnimation = {
+      ...animWithKeyframes("block-from"),
+      targetSelector: "#stat3 .block",
+    };
+
+    updateKeyframeCacheFromParsed([child], "scene.html", "stat3", {});
+
+    expect(cache().has("scene.html#stat3")).toBe(false);
+    expect(usePlayerStore.getState().gsapAnimations.has("scene.html#stat3")).toBe(false);
   });
 
   it("does not cache a flat tween without animatable numeric properties", () => {
