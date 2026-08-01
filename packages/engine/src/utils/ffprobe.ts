@@ -1,6 +1,8 @@
 // fallow-ignore-file code-duplication complexity
 import { spawn } from "child_process";
 import { readFileSync } from "fs";
+import * as zlib from "node:zlib";
+import { StringDecoder } from "node:string_decoder";
 import { basename, extname } from "path";
 import { redactTelemetryString } from "@hyperframes/core";
 import { FFPROBE_PATH_ENV, getFfprobeBinary } from "./ffmpegBinaries.js";
@@ -8,6 +10,10 @@ import { ManagedChildProcess } from "./managedChildProcess.js";
 import { trackChildProcess } from "./processTracker.js";
 
 const FFPROBE_STDERR_MAX_BYTES = 8 * 1024;
+/** Bound on collected stdout. Generous — real -show_streams JSON is well
+ *  under this — but finite, unlike the previous unbounded accumulation. */
+const FFPROBE_STDOUT_MAX_CHARS = 8_000_000;
+
 const FFPROBE_ERROR_MAX_CHARS = 4 * 1024;
 
 function redactFfprobeInput(stderr: string, filePath: string): string {
@@ -47,12 +53,44 @@ async function runFfprobe(
   argsWithoutInput: string[],
   signal?: AbortSignal,
 ): Promise<string> {
+  // `--` stops option parsing so a path like "-intro.mp4" is a filename, but
+  // it does NOT cover a path of exactly "-": ffprobe rewrites that to `fd:`
+  // AFTER option parsing and then reads stdin. Since stdin here is a pipe the
+  // parent never writes to and never ends, the probe hangs for the full 30s
+  // deadline and fails with an empty diagnostic (ffprobe never errored, so
+  // stderr is blank). Reject it up front with something a caller can read.
+  if (filePath === "-") {
+    throw new Error('[FFmpeg] Refusing to probe "-": stdin is not a supported input path.');
+  }
+
   const command = getFfprobeBinary();
-  const proc = spawn(command, ["-v", "error", ...argsWithoutInput, "--", filePath]);
+  const proc = spawn(command, ["-v", "error", ...argsWithoutInput, "--", filePath], {
+    // Nothing is ever written to the child's stdin; leaving it as a pipe is
+    // what lets a stdin-reading invocation block indefinitely.
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   trackChildProcess(proc);
+  // Decoded through StringDecoder rather than per-chunk toString(): a
+  // multi-byte character split across a 64 KiB pipe boundary decodes to U+FFFD
+  // on both sides. -show_format output above ~64 KiB with non-ASCII tag text
+  // (an MKV with many chapters, or title/artist tags) came back silently
+  // mangled — JSON.parse still succeeds, so nothing surfaced it, and tag
+  // lookups like alpha_mode could miss.
+  const decoder = new StringDecoder("utf8");
   let stdout = "";
-  proc.stdout.on("data", (data) => {
-    stdout += data.toString();
+  let stdoutTruncated = false;
+  proc.stdout.on("data", (data: Buffer) => {
+    // stderr is capped by ManagedChildProcess; stdout had no bound at all, and
+    // analyzeKeyframeIntervals emits one line per frame — an all-intra ProRes
+    // proxy can produce an unbounded string.
+    if (stdoutTruncated) return;
+    stdout += decoder.write(data);
+    // Checked AFTER appending: a single chunk can already exceed the bound,
+    // so a pre-append check only ever stops the second one.
+    if (stdout.length > FFPROBE_STDOUT_MAX_CHARS) {
+      stdoutTruncated = true;
+      stdout = "";
+    }
   });
   const managed = new ManagedChildProcess(proc, {
     signal,
@@ -60,6 +98,12 @@ async function runFfprobe(
     stderrMaxBytes: FFPROBE_STDERR_MAX_BYTES,
   });
   const outcome = await managed.wait();
+  stdout += decoder.end();
+  if (stdoutTruncated) {
+    throw new Error(
+      `[FFmpeg] ffprobe output exceeded ${FFPROBE_STDOUT_MAX_CHARS} characters; refusing to parse a truncated result.`,
+    );
+  }
   if (outcome.reason === "spawn_error") {
     if ((outcome.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
       const configured = process.env[FFPROBE_PATH_ENV]?.trim();
@@ -135,6 +179,9 @@ export interface AudioMetadata {
 interface FFProbeStream {
   codec_type: string;
   codec_name?: string;
+  /** e.g. "LC", "HE-AAC", "HE-AACv2" — where the SBR marker lives, since
+   *  codec_name is plain "aac" for all of them. */
+  profile?: string;
   width?: number;
   height?: number;
   duration?: string;
@@ -167,16 +214,36 @@ interface StillImageMetadata {
   colorSpace: VideoColorSpace | null;
 }
 
-function crc32(buf: Buffer): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) {
-    crc ^= buf[i] ?? 0;
+// node:zlib's crc32 is native and takes a running seed, so the chunk type and
+// the chunk data can be CRC'd in sequence without concatenating them into a
+// throwaway buffer: ~210 ms -> ~1.3 ms on a 12 MiB PNG.
+//
+// It landed in Node 22.2.0, and this repo declares `"node": ">=22"` with a
+// major-only runtime gate, so 22.0 and 22.1 are still supported. A NAMED
+// import of a missing export throws at module evaluation — i.e. `ffprobe.ts`
+// would fail to load at all on those, long before any PNG is parsed — so the
+// namespace import plus this capability check is deliberate. Raising the
+// floor to 22.2.0 instead would be a user-facing support change, which does
+// not belong in a PNG bug fix.
+const nativeCrc32 = typeof zlib.crc32 === "function" ? zlib.crc32 : undefined;
+
+/** Bit-at-a-time fallback for Node 22.0/22.1. Correct, just slower. */
+function crc32Fallback(data: Buffer, seed: number): number {
+  let crc = seed ^ 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i] ?? 0;
     for (let bit = 0; bit < 8; bit++) {
       const mask = -(crc & 1);
       crc = (crc >>> 1) ^ (0xedb88320 & mask);
     }
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+function chunkCrc32(chunkType: string, chunkData: Buffer): number {
+  const typeBytes = Buffer.from(chunkType, "ascii");
+  if (nativeCrc32) return nativeCrc32(chunkData, nativeCrc32(typeBytes));
+  return crc32Fallback(chunkData, crc32Fallback(typeBytes, 0));
 }
 
 export function extractPngMetadataFromBuffer(buf: Buffer): StillImageMetadata | null {
@@ -205,10 +272,14 @@ export function extractPngMetadataFromBuffer(buf: Buffer): StillImageMetadata | 
     if (pos + 12 + chunkLen > buf.length) return null;
     const chunkData = buf.subarray(pos + 8, pos + 8 + chunkLen);
     const chunkCrc = buf.readUInt32BE(pos + 8 + chunkLen);
-    const chunkBytes = Buffer.concat([Buffer.from(chunkType, "ascii"), chunkData]);
-    if (crc32(chunkBytes) !== chunkCrc) return null;
+    if (chunkCrc32(chunkType, chunkData) !== chunkCrc) return null;
 
-    if (chunkType === "IHDR" && chunkLen >= 8) {
+    // First IHDR only. PNG permits exactly one and it must come first, but a
+    // malformed file can carry more — without this anchor a trailing
+    // [IHDR 1x1] silently replaced the real 4K dimensions, and the producer
+    // laid out a one-pixel image. `>= 13` is the spec length; the old `>= 8`
+    // accepted a truncated header and read height out of the CRC bytes.
+    if (chunkType === "IHDR" && chunkLen >= 13 && width === 0 && height === 0) {
       width = buf.readUInt32BE(pos + 8);
       height = buf.readUInt32BE(pos + 12);
     }
@@ -242,11 +313,38 @@ export function extractPngMetadataFromBuffer(buf: Buffer): StillImageMetadata | 
       };
     }
 
+    // Everything this parser extracts has been found, so stop walking.
+    //
+    // Not just an optimisation: cICP must precede IDAT (enforced above), so
+    // continuing only ever visits chunks we ignore — while making whole-file
+    // integrity a precondition for returning anything. A truncated or
+    // bad-CRC trailing chunk in an otherwise-good HDR PNG used to null the
+    // entire result, and the caller then re-throws the swallowed ffprobe
+    // error instead of using the fallback it just computed.
+    if (width > 0 && height > 0 && colorSpaceFromCicp !== null) break;
+
     if (chunkType === "IEND") break;
     pos += 12 + chunkLen;
   }
 
   return width > 0 && height > 0 ? { width, height, colorSpace: colorSpaceFromCicp } : null;
+}
+
+/**
+ * Does this pix_fmt carry an alpha channel?
+ *
+ * Exported so the test asserts the shipped predicate rather than a copy of
+ * the pattern. Anchored at the start, matching studio-server's
+ * mediaMetadata.ts: the previous inline pattern bound its `(^|[^a-z])` anchor
+ * to the first alternative only — `|` is looser than concatenation — so the
+ * guard was decorative for every other name. It also missed abgr, ya8/ya16
+ * and ayuv64, and its `gray[a-z0-9]*a` branch matched only gray8a/gray16a,
+ * names FFmpeg renamed to ya8/ya16 in 2013. A `ya8` grayscale-plus-alpha PNG
+ * reported hasAlpha:false, resolveFrameFormat picked jpg, and the overlay
+ * flattened to an opaque rectangle.
+ */
+export function pixelFormatHasAlpha(pixelFormat: string): boolean {
+  return /^(?:yuva|rgba|argb|bgra|abgr|gbrap|ya|ayuv)/i.test(pixelFormat);
 }
 
 function extractStillImageMetadata(filePath: string): StillImageMetadata | null {
@@ -274,19 +372,65 @@ function readTagCI(tags: Record<string, string | undefined> | undefined, name: s
   return "";
 }
 
-function parseFrameRate(frameRateStr: string | undefined): number {
+/**
+ * Parse an ffprobe rational frame rate ("30000/1001") or plain number.
+ *
+ * Returns 0 for anything not a usable positive rate. Exported so tests
+ * exercise the shipped function directly instead of re-importing the module
+ * behind a spawn mock.
+ *
+ * Every guard here is load-bearing, because a bad value is NOT caught
+ * downstream: callers use `meta.fps || 30`, which only rescues 0 and NaN.
+ * Infinity and negatives are truthy and flow into buildEncoderArgs as
+ * `-r Infinity` / `-r -30`, which ffmpeg rejects mid-render, and into
+ * frameCount arithmetic that then goes negative or non-finite.
+ *
+ *  - the QUOTIENT is checked, not just the operands: "1e308/1e-10" and
+ *    "2/1e-320" have finite parts and an infinite result;
+ *  - the sign is checked: "-30/1", "30/-1" and "-60" all parsed clean;
+ *  - more than two parts is rejected: "30/1/2" used to fall through to the
+ *    bare parseFloat below and return 30, as did "60fps", because parseFloat
+ *    stops at trailing garbage;
+ *  - sub-0.005 rates round to 0 at 2dp and would be replaced by the caller's
+ *    30fps default, re-encoding a 300-second 1/300-fps timelapse as a
+ *    ~1/30-second clip. Kept as 0 is wrong too, so they are floored to the
+ *    smallest representable 2dp rate instead.
+ */
+export function parseFrameRate(frameRateStr: string | undefined): number {
   if (!frameRateStr) return 0;
+
   const parts = frameRateStr.split("/");
-  if (parts.length === 2) {
-    const num = parseFloat(parts[0] ?? "");
-    const den = parseFloat(parts[1] ?? "");
-    if (Number.isFinite(num) && Number.isFinite(den) && den !== 0) {
-      return Math.round((num / den) * 100) / 100;
-    }
-    return 0;
-  }
-  const parsed = parseFloat(frameRateStr);
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (parts.length > 2) return 0;
+
+  // Number(), never parseFloat — on BOTH the rational operands and the plain
+  // form. parseFloat stops at trailing garbage, so "60fps" parsed as 60 and,
+  // once the plain path was fixed but the operands were not, "60fps/1" and
+  // "30garbage/1garbage" still slipped through the rational branch.
+  const strict = (part: string | undefined): number =>
+    part === undefined || part.trim() === "" ? NaN : Number(part.trim());
+
+  const raw =
+    parts.length === 2
+      ? (() => {
+          const num = strict(parts[0]);
+          const den = strict(parts[1]);
+          if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return NaN;
+          return num / den;
+        })()
+      : strict(frameRateStr);
+
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+
+  // Checked AFTER rounding as well as before. `raw * 100` overflows for a
+  // finite-but-huge rate ("1e307", "1e307/1"), so `rounded` became Infinity
+  // and sailed past the positivity check — reaching exactly the `-r Infinity`
+  // failure the finite guard above exists to prevent.
+  const rounded = Math.round(raw * 100) / 100;
+  if (!Number.isFinite(rounded)) return 0;
+
+  // A real but very slow rate must not collapse to 0 and inherit the
+  // caller's 30fps default.
+  return rounded > 0 ? rounded : 0.01;
 }
 
 /**
@@ -301,7 +445,18 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
   if (cached) return cached;
 
   const probePromise = (async (): Promise<VideoMetadata> => {
-    const stillImageMeta = extractStillImageMetadata(filePath);
+    // Lazily memoized. This is a pure fallback, but it used to run eagerly
+    // and synchronously BEFORE the first await: readFileSync plus a CRC walk
+    // per file, so a caller fanning out over composition.images with
+    // Promise.all executed every parse back-to-back before a single ffprobe
+    // was spawned (12 4K PNGs: 2649 ms vs 170 ms probe-only) — event-loop
+    // stall that also blocks Puppeteer IPC and progress reporting. On the
+    // happy path the result was then discarded.
+    let stillImageMetaMemo: StillImageMetadata | null | undefined;
+    const stillImage = (): StillImageMetadata | null => {
+      stillImageMetaMemo ??= extractStillImageMetadata(filePath);
+      return stillImageMetaMemo;
+    };
 
     let output: FFProbeOutput | null = null;
     try {
@@ -313,11 +468,12 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
       ]);
       output = parseProbeJson(stdout);
     } catch (error) {
-      if (!stillImageMeta) throw error;
+      if (!stillImage()) throw error;
     }
 
     const videoStream = output?.streams.find((s) => s.codec_type === "video");
     if (!videoStream) {
+      const stillImageMeta = stillImage();
       if (stillImageMeta) {
         return {
           durationSeconds: 0,
@@ -344,15 +500,31 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
     const colorTransfer = videoStream.color_transfer || "";
     const colorPrimaries = videoStream.color_primaries || "";
     const colorSpaceVal = videoStream.color_space || "";
-    const ffprobeColorSpace =
-      colorTransfer || colorPrimaries || colorSpaceVal
-        ? { colorTransfer, colorPrimaries, colorSpace: colorSpaceVal }
-        : null;
-    const colorSpace = ffprobeColorSpace ?? stillImageMeta?.colorSpace ?? null;
+    // Merged per field, not whole-object. ffprobe emits color_space "gbr" for
+    // every PNG — even a plain rgb24 with no colour metadata — so a
+    // whole-object `??` meant the cICP fallback was discarded whenever
+    // ffprobe ran at all, which is exactly the build it exists to cover: one
+    // that reports gbr but does not decode cICP. An HDR PQ PNG then resolved
+    // colorTransfer "" and graded SDR.
+    const cicp = colorTransfer && colorPrimaries && colorSpaceVal ? null : stillImage()?.colorSpace;
+    const merged = {
+      colorTransfer: colorTransfer || cicp?.colorTransfer || "",
+      colorPrimaries: colorPrimaries || cicp?.colorPrimaries || "",
+      colorSpace: colorSpaceVal || cicp?.colorSpace || "",
+    };
+    const colorSpace =
+      merged.colorTransfer || merged.colorPrimaries || merged.colorSpace ? merged : null;
     const pixelFormat = videoStream.pix_fmt || "";
     const alphaMode = readTagCI(videoStream.tags, "alpha_mode");
-    const hasAlpha =
-      /(^|[^a-z])yuva|rgba|argb|bgra|gbrap|gray[a-z0-9]*a/i.test(pixelFormat) || alphaMode === "1";
+    const hasAlpha = pixelFormatHasAlpha(pixelFormat) || alphaMode === "1";
+    // Anchored at the start, matching studio-server's mediaMetadata.ts. The
+    // previous pattern bound its `(^|[^a-z])` anchor to the FIRST alternative
+    // only — `|` is looser than concatenation — so the guard was decorative
+    // for every other name. It also missed abgr, ya8/ya16 and ayuv64, and its
+    // `gray[a-z0-9]*a` branch matched only gray8a/gray16a, names FFmpeg
+    // renamed to ya8/ya16 in 2013. A `ya8` grayscale-plus-alpha PNG reported
+    // hasAlpha:false, resolveFrameFormat picked jpg, and the overlay
+    // flattened to an opaque rectangle.
 
     const containerDuration = output?.format.duration ? parseFloat(output.format.duration) : 0;
     const streamDuration = videoStream.duration ? parseFloat(videoStream.duration) : 0;
@@ -360,8 +532,8 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
     return {
       durationSeconds: containerDuration,
       videoStreamDurationSeconds: streamDuration > 0 ? streamDuration : containerDuration,
-      width: videoStream.width || stillImageMeta?.width || 0,
-      height: videoStream.height || stillImageMeta?.height || 0,
+      width: videoStream.width || stillImage()?.width || 0,
+      height: videoStream.height || stillImage()?.height || 0,
       fps,
       videoCodec: videoStream.codec_name || "unknown",
       hasAudio: output?.streams.some((s) => s.codec_type === "audio") ?? false,
@@ -412,20 +584,59 @@ export async function extractAudioMetadata(
     const streamDuration = audioStream.duration ? parseFloat(audioStream.duration) : undefined;
     const sampleRate = audioStream.sample_rate ? parseInt(audioStream.sample_rate) : 44100;
     const audioCodec = audioStream.codec_name || "unknown";
-    if (audioCodec === "aac" && sampleRate > 0) {
-      const packetStdout = await runFfprobe(filePath, [
-        "-select_streams",
-        "a:0",
-        "-count_packets",
-        "-show_entries",
-        "stream=nb_read_packets",
-        "-print_format",
-        "json",
-      ]);
-      const packetOutput = parseProbeJson(packetStdout);
-      const packetCount = Number(packetOutput.streams[0]?.nb_read_packets);
-      if (Number.isFinite(packetCount) && packetCount > 0) {
-        durationSeconds = (packetCount * AAC_LC_SAMPLES_PER_PACKET) / sampleRate;
+    // AAC-LC container durations are often slightly wrong, so the packet
+    // count gives a better one. Three constraints on that refinement:
+    //
+    // 1. It must never fail the call. durationSeconds is ALREADY correct from
+    //    format.duration at this point. `-count_packets` demuxes the whole
+    //    container against runFfprobe's fixed 30s deadline, so a long file on
+    //    slow or network storage times out — and the caller in htmlCompiler
+    //    catches that under "Source file has no audio stream", returns
+    //    duration 0, drops the audio element and ships a silent render.
+    // 2. It must honour the caller's AbortSignal. Only the first probe
+    //    received it, so aborting during this one was ignored and the call
+    //    resolved with full metadata long after cancellation.
+    // 3. It must apply ONLY to profiles whose 1024-sample framing is
+    //    established. ffprobe reports codec_name "aac" for every AAC
+    //    variant — the framing lives in the profile:
+    //
+    //      LC            1024 samples/frame   <- the only one this maths fits
+    //      HE-AAC v1/v2  2048 output samples against a doubled sample_rate
+    //      LD            512
+    //      ELD           480
+    //      Main/SSR/LTP  1024 nominally, but not verified here
+    //      xHE-AAC (USAC) variable
+    //
+    //    An ALLOWLIST, not a HE-AAC denylist. The denylist form let LD/ELD
+    //    through (halving to a third of the true duration), and let an
+    //    unknown or missing profile through too — so an unrecognised HE
+    //    spelling preserved the exact truncation this is meant to close.
+    //    A skipped refinement is harmless: format.duration is already correct.
+    const isAacLc = /^\s*LC\s*$/i.test(audioStream.profile ?? "");
+    if (audioCodec === "aac" && isAacLc && sampleRate > 0) {
+      try {
+        const packetStdout = await runFfprobe(
+          filePath,
+          [
+            "-select_streams",
+            "a:0",
+            "-count_packets",
+            "-show_entries",
+            "stream=nb_read_packets",
+            "-print_format",
+            "json",
+          ],
+          options?.signal,
+        );
+        const packetOutput = parseProbeJson(packetStdout);
+        const packetCount = Number(packetOutput.streams[0]?.nb_read_packets);
+        if (Number.isFinite(packetCount) && packetCount > 0) {
+          durationSeconds = (packetCount * AAC_LC_SAMPLES_PER_PACKET) / sampleRate;
+        }
+      } catch (error) {
+        // An abort is the caller's intent, not a refinement failure — let it
+        // through. Anything else keeps the container duration we already have.
+        if (options?.signal?.aborted) throw error;
       }
     }
 
