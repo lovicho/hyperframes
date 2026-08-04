@@ -252,7 +252,7 @@ export {
   quantizeTimeToFrame,
   type MediaVisualStyleProperty,
 } from "./inline-scripts/parityContract";
-export { redactTelemetryString } from "./telemetryRedaction";
+export { redactKnownPaths, redactTelemetryString } from "./telemetryRedaction";
 export { isSafePath, resolveWithinProject } from "./safePath";
 export type {
   HyperframePickerApi,
@@ -329,3 +329,19 @@ export {
   isBlockItem,
   isComponentItem,
 } from "./registry/index.js";
+
+export {
+  canaryBucket,
+  evaluateCanary,
+  parseCanaryOverride,
+  type CanaryDecision,
+  type CanaryInput,
+  type CanaryReason,
+} from "./canary.js";
+export {
+  CANARIES,
+  canaryEnvVar,
+  findCanary,
+  overdueCanaries,
+  type CanaryDefinition,
+} from "./canaryRegistry.js";
