@@ -2,8 +2,8 @@
   "source": "heygen-com/hyperframes",
   "skills": {
     "embedded-captions": {
-      "hash": "e8c2c3b6dfd04b39",
-      "files": 140
+      "hash": "14e79d53c24e3945",
+      "files": 138
     },
     "faceless-explainer": {
       "hash": "c70b904aa68cf7e5",
@@ -26,7 +26,7 @@
       "files": 121
     },
     "hyperframes-cli": {
-      "hash": "17e2300803951ed7",
+      "hash": "e042fcaaa3f9767f",
       "files": 11
     },
     "hyperframes-core": {
@@ -42,8 +42,8 @@
       "files": 3
     },
     "hyperframes-registry": {
-      "hash": "eca45f795c2ff093",
-      "files": 10
+      "hash": "9a4049ea33f0b914",
+      "files": 12
     },
     "media-use": {
       "hash": "7e329ade41b1c1ba",
@@ -70,7 +70,7 @@
       "files": 70
     },
     "slideshow": {
-      "hash": "71368acf61074198",
+      "hash": "6a24a84b0c1a75f9",
       "files": 2
     },
     "talking-head-recut": {

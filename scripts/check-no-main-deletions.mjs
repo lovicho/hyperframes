@@ -24,6 +24,33 @@ import { execFileSync } from "node:child_process";
 
 const BASE_FLAG = "--base";
 
+/**
+ * Deletions this repository has already agreed to, each with the reason.
+ *
+ * A blanket escape hatch (a flag, an env var, `--force`) would turn the guard
+ * off exactly when it matters, because the branch deleting something by
+ * accident is also the branch that would reach for it. Naming each path here
+ * instead keeps the default absolute and makes every intentional removal a
+ * reviewable line in a diff.
+ *
+ * Entries are for deletions that are NOT renames — git already pairs those on
+ * its own. Remove an entry once its deletion has landed on the base.
+ */
+export const ALLOWED_DELETIONS = new Map([
+  [
+    "packages/studio/src/components/StudioFeedbackBar.tsx",
+    "replaced by components/feedback/StudioFeedbackCard.tsx; too little shared content for git to pair as a rename",
+  ],
+  [
+    "skills/embedded-captions/references/test-set.md",
+    "#3219: orphaned in the shipped skill (zero inbound references across all 140 files) and its corpus lives only at ~/Downloads/heygen_relevant_videos/, so it was neither reachable nor runnable on any install",
+  ],
+  [
+    "skills/embedded-captions/themes/PORTING.md",
+    "#3219: same, zero inbound references; a theme-authoring procedure whose inputs (cap_fx3 demos, frame corpora, CONTRACT.md) are not distributed with the skill",
+  ],
+]);
+
 export function parseBase(argv, fallback = "origin/main") {
   const index = argv.indexOf(BASE_FLAG);
   if (index === -1) return fallback;
@@ -71,7 +98,14 @@ function main() {
     process.exit(2);
   }
 
-  const { deleted, renamed } = classify(diff);
+  const { deleted: allDeleted, renamed } = classify(diff);
+  const agreed = allDeleted.filter((path) => ALLOWED_DELETIONS.has(path));
+  const deleted = allDeleted.filter((path) => !ALLOWED_DELETIONS.has(path));
+
+  if (agreed.length > 0) {
+    console.log(`${agreed.length} deletion(s) agreed in ALLOWED_DELETIONS:`);
+    for (const path of agreed) console.log(`  ${path} — ${ALLOWED_DELETIONS.get(path)}`);
+  }
   if (renamed.length > 0) {
     console.log(`${renamed.length} renamed (allowed):`);
     for (const { from, to } of renamed.slice(0, 10)) console.log(`  ${from} -> ${to}`);
