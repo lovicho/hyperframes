@@ -112,6 +112,12 @@
       "import": "./src/audioFx.ts",
       "types": "./src/audioFx.ts"
     },
+    "./audio-fx-presets": {
+      "bun": "./src/audioFxPresets.ts",
+      "node": "./dist/audioFxPresets.js",
+      "import": "./src/audioFxPresets.ts",
+      "types": "./src/audioFxPresets.ts"
+    },
     "./audio-fx-tail": {
       "bun": "./src/audio/audioFxTail.ts",
       "node": "./dist/audio/audioFxTail.js",
@@ -402,6 +408,10 @@
         "import": "./dist/audioFx.js",
         "types": "./dist/audioFx.d.ts"
       },
+      "./audio-fx-presets": {
+        "import": "./dist/audioFxPresets.js",
+        "types": "./dist/audioFxPresets.d.ts"
+      },
       "./audio-fx-tail": {
         "import": "./dist/audio/audioFxTail.js",
         "types": "./dist/audio/audioFxTail.d.ts"
@@ -559,7 +569,7 @@
   },
   "scripts": {
     "build": "bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && tsx scripts/rewrite-esm-extensions.ts",
-    "test": "bun run check:position-edits-render && vitest run",
+    "test": "bun run check:position-edits-render && bun run build:audio-fx-runtime && vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:runtime-coverage": "vitest run --coverage src/runtime",

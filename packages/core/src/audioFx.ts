@@ -16,6 +16,16 @@
 
 export const HF_AUDIO_FX_ATTR = "data-fx-chain";
 
+/**
+ * The same attribute as a `dataset` / `dataAttributes` key — the `data-` prefix
+ * is not part of that spelling.
+ *
+ * Derived rather than restated: the studio writes through
+ * `HF_AUDIO_FX_ATTR` and reads through the key, so a hardcoded `"fx-chain"`
+ * on the read side is a rename waiting to half-land.
+ */
+export const HF_AUDIO_FX_DATA_KEY = HF_AUDIO_FX_ATTR.slice("data-".length);
+
 /** Chain files are versioned; a reader must refuse a version it doesn't know. */
 export const HF_AUDIO_FX_CHAIN_VERSION = 1;
 
@@ -136,6 +146,16 @@ const poles: HfAudioFxEnumParam = {
  * a value that survives `normalizeAudioFxParams` is always safe to realise.
  */
 export const HF_AUDIO_FX: readonly HfAudioFxDef[] = [
+  {
+    id: "gain",
+    label: "Gain",
+    group: "dynamics",
+    description: "Raise or lower the whole signal. Automate it to duck under something else.",
+    // Cuts go deep, boosts stay modest: this is a level stage for making room,
+    // and a chain that can add 40 dB clips long before it is useful.
+    params: [gainDb(-60, 12, 0)],
+    web: "gain-node",
+  },
   {
     id: "peaking",
     label: "Peaking EQ",
@@ -751,7 +771,20 @@ export function normalizeAudioFxParams(
       out[p.key] = ok ? (raw as string) : p.default;
       continue;
     }
-    const n = typeof raw === "number" ? raw : Number(raw);
+    // Only a number, or a string that actually spells one. `Number(null)`,
+    // `Number("")`, `Number(false)` and `Number([])` are all 0 and all pass
+    // Number.isFinite, so a missing or blanked value used to clamp to 0 rather
+    // than fall back to the declared default — and 0 is a legal value for most
+    // of these knobs, so nothing downstream could tell. A compressor whose
+    // threshold arrived as null sat at 0 dB and never engaged, silently,
+    // instead of at its -24 dB default. `numberOrNull` in audioAutomation.ts
+    // already guards exactly this.
+    const n =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string" && raw.trim() !== ""
+          ? Number(raw)
+          : Number.NaN;
     out[p.key] = Number.isFinite(n) ? Math.min(p.max, Math.max(p.min, n)) : p.default;
   }
   return out;
@@ -771,6 +804,15 @@ export interface HfAudioFxNode {
   /** Set on nodes the carve analysis generated, so re-running replaces them
    *  instead of stacking another set on top of hand-added effects. */
   fromCarve?: boolean;
+  /**
+   * Id of the preset that wrote this node, for the same reason `fromCarve`
+   * exists: re-applying a preset replaces its own nodes rather than adding a
+   * second copy, and the rack can brace them together under the preset's name.
+   *
+   * The id rather than a flag, because a chain can carry more than one preset
+   * and each has to be able to find its own.
+   */
+  fromPreset?: string;
   /** Absent means enabled — chain files written before the field existed still load. */
   enabled?: boolean;
   params?: HfAudioFxParamValues;

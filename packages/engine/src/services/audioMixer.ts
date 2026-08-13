@@ -793,6 +793,12 @@ export async function processCompositionAudio(
   // be able to abort the in-flight ffmpeg runs before the finally-block removes
   // workDir out from under them. Chained off the caller's signal so external
   // cancellation still behaves as before.
+  //
+  // Every child that can outlive a sibling's failure has to be given THIS
+  // signal, not the caller's: the trim, the video extract and the download all
+  // took `signal`, so `internalController.abort()` cancelled nothing and the
+  // `rmSync(workDir)` on the next line ran while their ffmpeg children were
+  // still writing into it.
   const internalController = new AbortController();
   const effectiveSignal = internalController.signal;
   if (signal) {
@@ -823,9 +829,16 @@ export async function processCompositionAudio(
 
         if (isHttpUrl(srcPath)) {
           try {
-            srcPath = await downloadToTemp(srcPath, workDir, undefined, signal, undefined, {
-              onTelemetry: writeUrlDownloadTelemetry,
-            });
+            srcPath = await downloadToTemp(
+              srcPath,
+              workDir,
+              undefined,
+              effectiveSignal,
+              undefined,
+              {
+                onTelemetry: writeUrlDownloadTelemetry,
+              },
+            );
           } catch (err: unknown) {
             failures.push(downloadFailure(err, element.id));
             return;
@@ -890,7 +903,7 @@ export async function processCompositionAudio(
               startTime: element.mediaStart,
               duration: element.end - element.start,
             },
-            signal,
+            effectiveSignal,
             config,
           );
           if (!extractResult.success) {
@@ -916,7 +929,7 @@ export async function processCompositionAudio(
             trimmedPath,
             element.mediaStart,
             element.end - element.start,
-            signal,
+            effectiveSignal,
             config,
           );
           if (!prepResult.success) {
@@ -949,6 +962,27 @@ export async function processCompositionAudio(
             )
           : null;
 
+        // Computed before the chain runs, not after: the FX pass bakes the
+        // envelope into its float output so the duck lands before the ±1 clamp
+        // in writeWav, instead of after it.
+        //
+        // A volume lane supersedes keyframes probed from the timeline: the two
+        // would fight, and the lane is the explicit one. `lint` warns when a
+        // track carries both.
+        const laneKeyframes = automation
+          ? volumeLaneKeyframes(automation, element.start, element.end - element.start)
+          : null;
+        const envelopeKeyframes = laneKeyframes ?? element.volumeKeyframes;
+        const envelope =
+          envelopeKeyframes && envelopeKeyframes.length > 0
+            ? {
+                keyframes: envelopeKeyframes,
+                trackStart: element.start,
+                baseVolume: element.volume ?? 1.0,
+              }
+            : null;
+
+        let bakedEnvelope = false;
         let tailSeconds = 0;
         if (element.fxChain) {
           // The chain is serialised into the attribute, the same way colour
@@ -958,7 +992,7 @@ export async function processCompositionAudio(
           // The rendered WAV is longer than the input by exactly this much, so
           // the mix has to be told to let it through.
           tailSeconds = chainTailSeconds(chain, automation ?? undefined);
-          audioSrcPath = await applyAudioFxChain(
+          const fxResult = await applyAudioFxChain(
             audioSrcPath,
             chain,
             join(workDir, `${element.id}-fx.wav`),
@@ -966,29 +1000,24 @@ export async function processCompositionAudio(
               trackId: element.id,
               signal: effectiveSignal,
               ...(automation ? { automation } : {}),
+              ...(envelope ? { envelope } : {}),
             },
           );
+          audioSrcPath = fxResult.path;
+          bakedEnvelope = fxResult.envelopeBaked;
         }
 
-        // Primary volume-automation path: bake the envelope into the PCM samples
-        // (sample-accurate, no keyframe ceiling). If the WAV isn't the expected
-        // 16-bit PCM, fall back to the ffmpeg expression path by leaving the
-        // keyframes on the track for buildVolumeExpression to handle.
-        //
-        // A volume lane supersedes keyframes probed from the timeline: the two
-        // would fight, and the lane is the explicit one. `lint` warns when a
-        // track carries both.
-        const laneKeyframes = automation
-          ? volumeLaneKeyframes(automation, element.start, element.end - element.start)
-          : null;
-        const envelopeKeyframes = laneKeyframes ?? element.volumeKeyframes;
-        let bakedEnvelope = false;
-        if (envelopeKeyframes && envelopeKeyframes.length > 0) {
+        // Primary volume-automation path for a track the FX pass did not bake:
+        // multiply the envelope into the PCM samples (sample-accurate, no
+        // keyframe ceiling). If the WAV isn't the expected 16-bit PCM, fall
+        // back to the ffmpeg expression path by leaving the keyframes on the
+        // track for buildVolumeExpression to handle.
+        if (envelope && !bakedEnvelope) {
           bakedEnvelope = applyVolumeEnvelopeToWav(
             audioSrcPath,
-            envelopeKeyframes,
-            element.start,
-            element.volume ?? 1.0,
+            envelope.keyframes,
+            envelope.trackStart,
+            envelope.baseVolume,
           );
         }
         tracks.push({

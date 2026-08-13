@@ -9,6 +9,7 @@
  */
 
 import {
+  enabledAudioFxNodes,
   getAudioFxDef,
   normalizeAudioFxParams,
   type HfAudioFxChain,
@@ -117,6 +118,26 @@ function simple(
  */
 const USES_Q: ReadonlySet<BiquadFilterType> = new Set(["peaking", "highpass", "lowpass"]);
 
+/** dB on the knob, a linear multiplier on the AudioParam. */
+const dbToLinear = (db: number): number => Math.pow(10, db / 20);
+
+/**
+ * A plain level stage.
+ *
+ * Every other gain in the registry sits on a BiquadFilterNode, whose `gain`
+ * param is already in dB. A GainNode's is a linear multiplier, so both the
+ * initial value and anything an automation lane schedules have to be converted —
+ * which is what `FxParamTarget.map` is for.
+ */
+const gainStage: Builder = (ctx, p) => {
+  const g = ctx.createGain();
+  const apply = (v: HfAudioFxParamValues): void => {
+    g.gain.value = dbToLinear(n(v.gain));
+  };
+  apply(p);
+  return simple(g, apply, { gain: [{ param: g.gain, map: dbToLinear }] });
+};
+
 function biquad(type: BiquadFilterType, useGain: boolean): Builder {
   return (ctx, p) => {
     const f = ctx.createBiquadFilter();
@@ -162,7 +183,17 @@ function workletBuilder(processor: string): Builder {
       input: node,
       output: node,
       update: (v) => node.port.postMessage({ ...v }),
-      dispose: () => node.disconnect(),
+      dispose: () => {
+        // Disconnecting is not enough to retire an AudioWorkletProcessor: it
+        // lives until its `process()` returns false, and these all returned
+        // true unconditionally. So every chain rebuild that dropped a limiter,
+        // compressor, gate or bitcrush left it running on the audio thread for
+        // the rest of the session, and a few edits to a carved bed accumulated
+        // a stack of them. The processors treat this message as their cue to
+        // stop.
+        node.port.postMessage({ __hfDispose: true });
+        node.disconnect();
+      },
     };
   };
 }
@@ -344,8 +375,13 @@ const allpassPhaser: Builder = (ctx, p) => {
     // frequency at once — not one knob, one param — so they stay unautomated.
     automation: {
       speed: [{ param: lfo.frequency }],
-      in_gain: [{ param: dry.gain }],
-      out_gain: [{ param: wet.gain }],
+      // The trims, not wet/dry. apply() drives inTrim/outTrim from these knobs
+      // and pins wet and dry to 1 — so a lane aimed at wet/dry modulated a
+      // constant and left the trim frozen, and the next values-only edit slammed
+      // it back over the running envelope. The comment above records that this
+      // wiring was already moved once; the automation map was missed.
+      in_gain: [{ param: inTrim.gain }],
+      out_gain: [{ param: outTrim.gain }],
     },
     dispose: () => {
       try {
@@ -394,6 +430,7 @@ const convolver: Builder = (ctx, p) => {
 };
 
 const BUILDERS: Record<string, Builder> = {
+  "gain-node": gainStage,
   "biquad-peaking": biquad("peaking", true),
   "biquad-lowshelf": biquad("lowshelf", true),
   "biquad-highshelf": biquad("highshelf", true),
@@ -448,8 +485,7 @@ export interface FxChainHandle {
  * into the running nodes; when it changes, the caller rebuilds.
  */
 function shapeOf(chain: HfAudioFxChain): string {
-  return chain.nodes
-    .filter((node) => node.enabled !== false)
+  return enabledAudioFxNodes(chain)
     .map((node) => {
       const p = normalizeAudioFxParams(node.type, node.params);
       const poles = p.poles !== undefined ? `:${p.poles}` : "";
@@ -474,8 +510,7 @@ export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxCh
   const handles: { id?: string; type: string; handle: FxNodeHandle }[] = [];
 
   let tail: AudioNode = input;
-  for (const node of chain.nodes) {
-    if (node.enabled === false) continue;
+  for (const node of enabledAudioFxNodes(chain)) {
     const handle = buildFxNode(ctx, node.type, node.params ?? {});
     tail.connect(handle.input);
     tail = handle.output;
@@ -483,7 +518,7 @@ export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxCh
   }
   tail.connect(output);
 
-  let shape = shapeOf(chain);
+  const shape = shapeOf(chain);
 
   return {
     input,
@@ -491,11 +526,22 @@ export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxCh
     nodes: handles,
     update(next) {
       if (shapeOf(next) !== shape) return false;
-      const active = next.nodes.filter((node) => node.enabled !== false);
-      active.forEach((node, i) => {
-        handles[i]?.handle.update(normalizeAudioFxParams(node.type, node.params));
+      enabledAudioFxNodes(next).forEach((node, i) => {
+        const held = handles[i];
+        if (!held) return;
+        held.handle.update(normalizeAudioFxParams(node.type, node.params));
+        // The id follows the position, because the params just did. Reordering
+        // two effects of the same type leaves the shape identical, so the graph
+        // is updated in place — but a lane addresses its effect BY id, and an id
+        // captured at build time then names whichever effect used to be here.
+        // The scheduler would drive `fx.n2.frequency` into the band that is now
+        // n1: exactly what HfAudioFxNode.id documents itself as preventing.
+        if (node.id === undefined) delete held.id;
+        else held.id = node.id;
       });
-      shape = shapeOf(next);
+      // `shape` is not reassigned: the early return above already established
+      // that `shapeOf(next)` equals it, so recomputing was a whole normalise +
+      // join per observer tick to write back the string that was already there.
       return true;
     },
     dispose() {

@@ -155,6 +155,16 @@ describe("buildFxNode", () => {
     expect(workletNodes[0]!.messages[0]).toMatchObject({ threshold: -30 });
   });
 
+  it("tells a worklet processor to retire on dispose, not just disconnect it", () => {
+    // Disconnecting leaves the processor alive — it lives until `process()`
+    // returns false — so every rebuild that dropped a worklet effect left one
+    // running on the audio thread for the rest of the session.
+    workletNodes.length = 0;
+    const h = buildFxNode(asCtx(ctx()), "compressor", defaultAudioFxParams("compressor"));
+    h.dispose();
+    expect(workletNodes[0]!.messages).toEqual([{ __hfDispose: true }]);
+  });
+
   it("rebuilds the saturation curve for the selected shape", () => {
     const c = ctx();
     buildFxNode(asCtx(c), "saturate", { ...defaultAudioFxParams("saturate"), type: "hard" });
@@ -204,6 +214,39 @@ describe("buildFxChain", () => {
     expect(ok).toBe(true);
     expect(c.created.length).toBe(before); // nothing rebuilt
     expect(c.created.find((x) => x.kind === "biquad")!.frequency.value).toBe(2000);
+  });
+
+  it("lines new values up against the built nodes, skipping a bypassed one", () => {
+    // A bypassed node is not in the graph, so the update has to walk the
+    // ENABLED nodes to stay aligned with what was built. Walking `next.nodes`
+    // instead shifts everything after the bypass by one and pushes each node's
+    // parameters into its neighbour — and the shape is unchanged either way,
+    // so nothing forces a rebuild that would hide it.
+    const c = ctx();
+    const withBypass = (frequency: number): HfAudioFxChain => ({
+      version: 1,
+      nodes: [
+        {
+          type: "highpass",
+          enabled: true,
+          params: { ...defaultAudioFxParams("highpass"), frequency: 100 },
+        },
+        { type: "peaking", enabled: false, params: defaultAudioFxParams("peaking") },
+        {
+          type: "lowpass",
+          enabled: true,
+          params: { ...defaultAudioFxParams("lowpass"), frequency },
+        },
+      ],
+    });
+    const h = buildFxChain(asCtx(c), withBypass(8000));
+    const biquads = c.created.filter((n) => n.kind === "biquad");
+    expect(biquads).toHaveLength(2);
+
+    expect(h.update(withBypass(3000))).toBe(true);
+    // The lowpass took the new cutoff; the highpass was left where it was.
+    expect(biquads[0]!.frequency.value).toBe(100);
+    expect(biquads[1]!.frequency.value).toBe(3000);
   });
 
   it("reports that a rebuild is needed when the chain shape changes", () => {
@@ -342,6 +385,39 @@ describe("levels and per-channel state", () => {
   });
 });
 
+describe("gain stage", () => {
+  /**
+   * A level control the chain owns, so a carve can make broadband room for a
+   * voice without touching the track's own volume lane — which belongs to the
+   * author, and which a carve re-run would otherwise have to overwrite.
+   */
+  it("sets a GainNode from a value in dB", () => {
+    const c = ctx();
+    buildFxNode(c as unknown as BaseAudioContext, "gain", { gain: -6 });
+    const node = c.created.find((x) => x.kind === "gain");
+    expect(node).toBeTruthy();
+    expect(node!.gain.value).toBeCloseTo(0.501, 3);
+  });
+
+  it("passes unity through at 0 dB", () => {
+    const c = ctx();
+    buildFxNode(c as unknown as BaseAudioContext, "gain", { gain: 0 });
+    expect(c.created.find((x) => x.kind === "gain")!.gain.value).toBeCloseTo(1, 6);
+  });
+
+  it("maps an automation lane's dB into the AudioParam's linear units", () => {
+    // The lane is authored in the knob's own unit — dB, like every other gain in
+    // the registry — but a GainNode's param is a linear multiplier. Without the
+    // mapping, a lane point of -12 would schedule a gain of -12: a phase flip
+    // twelve times too loud, not a cut.
+    const handle = buildFxNode(ctx() as unknown as BaseAudioContext, "gain", { gain: 0 });
+    const target = handle.automation?.gain?.[0];
+    expect(target?.map).toBeTypeOf("function");
+    expect(target!.map!(-12)).toBeCloseTo(0.251, 3);
+    expect(target!.map!(0)).toBeCloseTo(1, 6);
+  });
+});
+
 describe("automatable parameters", () => {
   /**
    * The registry's `automatable` flag is what the panel and the scheduler both
@@ -403,5 +479,56 @@ describe("automatable parameters", () => {
       poles: "1",
     });
     expect(onePole.automation?.frequency).toBeUndefined();
+  });
+});
+
+describe("phaser automation targets", () => {
+  /**
+   * `in_gain` and `out_gain` trim the signal entering and leaving the effect,
+   * which the builder drives through inTrim/outTrim while pinning wet and dry
+   * to 1. The automation map used to aim both lanes at wet/dry — so an envelope
+   * modulated a constant, the trim it was supposed to move stayed frozen, and
+   * "fade the phaser out" left the dry leg playing at full level.
+   *
+   * Asserted by VALUE rather than by node identity: the trims are internal, and
+   * the only honest question is whether the param a lane would drive is the one
+   * the knob sets.
+   */
+  it("drives the trims a lane is named for, not the pinned wet/dry pair", () => {
+    const handle = buildFxNode(ctx() as unknown as BaseAudioContext, "phaser", {
+      ...defaultAudioFxParams("phaser"),
+      in_gain: 0.25,
+      out_gain: 0.5,
+    });
+    expect(handle.automation?.in_gain?.[0]?.param.value).toBeCloseTo(0.25, 6);
+    expect(handle.automation?.out_gain?.[0]?.param.value).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe("chain update keeps ids with their effects", () => {
+  const band = (id: string, frequency: number) => ({
+    type: "peaking",
+    id,
+    enabled: true,
+    params: { ...defaultAudioFxParams("peaking"), frequency },
+  });
+
+  /**
+   * Reordering two effects of the same type leaves the shape string identical,
+   * so the chain updates in place rather than rebuilding — correct for the
+   * audio, since the params move with the position. The ids have to move too:
+   * a lane addresses its effect by id, and an id captured at build time names
+   * whichever effect used to occupy that slot. The scheduler would then drive
+   * `fx.n2.frequency` into the band that is now n1 — the exact swap that
+   * HfAudioFxNode.id documents itself as preventing, and the one the voiceover
+   * carve's all-peaking chains make easy to hit.
+   */
+  it("moves an id with its slot when same-type effects are reordered", () => {
+    const chain: HfAudioFxChain = { version: 1, nodes: [band("n1", 200), band("n2", 4000)] };
+    const handle = buildFxChain(ctx() as unknown as BaseAudioContext, chain);
+
+    const swapped: HfAudioFxChain = { version: 1, nodes: [band("n2", 4000), band("n1", 200)] };
+    expect(handle.update(swapped)).toBe(true);
+    expect(handle.nodes.map((n) => n.id)).toEqual(["n2", "n1"]);
   });
 });

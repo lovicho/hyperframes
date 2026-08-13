@@ -42,6 +42,12 @@ function display(p: HfAudioFxNumberParam, value: number): string {
 interface ParamRowProps {
   param: HfAudioFxParam;
   value: number | string;
+  /**
+   * The envelope's value at the playhead, when a lane drives this parameter and
+   * the playhead is over the clip. Shown in place of `value`, which by then is
+   * only the seed the lane replaced.
+   */
+  liveValue?: number;
   /** Fires continuously while dragging — cheap, not persisted. */
   onChange(key: string, value: number | string): void;
   /** Fires once when the gesture ends — this is the write that persists. */
@@ -100,6 +106,7 @@ export function AutomationToggle({
 export function FxParamRow({
   param,
   value,
+  liveValue,
   onChange,
   onCommit,
   disabled,
@@ -113,15 +120,53 @@ export function FxParamRow({
   const [dragging, setDragging] = useState(false);
   const [local, setLocal] = useState(value);
   const latest = useRef(value);
+  /**
+   * What the gesture last asked for, held until the world agrees.
+   *
+   * Releasing ends the drag, but the value only comes back after the attribute is
+   * written and the selection resynced — and for a carve, after the analysis it
+   * kicks off. In that gap the prop still holds the pre-drag number, so dropping
+   * straight back to it made the control snap to where it started and then jump to
+   * where it was dropped. Keeping the gesture's own number until a NEW one arrives
+   * is honest either way: it is what the audio is already doing, since the live
+   * write applied on the way down.
+   */
+  const [pending, setPending] = useState<number | null>(null);
+  /**
+   * What the number field is showing while it has focus.
+   *
+   * The field cannot be bound to the committed value: every keystroke is
+   * clamped into range and written live, and the live write does not refresh
+   * the prop — so React put the old number straight back and typing `5000` into
+   * a 20..20000 knob wrote 20 on the first keystroke and never got further. Held
+   * as TEXT, so a half-typed "-" or "" is a state the field can be in rather
+   * than a number to clamp and persist.
+   */
+  const [typing, setTyping] = useState<string | null>(null);
+  /**
+   * Did this gesture actually change anything?
+   *
+   * `commit()` hangs off pointerup, keyup and blur, all of which fire without
+   * an edit — clicking a slider thumb without moving it, or tabbing through the
+   * field. Committing then re-persisted whatever `latest` happened to hold and
+   * silently reverted any change that had arrived meanwhile.
+   */
+  const edited = useRef(false);
   useEffect(() => {
     if (!dragging) setLocal(value);
   }, [value, dragging]);
+  // Any inbound value is newer information than the gesture's guess — including a
+  // value that came back different from what was asked for, or an undo.
+  useEffect(() => {
+    setPending(null);
+  }, [value]);
 
   const handleNumber = useCallback(
     (raw: number) => {
       const p = param as HfAudioFxNumberParam;
       const next = Math.min(p.max, Math.max(p.min, raw));
       latest.current = next;
+      edited.current = true;
       setLocal(next);
       onChange(param.key, next);
     },
@@ -130,6 +175,13 @@ export function FxParamRow({
 
   const commit = useCallback(() => {
     setDragging(false);
+    // Nothing was edited, so there is nothing to persist. Without this a bare
+    // focus/blur — or a click on the slider thumb that never moved — fired a
+    // full persisting write: source patch, selection resync, preview reload and
+    // an audio restart, for a gesture that changed no value.
+    if (!edited.current) return;
+    edited.current = false;
+    if (typeof latest.current === "number") setPending(latest.current);
     onCommit?.(param.key, latest.current);
   }, [onCommit, param.key]);
 
@@ -159,7 +211,11 @@ export function FxParamRow({
     );
   }
 
-  const shown = dragging ? local : value;
+  // An envelope's value at the playhead outranks the one stored in the chain,
+  // because it is the one the audio is using — the stored number is only the seed
+  // the lane replaced. Safe against the pointer: an automated control is locked
+  // (see `locked` below), so there is no drag for this to fight.
+  const shown = dragging ? local : (liveValue ?? pending ?? value);
   const numeric = typeof shown === "number" ? shown : Number(shown);
   const current = Number.isFinite(numeric) ? numeric : param.default;
 
@@ -199,13 +255,25 @@ export function FxParamRow({
         min={param.min}
         max={param.max}
         step={param.step}
-        value={display(param, current)}
+        value={typing ?? display(param, current)}
         disabled={locked}
+        onFocus={() => setTyping(display(param, current))}
         onChange={(e) => {
-          const next = Number(e.target.value);
+          const text = e.target.value;
+          setTyping(text);
+          // An empty field, a lone "-", or a trailing "." are all states on the
+          // way to a number, not numbers. `Number("")` is 0, which passes
+          // Number.isFinite — so clearing the field to retype used to clamp to
+          // the parameter MINIMUM and write it live: 20 Hz on a cutoff, -40 dB
+          // on a gain.
+          if (text.trim() === "") return;
+          const next = Number(text);
           if (Number.isFinite(next)) handleNumber(next);
         }}
-        onBlur={commit}
+        onBlur={() => {
+          commit();
+          setTyping(null);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") commit();
         }}
@@ -229,6 +297,8 @@ export function FxParamRow({
 interface FxParamsProps {
   def: HfAudioFxDef;
   params: HfAudioFxParamValues;
+  /** What automated knobs are worth at the playhead, by parameter key. */
+  liveValues?: ReadonlyMap<string, number>;
   onChange(params: HfAudioFxParamValues): void;
   onCommit?(params: HfAudioFxParamValues): void;
   disabled?: boolean;
@@ -243,6 +313,7 @@ interface FxParamsProps {
 export function FxParams({
   def,
   params,
+  liveValues,
   onChange,
   onCommit,
   disabled,
@@ -270,6 +341,7 @@ export function FxParams({
             key={p.key}
             param={p}
             value={params[p.key] ?? p.default}
+            liveValue={liveValues?.get(p.key)}
             onChange={set}
             onCommit={commit}
             disabled={disabled}
