@@ -13,6 +13,10 @@ import { FlatTextSection } from "./propertyPanelFlatTextSection";
 import { FlatStyleSection } from "./propertyPanelFlatStyleSections";
 import { FlatLayoutSection } from "./propertyPanelFlatLayoutSection";
 import { FlatMotionSection } from "./propertyPanelFlatMotionSection";
+import { isCanaryEnabled } from "../../telemetry/canary";
+import { audioFxSummary } from "./audioFxSummary";
+import { AudioFxGroup } from "./propertyPanelAudioFxGroup";
+import { useVolumeAutomation } from "./useVolumeAutomation";
 import { FlatMediaSection } from "./propertyPanelFlatMediaSection";
 import { deriveElementTiming } from "./propertyPanelFlatTimingDerivation";
 import { createGsapLivePreview } from "./gsapLivePreview";
@@ -64,6 +68,7 @@ export function PropertyPanelFlat({
   onSetAttribute,
   onSetAttributes,
   onSetAttributeLive,
+  onSetAttributeQuiet,
   onApplyColorGradingScope,
   onSetHtmlAttribute,
   onRemoveBackground,
@@ -252,6 +257,8 @@ export function PropertyPanelFlat({
   const showMotionEffects = gsapEffectHandlers !== null;
   const showMotionGroup = showMotionTiming || showMotionEffects;
 
+  const volumeAutomation = useVolumeAutomation(element, onSetAttributeQuiet ?? onSetAttributeLive);
+
   const groups: FlatGroupDescriptor[] = [];
   if (isTextEditable) {
     groups.push({
@@ -420,6 +427,23 @@ export function PropertyPanelFlat({
       });
     }
   }
+  // Behind `audio-fx-rack`, at 0%. Gates the AUTHORING surface only: the runtime
+  // and render still honour a `data-fx-chain` already on an element, so a
+  // composition written through the skill does not go silently dry off-cohort.
+  if (sections.audioFx && isCanaryEnabled("audio-fx-rack")) {
+    groups.push({
+      id: "audio-fx",
+      title: "Audio FX",
+      summary: audioFxSummary(element),
+      content: (
+        <AudioFxGroup
+          element={element}
+          onSetAttributeQuiet={onSetAttributeQuiet ?? onSetAttributeLive}
+          onSetAttributeLive={onSetAttributeLive}
+        />
+      ),
+    });
+  }
   if (sections.media) {
     groups.push({
       id: "media",
@@ -434,6 +458,7 @@ export function PropertyPanelFlat({
           onSetAttribute={onSetAttribute}
           onSetHtmlAttribute={onSetHtmlAttribute}
           onRemoveBackground={onRemoveBackground}
+          {...volumeAutomation}
         />
       ),
     });

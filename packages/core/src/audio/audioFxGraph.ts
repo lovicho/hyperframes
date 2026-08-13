@@ -14,7 +14,7 @@ import {
   type HfAudioFxChain,
   type HfAudioFxParamValues,
 } from "../audioFx.js";
-import { ensureAudioFxWorklets } from "./audioFxWorklets.js";
+import { audioFxWorkletsReady, ensureAudioFxWorklets } from "./audioFxWorklets.js";
 
 /**
  * Deterministic reverb impulse, shared by both engines so the browser and the
@@ -58,10 +58,27 @@ export function synthesizeReverbImpulse(
   return out;
 }
 
+/**
+ * Where an automation lane writes when it drives one knob.
+ *
+ * A knob is not always one AudioParam. A wet/dry mix is two gains moving in
+ * opposition, and a knob in milliseconds drives a delay time in seconds, so
+ * each target carries its own mapping out of the knob's declared unit.
+ */
+export interface FxParamTarget {
+  param: AudioParam;
+  map?: (value: number) => number;
+}
+
 export interface FxNodeHandle {
   input: AudioNode;
   output: AudioNode;
   update(params: HfAudioFxParamValues): void;
+  /**
+   * AudioParams behind the knobs the registry marks `automatable`, keyed by
+   * parameter key. Absent for a node whose values cannot be scheduled.
+   */
+  automation?: Record<string, FxParamTarget[]>;
   dispose(): void;
 }
 
@@ -69,10 +86,36 @@ type Builder = (ctx: BaseAudioContext, p: HfAudioFxParamValues) => FxNodeHandle;
 
 const n = (v: number | string | undefined): number => (typeof v === "number" ? v : Number(v ?? 0));
 
-/** A node that is its own input and output and has nothing to tear down. */
-function simple(node: AudioNode, update: (p: HfAudioFxParamValues) => void): FxNodeHandle {
-  return { input: node, output: node, update, dispose: () => node.disconnect() };
+/** Milliseconds on the knob, seconds on the AudioParam. */
+const msToSec = (v: number): number => v / 1000;
+
+/** A wet/dry pair: the dry side is whatever the wet side is not. */
+function mixTargets(wet: AudioParam, dry: AudioParam): FxParamTarget[] {
+  return [{ param: wet }, { param: dry, map: (v) => 1 - v }];
 }
+
+/** Linear crossfade: dry falls as wet rises, in lockstep. */
+function setWetDryMix(wet: GainNode, dry: GainNode, mix: number): void {
+  wet.gain.value = mix;
+  dry.gain.value = 1 - mix;
+}
+
+/** A node that is its own input and output and has nothing to tear down. */
+function simple(
+  node: AudioNode,
+  update: (p: HfAudioFxParamValues) => void,
+  automation?: Record<string, FxParamTarget[]>,
+): FxNodeHandle {
+  return { input: node, output: node, update, automation, dispose: () => node.disconnect() };
+}
+
+/**
+ * Filter types whose Q a BiquadFilterNode actually reads. The spec leaves it
+ * unused for shelving filters, so the registry offers no shelf Q and the graph
+ * must expose none either — the exposure invariant would otherwise advertise an
+ * AudioParam for a knob nobody can set.
+ */
+const USES_Q: ReadonlySet<BiquadFilterType> = new Set(["peaking", "highpass", "lowpass"]);
 
 function biquad(type: BiquadFilterType, useGain: boolean): Builder {
   return (ctx, p) => {
@@ -84,7 +127,11 @@ function biquad(type: BiquadFilterType, useGain: boolean): Builder {
       if (useGain) f.gain.value = n(v.gain);
     };
     apply(p);
-    return simple(f, apply);
+    return simple(f, apply, {
+      frequency: [{ param: f.frequency }],
+      ...(USES_Q.has(type) ? { q: [{ param: f.Q }] } : {}),
+      ...(useGain ? { gain: [{ param: f.gain }] } : {}),
+    });
   };
 }
 
@@ -102,6 +149,8 @@ function onePoleBuilder(kind: "highpass" | "lowpass"): Builder {
         ? ctx.createIIRFilter([1 / (1 + k), -1 / (1 + k)], [1, (k - 1) / (k + 1)])
         : ctx.createIIRFilter([k / (1 + k), k / (1 + k)], [1, (k - 1) / (k + 1)]);
     // IIRFilterNode coefficients are immutable; the caller rebuilds on change.
+    // Nothing here is schedulable either, so a frequency lane on a one-pole
+    // filter has nowhere to write — the scheduler skips what is not exposed.
     return simple(node, () => {});
   };
 }
@@ -154,6 +203,9 @@ const waveshaper: Builder = (ctx, p) => {
     input: preGain,
     output: postGain,
     update: apply,
+    // The curve itself is rebuilt wholesale, but the make-up gain after it is
+    // an ordinary AudioParam.
+    automation: { output: [{ param: postGain.gain, map: (v) => Math.pow(10, v / 20) }] },
     dispose: () => {
       preGain.disconnect();
       ws.disconnect();
@@ -177,14 +229,18 @@ const delayFeedback: Builder = (ctx, p) => {
   const apply = (v: HfAudioFxParamValues): void => {
     dl.delayTime.value = Math.min(5, n(v.time) / 1000);
     fb.gain.value = n(v.feedback);
-    wet.gain.value = n(v.mix);
-    dry.gain.value = 1 - n(v.mix);
+    setWetDryMix(wet, dry, n(v.mix));
   };
   apply(p);
   return {
     input,
     output: out,
     update: apply,
+    automation: {
+      time: [{ param: dl.delayTime, map: (v) => Math.min(5, msToSec(v)) }],
+      feedback: [{ param: fb.gain }],
+      mix: mixTargets(wet.gain, dry.gain),
+    },
     dispose: () => [input, out, dl, fb, wet, dry].forEach((x) => x.disconnect()),
   };
 };
@@ -205,14 +261,19 @@ const chorusLfo: Builder = (ctx, p) => {
     dl.delayTime.value = n(v.delay) / 1000;
     depth.gain.value = n(v.depth) / 1000;
     lfo.frequency.value = n(v.speed);
-    wet.gain.value = n(v.mix);
-    dry.gain.value = 1 - n(v.mix);
+    setWetDryMix(wet, dry, n(v.mix));
   };
   apply(p);
   return {
     input,
     output: out,
     update: apply,
+    automation: {
+      delay: [{ param: dl.delayTime, map: msToSec }],
+      depth: [{ param: depth.gain, map: msToSec }],
+      speed: [{ param: lfo.frequency }],
+      mix: mixTargets(wet.gain, dry.gain),
+    },
     dispose: () => {
       try {
         lfo.stop();
@@ -279,6 +340,13 @@ const allpassPhaser: Builder = (ctx, p) => {
     input,
     output: out,
     update: apply,
+    // `delay` and `decay` set the sweep centre, which feeds every stage's
+    // frequency at once — not one knob, one param — so they stay unautomated.
+    automation: {
+      speed: [{ param: lfo.frequency }],
+      in_gain: [{ param: dry.gain }],
+      out_gain: [{ param: wet.gain }],
+    },
     dispose: () => {
       try {
         lfo.stop();
@@ -318,6 +386,9 @@ const convolver: Builder = (ctx, p) => {
     input,
     output: out,
     update: apply,
+    // Size and damping regenerate the impulse response, so only the wet/dry
+    // balance is schedulable.
+    automation: { wet: [{ param: wet.gain }], dry: [{ param: dry.gain }] },
     dispose: () => [input, out, conv, wet, dry].forEach((x) => x.disconnect()),
   };
 };
@@ -364,6 +435,8 @@ export function buildFxNode(
 export interface FxChainHandle {
   input: AudioNode;
   output: AudioNode;
+  /** Built effects in chain order, carrying the node ids lanes address. */
+  nodes: { id?: string; type: string; handle: FxNodeHandle }[];
   /** Re-parameterise in place when the shape is unchanged; false if a rebuild is needed. */
   update(chain: HfAudioFxChain): boolean;
   dispose(): void;
@@ -398,7 +471,7 @@ function shapeOf(chain: HfAudioFxChain): string {
 export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxChainHandle {
   const input = ctx.createGain();
   const output = ctx.createGain();
-  const handles: { type: string; handle: FxNodeHandle }[] = [];
+  const handles: { id?: string; type: string; handle: FxNodeHandle }[] = [];
 
   let tail: AudioNode = input;
   for (const node of chain.nodes) {
@@ -406,7 +479,7 @@ export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxCh
     const handle = buildFxNode(ctx, node.type, node.params ?? {});
     tail.connect(handle.input);
     tail = handle.output;
-    handles.push({ type: node.type, handle });
+    handles.push({ ...(node.id ? { id: node.id } : {}), type: node.type, handle });
   }
   tail.connect(output);
 
@@ -415,6 +488,7 @@ export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxCh
   return {
     input,
     output,
+    nodes: handles,
     update(next) {
       if (shapeOf(next) !== shape) return false;
       const active = next.nodes.filter((node) => node.enabled !== false);
@@ -432,4 +506,4 @@ export function buildFxChain(ctx: BaseAudioContext, chain: HfAudioFxChain): FxCh
   };
 }
 
-export { ensureAudioFxWorklets };
+export { audioFxWorkletsReady, ensureAudioFxWorklets };

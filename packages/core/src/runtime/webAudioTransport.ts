@@ -1,3 +1,10 @@
+import { attachElementFxChain, readElementAutomation } from "./audioFx.js";
+import {
+  scheduleParamLane,
+  volumeLane,
+  type AutomationTiming,
+} from "../audio/audioFxAutomation.js";
+import { VOLUME_RANGE } from "../audioAutomation.js";
 import { swallow } from "./diagnostics";
 import { getDebugSurface } from "./globals.js";
 
@@ -56,10 +63,26 @@ function startBoundedSource(
   return true;
 }
 
+/**
+ * The volume lane rides the fader, after the effects — where a DAW puts it,
+ * and the order the render bakes it in.
+ */
+function scheduleVolumeLane(
+  el: HTMLMediaElement,
+  gainNode: GainNode,
+  timing: AutomationTiming,
+): void {
+  const lane = volumeLane(readElementAutomation(el));
+  if (!lane) return;
+  scheduleParamLane([{ param: gainNode.gain }], lane, VOLUME_RANGE.scale, timing);
+}
+
 export type ScheduledSource = {
   el: HTMLMediaElement;
   sourceNode: AudioBufferSourceNode;
   gainNode: GainNode;
+  /** FX chain spliced between source and gain, when the element carries one. */
+  fx?: { dispose(): void } | null;
   compositionStart: number;
   mediaStart: number;
   scheduledAt: number;
@@ -184,11 +207,20 @@ export class WebAudioTransport {
 
       const gainNode = this._ctx.createGain();
       gainNode.gain.value = volume;
-      sourceNode.connect(gainNode);
-      gainNode.connect(this._masterGain);
 
       const elapsed = compositionTime - compositionStart;
       const scheduledAt = this._ctx.currentTime;
+      const timing: AutomationTiming = { scheduledAt, elapsed, rate: safeRate };
+
+      // Splice the element's FX chain between the decoded source and its gain,
+      // so effects see the raw signal and volume automation rides on their
+      // output — the same order the offline render uses. Preview and render run
+      // the identical graph builders, so what is heard here is what is written.
+      const fx = attachElementFxChain(this._ctx, el, sourceNode, gainNode, timing);
+      gainNode.connect(this._masterGain);
+
+      scheduleVolumeLane(el, gainNode, timing);
+
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
       this._rateAnchorComp = compositionTime;
@@ -204,6 +236,7 @@ export class WebAudioTransport {
       ) {
         // Playhead already past the clip end — discard the nodes we built.
         sourceNode.disconnect();
+        fx?.dispose();
         gainNode.disconnect();
         return null;
       }
@@ -213,6 +246,7 @@ export class WebAudioTransport {
       logFallbackHandoff(el, priorMuted);
 
       const scheduled: ScheduledSource = {
+        fx,
         el,
         sourceNode,
         gainNode,
@@ -277,6 +311,7 @@ export class WebAudioTransport {
       try {
         source.sourceNode.stop();
         source.sourceNode.disconnect();
+        source.fx?.dispose();
         source.gainNode.disconnect();
       } catch {
         // already stopped

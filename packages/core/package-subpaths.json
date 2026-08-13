@@ -98,6 +98,12 @@
       "types": "./dist/audioFx.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./audio-fx-tail": {
+      "source": "./src/audio/audioFxTail.ts",
+      "runtime": "./dist/audio/audioFxTail.js",
+      "types": "./dist/audio/audioFxTail.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./audio-fx-runtime": {
       "source": "./src/generated/audio-fx-runtime-inline.ts",
       "runtime": "./dist/generated/audio-fx-runtime-inline.js",
@@ -108,6 +114,12 @@
       "source": "./src/audioCarve.ts",
       "runtime": "./dist/audioCarve.js",
       "types": "./dist/audioCarve.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audio-automation": {
+      "source": "./src/audioAutomation.ts",
+      "runtime": "./dist/audioAutomation.js",
+      "types": "./dist/audioAutomation.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./color-grading": {
