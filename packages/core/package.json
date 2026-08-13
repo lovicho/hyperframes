@@ -112,6 +112,36 @@
       "import": "./src/audioFx.ts",
       "types": "./src/audioFx.ts"
     },
+    "./audio-fx-copy": {
+      "bun": "./src/audioFxCopy.ts",
+      "node": "./dist/audioFxCopy.js",
+      "import": "./src/audioFxCopy.ts",
+      "types": "./src/audioFxCopy.ts"
+    },
+    "./audio-fx-profiles": {
+      "bun": "./src/audioFxProfiles.ts",
+      "node": "./dist/audioFxProfiles.js",
+      "import": "./src/audioFxProfiles.ts",
+      "types": "./src/audioFxProfiles.ts"
+    },
+    "./audio-fx-jobs": {
+      "bun": "./src/audioFxJobs.ts",
+      "node": "./dist/audioFxJobs.js",
+      "import": "./src/audioFxJobs.ts",
+      "types": "./src/audioFxJobs.ts"
+    },
+    "./audio-fx-eq": {
+      "bun": "./src/audioFxEq.ts",
+      "node": "./dist/audioFxEq.js",
+      "import": "./src/audioFxEq.ts",
+      "types": "./src/audioFxEq.ts"
+    },
+    "./audio-leveller": {
+      "bun": "./src/audioLeveller.ts",
+      "node": "./dist/audioLeveller.js",
+      "import": "./src/audioLeveller.ts",
+      "types": "./src/audioLeveller.ts"
+    },
     "./audio-fx-presets": {
       "bun": "./src/audioFxPresets.ts",
       "node": "./dist/audioFxPresets.js",
@@ -408,6 +438,26 @@
         "import": "./dist/audioFx.js",
         "types": "./dist/audioFx.d.ts"
       },
+      "./audio-fx-copy": {
+        "import": "./dist/audioFxCopy.js",
+        "types": "./dist/audioFxCopy.d.ts"
+      },
+      "./audio-fx-profiles": {
+        "import": "./dist/audioFxProfiles.js",
+        "types": "./dist/audioFxProfiles.d.ts"
+      },
+      "./audio-fx-jobs": {
+        "import": "./dist/audioFxJobs.js",
+        "types": "./dist/audioFxJobs.d.ts"
+      },
+      "./audio-fx-eq": {
+        "import": "./dist/audioFxEq.js",
+        "types": "./dist/audioFxEq.d.ts"
+      },
+      "./audio-leveller": {
+        "import": "./dist/audioLeveller.js",
+        "types": "./dist/audioLeveller.d.ts"
+      },
       "./audio-fx-presets": {
         "import": "./dist/audioFxPresets.js",
         "types": "./dist/audioFxPresets.d.ts"
@@ -576,9 +626,9 @@
     "typecheck": "tsc --noEmit && bun run typecheck:runtime",
     "typecheck:runtime": "tsc --noEmit -p tsconfig.runtime.json",
     "lint:runtime-preview-guards": "bun scripts/lint-runtime-preview-guards.ts",
-    "build:audio-fx-runtime": "tsx scripts/build-inline-artifact.ts audio-fx",
+    "build:audio-fx-runtime": "tsx scripts/build-audio-fx-runtime.ts",
     "build:hyperframes-runtime": "tsx scripts/build-hyperframes-runtime-artifact.ts",
-    "build:position-edits-render": "tsx scripts/build-inline-artifact.ts position-edits",
+    "build:position-edits-render": "tsx scripts/build-position-edits-render.ts",
     "check:position-edits-render": "bun run build:position-edits-render && git diff --exit-code -- src/generated/position-edits-render-inline.ts",
     "build:hyperframes-runtime:modular": "SANDBOX_RUNTIME_VARIANT=modular tsx scripts/build-hyperframes-runtime-artifact.ts",
     "build:hyperframe-runtime": "tsx scripts/build-hyperframes-runtime-artifact.ts",

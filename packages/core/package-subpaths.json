@@ -98,6 +98,36 @@
       "types": "./dist/audioFx.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./audio-fx-copy": {
+      "source": "./src/audioFxCopy.ts",
+      "runtime": "./dist/audioFxCopy.js",
+      "types": "./dist/audioFxCopy.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audio-fx-profiles": {
+      "source": "./src/audioFxProfiles.ts",
+      "runtime": "./dist/audioFxProfiles.js",
+      "types": "./dist/audioFxProfiles.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audio-fx-jobs": {
+      "source": "./src/audioFxJobs.ts",
+      "runtime": "./dist/audioFxJobs.js",
+      "types": "./dist/audioFxJobs.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audio-fx-eq": {
+      "source": "./src/audioFxEq.ts",
+      "runtime": "./dist/audioFxEq.js",
+      "types": "./dist/audioFxEq.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audio-leveller": {
+      "source": "./src/audioLeveller.ts",
+      "runtime": "./dist/audioLeveller.js",
+      "types": "./dist/audioLeveller.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./audio-fx-presets": {
       "source": "./src/audioFxPresets.ts",
       "runtime": "./dist/audioFxPresets.js",

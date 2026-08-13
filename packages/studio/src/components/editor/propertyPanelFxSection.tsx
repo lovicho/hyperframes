@@ -1,34 +1,44 @@
 /**
  * The FX section for an audio element: the chain, plus the voiceover carve.
  *
- * Carve is deliberately not an entry in the chain. It is a relationship between
- * two tracks — it analyses a voice and dips *this* bed where that voice sits —
- * so it gets its own block with a source picker, the way a sidechain control
- * lives on the track being processed. What it produces is an ordinary chain of
- * peaking filters, so it composes with whatever else is on the track.
+ * The carve is its own module — see `propertyPanelFxCarveModule.tsx` for why it
+ * is not an entry in the chain.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultAudioFxParams,
   getAudioFxDef,
   HF_AUDIO_FX,
   mintAudioFxNodeId,
   type HfAudioFxChain,
-  type HfAudioFxDef,
   type HfAudioFxGroup,
   type HfAudioFxNode,
-  type HfAudioFxParam,
   type HfAudioFxParamValues,
 } from "@hyperframes/core/audio-fx";
 import { DEFAULT_CARVE, type HfCarveSettings } from "@hyperframes/core/audio-carve";
 import { applyAudioFxPreset, getAudioFxPreset } from "@hyperframes/core/audio-fx-presets";
-import { fxAutomationTarget } from "@hyperframes/core/audio-automation";
-import { FxParams, FxParamRow } from "./propertyPanelFxControls.js";
+import {
+  addAudioEq,
+  audioEqIds,
+  readAudioEqBands,
+  removeAudioEq,
+  setAudioEqBandGain,
+} from "@hyperframes/core/audio-fx-eq";
+import { EFFECT_COPY } from "@hyperframes/core/audio-fx-copy";
+import { applyAudioFxProfile, getAudioFxProfile } from "@hyperframes/core/audio-fx-profiles";
+import {
+  audioFxJobNode,
+  HF_AUDIO_FX_JOBS,
+  HF_AUDIO_FX_JOB_TYPES,
+  type HfAudioFxJob,
+} from "@hyperframes/core/audio-fx-jobs";
 import { FxPresetMenu } from "./propertyPanelFxPresetMenu.js";
-// Shared with the timeline's lane labels: a band is named by its frequency in
-// both places, and two formatters would drift.
-import { formatHz } from "../../player/components/automationLaneData";
+import { FxEqModule } from "./propertyPanelFxEqModule.js";
+import { FxCarveModule, type AudioTrackOption } from "./propertyPanelFxCarveModule.js";
+import { FxNodeRow } from "./propertyPanelFxNodeRow.js";
+
+export type { AudioTrackOption };
 
 const GROUP_ORDER: HfAudioFxGroup[] = ["filter", "dynamics", "nonlinear", "time"];
 const GROUP_LABEL: Record<HfAudioFxGroup, string> = {
@@ -37,588 +47,6 @@ const GROUP_LABEL: Record<HfAudioFxGroup, string> = {
   nonlinear: "Non-linear",
   time: "Time",
 };
-
-export interface AudioTrackOption {
-  id: string;
-  label: string;
-}
-
-interface FxNodeRowProps {
-  node: HfAudioFxNode;
-  index: number;
-  automatedTargets?: ReadonlySet<string>;
-  liveAutomationValues?: ReadonlyMap<string, number>;
-  onAutomateParam?(nodeId: string, paramKey: string): void;
-  onRemoveParamAutomation?(nodeId: string, paramKey: string): void;
-  open: boolean;
-  /** Last in the chain, so it cannot move further down. */
-  last: boolean;
-  disabled?: boolean;
-  onToggleOpen(): void;
-  onUpdate(index: number, patch: Partial<HfAudioFxNode>): void;
-  onMove(index: number, delta: number): void;
-  onRemove(index: number): void;
-  onPreview(index: number, params: HfAudioFxParamValues): void;
-}
-
-/** Reorder arrow. Disabled at the end of the chain it would move past. */
-function FxMoveButton({
-  label,
-  glyph,
-  disabled,
-  onClick,
-}: {
-  label: string;
-  glyph: string;
-  disabled: boolean;
-  onClick(): void;
-}) {
-  return (
-    <button
-      type="button"
-      className="hf-fx-move px-1 font-mono text-[10px] text-panel-text-4 hover:text-panel-text-0 disabled:opacity-25"
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {glyph}
-    </button>
-  );
-}
-
-/** Name, bypass, reorder and remove for one effect. */
-function FxNodeHeader({
-  label,
-  open,
-  bypassed,
-  first,
-  last,
-  disabled,
-  onToggleOpen,
-  onToggleBypass,
-  onMove,
-  onRemove,
-}: {
-  label: string;
-  open: boolean;
-  bypassed: boolean;
-  first: boolean;
-  last: boolean;
-  disabled?: boolean;
-  onToggleOpen(): void;
-  onToggleBypass(): void;
-  onMove(delta: number): void;
-  onRemove(): void;
-}) {
-  return (
-    <div className="hf-fx-node-head flex min-h-7 items-center gap-1 px-1.5">
-      <button
-        type="button"
-        className="hf-fx-node-name flex-1 truncate text-left text-[11px] font-semibold text-panel-text-1 hover:text-panel-text-0"
-        aria-expanded={open}
-        onClick={onToggleOpen}
-      >
-        {label}
-      </button>
-      <button
-        type="button"
-        className="hf-fx-bypass rounded-[3px] border border-panel-border-input px-1.5 py-0.5 font-mono text-[9px] text-panel-text-4 hover:text-panel-text-0 disabled:opacity-40"
-        aria-pressed={bypassed}
-        title={bypassed ? "Enable" : "Bypass"}
-        disabled={disabled}
-        onClick={onToggleBypass}
-      >
-        {bypassed ? "Off" : "On"}
-      </button>
-      <FxMoveButton
-        label="Move up"
-        glyph="&uarr;"
-        disabled={Boolean(disabled) || first}
-        onClick={() => onMove(-1)}
-      />
-      <FxMoveButton
-        label="Move down"
-        glyph="&darr;"
-        disabled={Boolean(disabled) || last}
-        onClick={() => onMove(1)}
-      />
-      <button
-        type="button"
-        className="hf-fx-remove px-1 font-mono text-[11px] text-panel-text-4 hover:text-red-400 disabled:opacity-40"
-        title="Remove"
-        disabled={disabled}
-        onClick={onRemove}
-      >
-        &times;
-      </button>
-    </div>
-  );
-}
-
-/** What one effect inside the module is called: its own name, plus the band. */
-function carveMemberName(node: HfAudioFxNode): string {
-  const def = getAudioFxDef(node.type);
-  const freq = node.params?.["frequency"];
-  const label = def?.label ?? node.type;
-  return typeof freq === "number" ? `${label} ${formatHz(freq)}` : label;
-}
-
-/** A parameter's value as the rack shows it: rounded to the step, with its unit. */
-function formatParamValue(param: HfAudioFxParam, raw: number | string | undefined): string {
-  if (param.kind !== "number" || typeof raw !== "number") return String(raw ?? "");
-  const places = param.step >= 1 ? 0 : param.step >= 0.1 ? 1 : 2;
-  return `${Number(raw.toFixed(places))}${param.unit ? ` ${param.unit}` : ""}`;
-}
-
-/**
- * Width to reserve for a parameter's value, in characters.
- *
- * Derived from what the parameter CAN read rather than what it currently reads, so
- * the column never moves: an automated value updates 30 times a second, and
- * `-1 dB` is two characters narrower than `-3.2 dB`, which was enough to shunt
- * everything after it sideways on every frame. `ch` is exact here because the
- * readouts are monospace and already `tabular-nums`.
- */
-function paramValueWidthCh(param: HfAudioFxParam): number {
-  if (param.kind === "enum") {
-    return Math.max(1, ...param.options.map((option) => option.value.length));
-  }
-  const places = param.step >= 1 ? 0 : param.step >= 0.1 ? 1 : 2;
-  const digits = Math.max(
-    String(Math.floor(Math.abs(param.min))).length,
-    String(Math.floor(Math.abs(param.max))).length,
-  );
-  const sign = param.min < 0 ? 1 : 0;
-  const decimals = places > 0 ? places + 1 : 0;
-  const unit = param.unit ? param.unit.length + 1 : 0;
-  return sign + digits + decimals + unit;
-}
-
-/** One member of the module: what it is, and what every knob is set to. */
-function FxCarveMember({
-  node,
-  automatedTargets,
-  liveAutomationValues,
-}: {
-  node: HfAudioFxNode;
-  automatedTargets?: ReadonlySet<string>;
-  liveAutomationValues?: ReadonlyMap<string, number>;
-}) {
-  const def = getAudioFxDef(node.type);
-  if (!def) return null;
-  const params = node.params ?? defaultAudioFxParams(node.type);
-  return (
-    <div className="hf-fx-carve-member flex flex-col gap-0.5 py-1 pl-3 pr-1.5">
-      <span className="hf-fx-carve-member-name truncate font-mono text-[9px] text-panel-text-1">
-        {carveMemberName(node)}
-      </span>
-      <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-        {def.params.map((param) => {
-          const target = node.id ? fxAutomationTarget(node.id, param.key) : null;
-          const automated = Boolean(target && automatedTargets?.has(target));
-          // The envelope's value at the playhead when there is one, which is what
-          // the audio is using; the stored number is only the seed behind it.
-          const live = target ? liveAutomationValues?.get(target) : undefined;
-          const driven = automated && live !== undefined;
-          const value = formatParamValue(param, driven ? live : params[param.key]);
-          return (
-            <span
-              key={param.key}
-              className="flex items-baseline gap-1 font-mono text-[9px] text-panel-text-4"
-              {...(automated ? { "data-automated": "" } : {})}
-              {...(driven ? { "data-automation-live": "" } : {})}
-            >
-              <span className="text-panel-text-4">{param.label}</span>
-              <span
-                className="tabular-nums text-panel-text-1"
-                style={{ minWidth: `${paramValueWidthCh(param)}ch` }}
-              >
-                {value}
-              </span>
-              {/* The lane is where an automated value comes from, and where it is
-                  edited — saying so is the difference between a stale readout and
-                  a pointer to the thing that owns it. */}
-              {automated ? <span className="text-[#3CE6AC]">A</span> : null}
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/**
- * The carve, as one module in the rack.
- *
- * A carve is one thing the author switched on; the peaking filters and the level
- * stage are how it is built. Listed individually they read as hand-built effects —
- * removable one at a time, reorderable, each with knobs the next strength change
- * silently overwrites. So the rack shows the unit, and the unit owns everything
- * that means anything for it: which voice it listens to, how hard it works,
- * whether it follows that voice, and what the analysis made of it.
- *
- * The controls used to sit in their own block under the rack, which read as a
- * second, unrelated feature that happened to produce effects somewhere else. One
- * card, controls above the analysis they drive, is the same thing said once.
- *
- * Grouped is not hidden. Opening it lists every effect inside with all of its
- * settings, because an author has to be able to see where the analysis landed — as
- * readouts rather than controls, since strength is what sets them and a knob here
- * would be overwritten by the next adjustment.
- */
-function FxCarveModule({
-  nodes,
-  carve,
-  sourceOptions,
-  automatedTargets,
-  liveAutomationValues,
-  open,
-  disabled,
-  analysing,
-  onToggleOpen,
-  onCarveChange,
-  onCarvePreview,
-}: {
-  nodes: HfAudioFxNode[];
-  carve: HfCarveSettings;
-  sourceOptions: AudioTrackOption[];
-  automatedTargets?: ReadonlySet<string>;
-  liveAutomationValues?: ReadonlyMap<string, number>;
-  open: boolean;
-  disabled?: boolean;
-  analysing?: boolean;
-  onToggleOpen(): void;
-  onCarveChange(carve: HfCarveSettings): void;
-  onCarvePreview(carve: HfCarveSettings): void;
-}) {
-  const bands = nodes.filter((n) => n.type === "peaking").length;
-  const hasLevel = nodes.some((n) => n.type === "gain");
-  const on = carve.enabled;
-  /**
-   * The only track this bed could be listening to, when there is exactly one.
-   *
-   * A picker with one entry is a question with one answer: it asks the author to
-   * confirm something already decided. So the voice reads out instead.
-   *
-   * Not when the stored source is some OTHER track, though — a name that no longer
-   * classifies as a voice, or a track since renamed. Reading out the one remaining
-   * candidate there would quietly claim the carve listens to something it does not,
-   * so the picker comes back and shows the mismatch.
-   */
-  const soleVoice =
-    sourceOptions.length === 1 &&
-    (carve.sources.length === 0 ||
-      (carve.sources.length === 1 && carve.sources[0] === sourceOptions[0]?.id))
-      ? sourceOptions[0]
-      : null;
-  // What the module is worth right now, in the head, so a collapsed card still
-  // says whether it is doing anything: the analysis it produced, or why not.
-  const summary = !on
-    ? "off"
-    : analysing
-      ? "analysing…"
-      : bands > 0
-        ? [
-            `${bands} band${bands === 1 ? "" : "s"}`,
-            ...(hasLevel ? ["level"] : []),
-            // Worth saying when it is more than one: the cuts follow whoever is
-            // speaking, and that is not obvious from a band count.
-            ...(carve.sources.length > 1 ? [`${carve.sources.length} voices`] : []),
-          ].join(" + ")
-        : carve.sources.length > 0
-          ? "no analysis yet"
-          : "pick a voice";
-  return (
-    <div
-      className={`hf-fx-node hf-fx-carve-module hf-fx-carve rounded-[4px] border border-panel-border-input${
-        on ? "" : " opacity-50"
-      }`}
-      data-fx-node="carve"
-      data-carve-enabled={on ? "" : undefined}
-    >
-      <div className="hf-fx-node-head flex min-h-7 items-center gap-1 px-1.5">
-        <button
-          type="button"
-          className="hf-fx-node-name min-w-0 flex-1 truncate text-left text-[11px] font-semibold text-panel-text-1 hover:text-panel-text-0"
-          aria-expanded={open}
-          onClick={onToggleOpen}
-        >
-          Voiceover carve
-        </button>
-        <span className="hf-fx-carve-summary shrink-0 font-mono text-[9px] text-panel-text-4">
-          {summary}
-        </span>
-        {/* One switch, not a bypass and a delete. Off drops the effects and the
-            envelopes it wrote, and is remembered — otherwise the default would
-            re-apply the carve the next time this clip was selected. */}
-        <button
-          type="button"
-          className="hf-fx-bypass hf-fx-carve-toggle rounded-[3px] border border-panel-border-input px-1.5 py-0.5 font-mono text-[9px] text-panel-text-4 hover:text-panel-text-0 disabled:opacity-40"
-          aria-pressed={on}
-          title={on ? "Switch the carve off" : "Switch the carve on"}
-          disabled={disabled}
-          onClick={() => onCarveChange({ ...carve, enabled: !on })}
-        >
-          {on ? "On" : "Off"}
-        </button>
-      </div>
-      {open && on ? (
-        <div className="hf-fx-carve-body border-t border-panel-border-input">
-          <div className="hf-fx-carve-controls space-y-0.5 px-1.5 py-1.5">
-            <div className="hf-fx-row flex min-h-6 items-center gap-2">
-              <span className="hf-fx-label w-[86px] flex-shrink-0 truncate text-[10px] text-panel-text-4">
-                Listen to
-              </span>
-              {soleVoice ? (
-                <span
-                  className="hf-fx-carve-source min-w-0 flex-1 truncate font-mono text-[10px] text-panel-text-1"
-                  data-carve-source={soleVoice.id}
-                >
-                  {soleVoice.label}
-                </span>
-              ) : (
-                /* Every voice, not one of them. A bed usually runs under a whole
-                   sequence — a narrator, an answer, a second presenter — and they are
-                   analysed together, so the cuts follow whoever is speaking. Which
-                   makes this a set of things to include, not a choice between them. */
-                <div className="hf-fx-carve-sources flex min-w-0 flex-1 flex-wrap gap-x-2.5 gap-y-0.5">
-                  {sourceOptions.map((o) => (
-                    <label
-                      key={o.id}
-                      className="flex min-w-0 items-center gap-1 font-mono text-[9px] text-panel-text-1"
-                      title={`Make room for ${o.label}`}
-                    >
-                      <input
-                        type="checkbox"
-                        className="hf-fx-carve-source h-2.5 w-2.5 accent-panel-accent"
-                        data-carve-source={o.id}
-                        checked={carve.sources.includes(o.id)}
-                        disabled={disabled}
-                        onChange={(e) =>
-                          onCarveChange({
-                            ...carve,
-                            sources: e.target.checked
-                              ? [...carve.sources, o.id]
-                              : carve.sources.filter((id) => id !== o.id),
-                          })
-                        }
-                      />
-                      <span className="truncate">{o.label}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-            {/* One knob for the whole effect. Depth, band count, width, the
-                intelligibility weighting and both level-match numbers move together
-                anyway — a gentle carve is shallow in few bands with little ducking, a
-                hard one is deeper in more with more — so the panel sets the strength
-                and `carveProfile` derives the six numbers the analysis works in. */}
-            <FxParamRow
-              param={{
-                kind: "number",
-                key: "strength",
-                label: "Strength",
-                unit: "",
-                min: 0,
-                max: 1,
-                step: 0.05,
-                default: DEFAULT_CARVE.strength,
-                hint: "How hard to carve: deeper cuts, in more bands, and more room made by dropping the bed's level under the voice. At 0 it carves frequencies only. Moving this re-runs the analysis on what is already here.",
-              }}
-              value={carve.strength}
-              disabled={disabled || carve.sources.length === 0}
-              onChange={(_k, v) => onCarvePreview({ ...carve, strength: Number(v) })}
-              onCommit={(_k, v) => onCarveChange({ ...carve, strength: Number(v) })}
-            />
-          </div>
-          {/* What the analysis made of all that. Divided rather than boxed: these
-              are parts of one module, and a border around each would read as the
-              separate effects this replaced. */}
-          {/* While the analysis runs, the previous filters are gone rather than
-              stale. Every number in that list is about to be replaced — a strength
-              change re-derives all of them — so leaving them up reads as the
-              settings that are in force when they are already history, and the one
-              honest thing to say is that the work is happening. */}
-          {analysing ? (
-            <p className="hf-fx-carve-working flex items-center justify-center gap-1.5 border-t border-panel-border-input py-2 text-[10px] text-panel-text-4">
-              <svg
-                className="hf-fx-carve-spinner h-3 w-3 animate-spin motion-reduce:animate-none"
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-              >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                />
-              </svg>
-              Analysing…
-            </p>
-          ) : nodes.length > 0 ? (
-            <div className="hf-fx-carve-members divide-y divide-panel-border-input/60 border-t border-panel-border-input">
-              <div className="hf-fx-carve-members-label px-1.5 pt-1 font-mono text-[9px] uppercase tracking-wide text-panel-text-4">
-                analysed
-              </div>
-              {nodes.map((node, i) => (
-                <FxCarveMember
-                  key={node.id ?? `${node.type}-${i}`}
-                  node={node}
-                  automatedTargets={automatedTargets}
-                  liveAutomationValues={liveAutomationValues}
-                />
-              ))}
-            </div>
-          ) : (
-            <p className="hf-fx-carve-working border-t border-panel-border-input py-1.5 text-center text-[10px] text-panel-text-4">
-              {carve.sources.length > 0
-                ? "Nothing analysed yet."
-                : "Pick the voices this bed should make room for."}
-            </p>
-          )}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Which of an effect's knobs already have a lane.
- *
- * A lane addresses a node by id, so a node the panel has not yet given one
- * cannot be automated at all. Adding an effect mints the id, so this only
- * affects chains written before ids existed.
- */
-function automatedKeysOf(
-  node: HfAudioFxNode,
-  params: readonly { key: string }[],
-  automatedTargets: ReadonlySet<string> | undefined,
-): Set<string> {
-  if (!node.id || !automatedTargets) return new Set();
-  const nodeId = node.id;
-  return new Set(
-    params.filter((p) => automatedTargets.has(fxAutomationTarget(nodeId, p.key))).map((p) => p.key),
-  );
-}
-
-/** An open effect's knobs, with whatever automation surface applies to them. */
-function FxNodeParams({
-  node,
-  def,
-  index,
-  disabled,
-  automatedTargets,
-  liveAutomationValues,
-  onUpdate,
-  onPreview,
-  onAutomateParam,
-  onRemoveParamAutomation,
-}: {
-  node: HfAudioFxNode;
-  def: HfAudioFxDef;
-  index: number;
-  disabled: boolean;
-  automatedTargets?: ReadonlySet<string>;
-  liveAutomationValues?: ReadonlyMap<string, number>;
-  onUpdate(index: number, patch: Partial<HfAudioFxNode>): void;
-  onPreview(index: number, params: HfAudioFxParamValues): void;
-  onAutomateParam?(nodeId: string, paramKey: string): void;
-  onRemoveParamAutomation?(nodeId: string, paramKey: string): void;
-}) {
-  const nodeId = node.id;
-  // Lanes address a node by id; the controls know their own parameter keys. This
-  // is the one place that translation belongs.
-  const liveValues = ((): Map<string, number> | undefined => {
-    if (!nodeId || !liveAutomationValues?.size) return undefined;
-    const byKey = new Map<string, number>();
-    for (const param of def.params) {
-      const live = liveAutomationValues.get(fxAutomationTarget(nodeId, param.key));
-      if (live !== undefined) byKey.set(param.key, live);
-    }
-    return byKey;
-  })();
-  return (
-    <FxParams
-      def={def}
-      params={node.params ?? defaultAudioFxParams(node.type)}
-      liveValues={liveValues}
-      disabled={disabled}
-      onChange={(params: HfAudioFxParamValues) => onPreview(index, params)}
-      onCommit={(params: HfAudioFxParamValues) => onUpdate(index, { params })}
-      automatedKeys={automatedKeysOf(node, def.params, automatedTargets)}
-      onAutomate={nodeId && onAutomateParam ? (key) => onAutomateParam(nodeId, key) : undefined}
-      onRemoveAutomation={
-        nodeId && onRemoveParamAutomation
-          ? (key) => onRemoveParamAutomation(nodeId, key)
-          : undefined
-      }
-    />
-  );
-}
-
-/** One effect in the chain: its header controls, and its knobs when open. */
-function FxNodeRow({
-  node,
-  index,
-  automatedTargets,
-  liveAutomationValues,
-  onAutomateParam,
-  onRemoveParamAutomation,
-  open,
-  last,
-  disabled,
-  onToggleOpen,
-  onUpdate,
-  onMove,
-  onRemove,
-  onPreview,
-}: FxNodeRowProps) {
-  const def = getAudioFxDef(node.type);
-  if (!def) return null;
-  const bypassed = node.enabled === false;
-  return (
-    <div
-      className={`hf-fx-node rounded-[4px] border border-panel-border-input${bypassed ? " opacity-50" : ""}`}
-      data-fx-node={node.type}
-    >
-      <FxNodeHeader
-        label={def.label}
-        open={open}
-        bypassed={bypassed}
-        first={index === 0}
-        last={last}
-        disabled={disabled}
-        onToggleOpen={onToggleOpen}
-        onToggleBypass={() => onUpdate(index, { enabled: bypassed })}
-        onMove={(delta) => onMove(index, delta)}
-        onRemove={() => onRemove(index)}
-      />
-      {open ? (
-        <FxNodeParams
-          node={node}
-          def={def}
-          index={index}
-          disabled={Boolean(disabled) || bypassed}
-          automatedTargets={automatedTargets}
-          liveAutomationValues={liveAutomationValues}
-          onUpdate={onUpdate}
-          onPreview={onPreview}
-          onAutomateParam={onAutomateParam}
-          onRemoveParamAutomation={onRemoveParamAutomation}
-        />
-      ) : null}
-    </div>
-  );
-}
 
 export interface FxSectionProps {
   chain: HfAudioFxChain;
@@ -639,6 +67,23 @@ export interface FxSectionProps {
   onRemoveParamAutomation?(nodeId: string, paramKey: string): void;
   /** Delete every lane belonging to a node that is being removed. */
   onRemoveNodeAutomation?(nodeId: string): void;
+  /** Measure this track and write the levelling lane. Absent when unavailable. */
+  onLevel?(): void;
+  /** Take the levelling stage and its lane back out. */
+  onRemoveLevel?(): void;
+  /** Whether a levelling stage is already on the track. */
+  levelled?: boolean;
+  /**
+   * Hover-audition of the levelling script: measure this track and play the
+   * result without persisting it, and put it back on `false`.
+   *
+   * Separate from `onChainPreview` because it is the one audition that cannot be
+   * synthesised from the chain in hand — the numbers do not exist until the
+   * audio has been decoded and measured.
+   */
+  onAuditionLevel?(on: boolean): void;
+  /** Whether that measurement is running, so the button can say so. */
+  auditioningLevel?: boolean;
   /** Structural edits and gesture-end writes; this is the one that persists. */
   onChainChange(chain: HfAudioFxChain): void;
   /** Continuous updates while a control is being dragged. */
@@ -676,6 +121,11 @@ export function FxSection({
   sourceOptions,
   analysing,
   disabled,
+  onLevel,
+  onRemoveLevel,
+  levelled,
+  onAuditionLevel,
+  auditioningLevel,
 }: FxSectionProps) {
   // Falls back to the persisting write when no preview handler is supplied, which
   // keeps the control working rather than going dead.
@@ -691,8 +141,20 @@ export function FxSection({
   const [picking, setPicking] = useState(false);
   const [openNode, setOpenNode] = useState<number | null>(0);
 
+  /**
+   * The add menu, with the jobs standing in for the effect they are made of.
+   *
+   * `peaking` is not offered as itself: picking it is picking a machine and
+   * leaving the real decision — which range — for afterwards. The jobs are that
+   * decision, already made. See `audioFxJobs.ts`.
+   */
   const grouped = useMemo(
-    () => GROUP_ORDER.map((g) => ({ group: g, defs: HF_AUDIO_FX.filter((d) => d.group === g) })),
+    () =>
+      GROUP_ORDER.map((g) => ({
+        group: g,
+        defs: HF_AUDIO_FX.filter((d) => d.group === g && !HF_AUDIO_FX_JOB_TYPES.has(d.id)),
+        jobs: HF_AUDIO_FX_JOBS.filter((job) => getAudioFxDef(job.type)?.group === g),
+      })),
     [],
   );
 
@@ -711,6 +173,62 @@ export function FxSection({
     [chain, onChainPreview],
   );
 
+  /**
+   * The chain as it is really stored, captured when an audition starts.
+   *
+   * Auditioning writes through the preview channel, which does not persist and
+   * does not come back as a new `chain` prop — so reverting has to remember what
+   * was there rather than read it back. Null means nothing is being auditioned,
+   * which is also what makes a stray leave a no-op instead of a write.
+   */
+  const auditionBase = useRef<HfAudioFxChain | null>(null);
+
+  /**
+   * Play something without committing to it, and put it back on the way out.
+   *
+   * Hearing a preset before choosing it is the strongest affordance in this
+   * panel — see `plans/audio-fx-ux/README.md` §Decided. It costs nothing new:
+   * the preview channel a slider drag already uses rebuilds the running graph
+   * without touching the document.
+   */
+  const audition = useCallback(
+    (make: ((base: HfAudioFxChain) => HfAudioFxChain) | null) => {
+      if (!onChainPreview) return;
+      if (make) {
+        auditionBase.current ??= chain;
+        onChainPreview(make(auditionBase.current));
+      } else if (auditionBase.current) {
+        onChainPreview(auditionBase.current);
+        auditionBase.current = null;
+      }
+    },
+    [chain, onChainPreview],
+  );
+
+  /**
+   * The preview handler as of the last render, held rather than closed over.
+   *
+   * The teardown below must run on teardown and at no other time, so its deps
+   * have to be empty — and `onChainPreview` is an inline arrow in the group,
+   * which re-renders on every playhead tick to move the automation readouts. A
+   * dep on it made React tear down and re-run the effect on every one of those
+   * ticks, so an audition reverted itself about 30 times a second while the
+   * pointer was still on the button: the preset was heard for a frame during
+   * playback, which is the exact case the whole affordance exists for.
+   */
+  const previewRef = useRef(onChainPreview);
+  previewRef.current = onChainPreview;
+
+  // Leaving by any route other than the pointer — the element deselected, the
+  // panel closed — would otherwise leave the audition playing over a chain the
+  // document does not have.
+  useEffect(
+    () => () => {
+      if (auditionBase.current) previewRef.current?.(auditionBase.current);
+    },
+    [],
+  );
+
   const applyPreset = useCallback(
     (id: string) => {
       const preset = getAudioFxPreset(id);
@@ -719,6 +237,10 @@ export function FxSection({
       // real thing to want, and replacing silently would throw work away — so
       // the destructive option is a separate gesture, not the default one.
       const next = applyAudioFxPreset(chain, preset);
+      // The audition WAS this, so there is nothing to put back — and putting the
+      // old chain back over the write that just landed is a race the author
+      // hears as the preset arriving and then leaving again.
+      auditionBase.current = null;
       mutate(next.nodes);
       // Land on the first node the preset wrote, so the author can hear what
       // arrived and immediately see what it is made of.
@@ -728,16 +250,62 @@ export function FxSection({
     [chain, mutate],
   );
 
-  const addEffect = useCallback(
-    (type: string) => {
-      mutate([
-        ...chain.nodes,
-        { type, id: mintAudioFxNodeId(chain), enabled: true, params: defaultAudioFxParams(type) },
-      ]);
+  /**
+   * One effect appended, at the values its module opens on.
+   *
+   * For most effects that is the registry's defaults. For the five with a
+   * derived knob it is NOT: the registry defaults are not a point on the
+   * profile's curve, so the module opened reading a strength it was not set to —
+   * a compressor arrived showing Evenness 0.67 with its make-up gain at 0 dB,
+   * which is the "quieter as you turn it up" bug the profiles exist to prevent,
+   * on the very first frame. Seeding through the profile puts the knob and the
+   * mechanism in agreement from the start.
+   */
+  const withEffect = useCallback(
+    (base: HfAudioFxChain, type: string): HfAudioFxChain => ({
+      ...base,
+      nodes: [
+        ...base.nodes,
+        {
+          type,
+          id: mintAudioFxNodeId(base),
+          enabled: true,
+          params: getAudioFxProfile(type)
+            ? applyAudioFxProfile(type, 0.5, defaultAudioFxParams(type))
+            : defaultAudioFxParams(type),
+        },
+      ],
+    }),
+    [],
+  );
+
+  /** The same, for a job — an ordinary node that arrives already named and aimed. */
+  const withJob = useCallback(
+    (base: HfAudioFxChain, job: HfAudioFxJob): HfAudioFxChain => ({
+      ...base,
+      nodes: [...base.nodes, audioFxJobNode(job, base)],
+    }),
+    [],
+  );
+
+  const addJob = useCallback(
+    (job: HfAudioFxJob) => {
+      auditionBase.current = null;
+      mutate(withJob(chain, job).nodes);
       setOpenNode(chain.nodes.length);
       setAdding(false);
     },
-    [chain, mutate],
+    [chain, mutate, withJob],
+  );
+
+  const addEffect = useCallback(
+    (type: string) => {
+      auditionBase.current = null;
+      mutate(withEffect(chain, type).nodes);
+      setOpenNode(chain.nodes.length);
+      setAdding(false);
+    },
+    [chain, mutate, withEffect],
   );
 
   const updateNode = useCallback(
@@ -767,8 +335,80 @@ export function FxSection({
   const carveNodes = useMemo(() => chain.nodes.filter((n) => n.fromCarve), [chain.nodes]);
   /** Everything the author added, with the chain index every edit addresses. */
   const handBuilt = useMemo(
-    () => chain.nodes.map((node, i) => ({ node, i })).filter(({ node }) => !node.fromCarve),
+    () =>
+      chain.nodes
+        .map((node, i) => ({ node, i }))
+        // Carve and EQ bands belong to their own modules; showing them here too
+        // would put the same filter on screen twice with two ways to edit it.
+        .filter(({ node }) => !node.fromCarve && !node.fromEq),
     [chain.nodes],
+  );
+
+  /**
+   * The hand-built list cut into runs, so a preset reads as one thing.
+   *
+   * Applying a preset drops five rows into the rack with nothing saying they
+   * arrived together — which is the same failure the carve module was built to
+   * fix, one level down. Consecutive only: a preset whose nodes have been pulled
+   * apart by a reorder is no longer a unit, and drawing a bracket around the gap
+   * would claim an adjacency the signal path does not have.
+   */
+  const runs = useMemo(() => {
+    const out: { preset?: string; items: { node: HfAudioFxNode; i: number }[] }[] = [];
+    for (const item of handBuilt) {
+      const preset = item.node.fromPreset;
+      const last = out.at(-1);
+      if (last && last.preset === preset) last.items.push(item);
+      else out.push({ ...(preset ? { preset } : {}), items: [item] });
+    }
+    return out;
+  }, [handBuilt]);
+
+  const eqIds = useMemo(() => audioEqIds(chain), [chain]);
+
+  /**
+   * The number each row wears, counted over what the rack actually shows.
+   *
+   * Not the chain index: the carve's filters and an EQ's bands are inside their
+   * own modules, so counting raw nodes would leave the visible rack jumping from
+   * 02 to 07 and the numbers would look like a bug rather than a position.
+   */
+  const positions = useMemo(() => {
+    const map = new Map<number, number>();
+    let at = (showCarve ? 1 : 0) + eqIds.length;
+    for (const { i } of handBuilt) map.set(i, ++at);
+    return map;
+  }, [handBuilt, eqIds.length, showCarve]);
+  const [openEq, setOpenEq] = useState<string | null>(null);
+
+  const addEq = useCallback(() => {
+    auditionBase.current = null;
+    const { chain: next, eqId } = addAudioEq(chain);
+    mutate(next.nodes);
+    setOpenEq(eqId);
+    setAdding(false);
+  }, [chain, mutate]);
+
+  // Dragging a fader is heard immediately and written once on release, the same
+  // split every other control in the rack uses.
+  const previewEqBand = useCallback(
+    (eqId: string, band: string, gain: number) =>
+      onChainPreview?.(setAudioEqBandGain(chain, eqId, band, gain)),
+    [chain, onChainPreview],
+  );
+  const commitEqBand = useCallback(
+    (eqId: string, band: string, gain: number) =>
+      mutate(setAudioEqBandGain(chain, eqId, band, gain).nodes),
+    [chain, mutate],
+  );
+  const removeEq = useCallback(
+    (eqId: string) => {
+      for (const node of chain.nodes) {
+        if (node.fromEq === eqId && node.id) onRemoveNodeAutomation?.(node.id);
+      }
+      mutate(removeAudioEq(chain, eqId).nodes);
+    },
+    [chain, mutate, onRemoveNodeAutomation],
   );
 
   const moveNode = useCallback(
@@ -787,6 +427,13 @@ export function FxSection({
   return (
     <div className="hf-fx-section space-y-2">
       <div className="hf-fx-chain space-y-1">
+        {/* The rack IS the signal path, and saying so costs two lines. Without
+            them the order reads as a list, which is the one reading that makes
+            "move up" look cosmetic — it is the most consequential control here. */}
+        <p className="hf-fx-term flex items-baseline gap-1.5 px-1.5 font-mono text-[9px] uppercase tracking-wide text-panel-text-4">
+          <span className="hf-fx-term-cap text-panel-text-1">In</span>
+          <span>this track</span>
+        </p>
         {/* Carve leads the rack, which is also where its effects sit in the signal
             path — corrective work before anything the author added. Present
             whenever there is a voice for it to listen to, rather than appearing
@@ -807,13 +454,26 @@ export function FxSection({
             onCarvePreview={previewCarve}
           />
         ) : null}
-        {handBuilt.length === 0 ? (
+        {eqIds.map((eqId) => (
+          <FxEqModule
+            key={eqId}
+            eqId={eqId}
+            bands={readAudioEqBands(chain, eqId)}
+            open={openEq === eqId}
+            disabled={disabled}
+            onToggleOpen={() => setOpenEq((was) => (was === eqId ? null : eqId))}
+            onPreview={(band, gain) => previewEqBand(eqId, band, gain)}
+            onCommit={(band, gain) => commitEqBand(eqId, band, gain)}
+            onRemove={() => removeEq(eqId)}
+          />
+        ))}
+        {handBuilt.length === 0 && eqIds.length === 0 ? (
           <p className="hf-fx-empty py-1 text-[11px] text-panel-text-4">
             {showCarve ? "No other effects on this track." : "No effects on this track."}
           </p>
         ) : (
-          handBuilt.map(({ node, i }) => {
-            return (
+          runs.map((run) => {
+            const rows = run.items.map(({ node, i }) => (
               <FxNodeRow
                 // Keyed by id, as the carve module's list above already is.
                 // On `${type}-${index}` two effects of the same type keep their
@@ -824,6 +484,7 @@ export function FxSection({
                 key={node.id ?? `${node.type}-${i}`}
                 node={node}
                 index={i}
+                position={positions.get(i)}
                 automatedTargets={automatedTargets}
                 liveAutomationValues={liveAutomationValues}
                 onAutomateParam={onAutomateParam}
@@ -837,27 +498,150 @@ export function FxSection({
                 onRemove={removeNode}
                 onPreview={previewNode}
               />
+            ));
+            const preset = run.preset ? getAudioFxPreset(run.preset) : null;
+            if (!preset) return rows;
+            return (
+              <div
+                key={`preset-${run.preset}-${run.items[0]?.i}`}
+                className="hf-fx-preset-run space-y-1 rounded-[4px] border border-dashed border-panel-border-input p-1"
+                data-fx-preset={run.preset}
+              >
+                <span className="hf-fx-preset-run-label block px-0.5 font-mono text-[9px] uppercase tracking-wide text-panel-text-4">
+                  {preset.label}
+                </span>
+                {rows}
+              </div>
             );
           })
         )}
+        <p className="hf-fx-term hf-fx-term-out flex items-baseline gap-1.5 px-1.5 font-mono text-[9px] uppercase tracking-wide text-panel-text-4">
+          <span className="hf-fx-term-cap text-panel-text-1">Out</span>
+          <span>to mix</span>
+        </p>
       </div>
 
       {adding ? (
-        <div className="hf-fx-add-menu space-y-1.5 rounded-[4px] border border-panel-border-input p-1.5">
-          {grouped.map(({ group, defs }) => (
+        <div
+          className="hf-fx-add-menu space-y-1.5 rounded-[4px] border border-panel-border-input p-1.5"
+          // On the shelf, not on each button: moving between two of them passes
+          // through the gap, and a per-button leave would revert on the way.
+          onMouseLeave={() => {
+            audition(null);
+            onAuditionLevel?.(false);
+          }}
+          // The keyboard's version of leaving. Tabbing between two entries fires
+          // this and then the next one's focus, so it reverts and re-auditions.
+          onBlur={() => {
+            audition(null);
+            onAuditionLevel?.(false);
+          }}
+        >
+          <div className="hf-fx-add-group flex flex-wrap items-center gap-1">
+            <span className="hf-fx-add-group-label w-full font-mono text-[9px] uppercase tracking-wide text-panel-text-4">
+              Tone
+            </span>
+            {onLevel ? (
+              <button
+                type="button"
+                className="hf-fx-add-composite rounded-[3px] bg-panel-surface px-1.5 py-0.5 text-[10px] text-panel-text-1 hover:text-panel-text-0"
+                title="Listen to this track and even out its loud and quiet parts."
+                disabled={disabled || analysing}
+                onClick={() => {
+                  if (levelled) onRemoveLevel?.();
+                  else onLevel();
+                  setAdding(false);
+                }}
+                // The one module here that cannot answer instantly: it has to
+                // decode the track and measure it before there is anything to
+                // hear. So it says it is working rather than doing nothing
+                // visible, and whoever handles this must drop a result that
+                // arrives after the pointer has gone.
+                onMouseEnter={
+                  levelled
+                    ? undefined
+                    : () => {
+                        audition(null);
+                        onAuditionLevel?.(true);
+                      }
+                }
+                onFocus={levelled ? undefined : () => onAuditionLevel?.(true)}
+              >
+                {levelled ? "Remove levelling" : "Even Out Levels"}
+                {auditioningLevel ? <span className="hf-fx-add-working"> measuring…</span> : null}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              // Not hf-fx-add-item: Tone is a composite over several filters,
+              // not an entry in the effect registry, and a count of the registry
+              // must not include it.
+              className="hf-fx-add-composite rounded-[3px] bg-panel-surface px-1.5 py-0.5 text-[10px] text-panel-text-1 hover:text-panel-text-0"
+              title="Bass, middle and treble on one set of faders."
+              // No audition of its own: a Tone module arrives with every band at
+              // 0 dB, so there is nothing to hear until a fader moves, and a
+              // hover that changes nothing teaches that hovering does nothing.
+              // It still has to call the neighbours' auditions off.
+              onMouseEnter={() => {
+                audition(null);
+                onAuditionLevel?.(false);
+              }}
+              onClick={addEq}
+            >
+              Tone (EQ)
+            </button>
+          </div>
+          {grouped.map(({ group, defs, jobs }) => (
             <div key={group} className="hf-fx-add-group flex flex-wrap items-center gap-1">
               <span className="hf-fx-add-group-label w-full font-mono text-[9px] uppercase tracking-wide text-panel-text-4">
                 {GROUP_LABEL[group]}
               </span>
+              {jobs.map((job) => (
+                <button
+                  key={job.id}
+                  type="button"
+                  // Same class as any other entry: a job IS an effect, and one
+                  // that looked special would read as a preset rather than as
+                  // the thing the author is about to add.
+                  className="hf-fx-add-item rounded-[3px] bg-panel-surface px-1.5 py-0.5 text-[10px] text-panel-text-1 hover:text-panel-text-0"
+                  title={job.does}
+                  onClick={() => addJob(job)}
+                  onMouseEnter={() => {
+                    onAuditionLevel?.(false);
+                    audition((base) => withJob(base, job));
+                  }}
+                  onFocus={() => audition((base) => withJob(base, job))}
+                >
+                  {job.label}
+                </button>
+              ))}
               {defs.map((d) => (
                 <button
                   key={d.id}
                   type="button"
                   className="hf-fx-add-item rounded-[3px] bg-panel-surface px-1.5 py-0.5 text-[10px] text-panel-text-1 hover:text-panel-text-0"
-                  title={d.description}
+                  // The menu that adds it has to call it what the rack will call
+                  // it, or the author picks "High-pass" and a module named
+                  // "Remove Rumble" appears. The registry's own description
+                  // stays as the tooltip beside the plain one: the mechanism is
+                  // taught here rather than withheld.
+                  title={
+                    EFFECT_COPY[d.id] ? `${EFFECT_COPY[d.id]?.does} (${d.label})` : d.description
+                  }
                   onClick={() => addEffect(d.id)}
+                  // Cancels the levelling audition as well as starting its own.
+                  // The shelf's leave handler only fires on the way OUT of the
+                  // menu, so sliding from Even Out Levels straight to here left a
+                  // measurement in flight — and it landed on top of this one, a
+                  // levelled version of the chain as it was, written through a
+                  // channel the document never sees.
+                  onMouseEnter={() => {
+                    onAuditionLevel?.(false);
+                    audition((base) => withEffect(base, d.id));
+                  }}
+                  onFocus={() => audition((base) => withEffect(base, d.id))}
                 >
-                  {d.label}
+                  {EFFECT_COPY[d.id]?.title ?? d.label}
                 </button>
               ))}
             </div>
@@ -865,7 +649,19 @@ export function FxSection({
         </div>
       ) : null}
 
-      {picking ? <FxPresetMenu onPick={applyPreset} /> : null}
+      {picking ? (
+        <FxPresetMenu
+          onPick={applyPreset}
+          onAudition={
+            onChainPreview
+              ? (id) => {
+                  const preset = id ? getAudioFxPreset(id) : null;
+                  audition(preset ? (base) => applyAudioFxPreset(base, preset) : null);
+                }
+              : undefined
+          }
+        />
+      ) : null}
 
       {adding || picking ? null : (
         <div className="flex gap-1">
