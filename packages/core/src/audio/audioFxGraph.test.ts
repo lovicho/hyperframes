@@ -624,3 +624,140 @@ describe("chain update keeps ids with their effects", () => {
     expect(handle.nodes.map((n) => n.id)).toEqual(["n2", "n1"]);
   });
 });
+
+describe("a preset's run is wrapped in a wet/dry blend", () => {
+  /** Two nodes from one preset, with an ordinary effect after them. */
+  const chainWith = (amount?: number): HfAudioFxChain => ({
+    version: 1,
+    nodes: [
+      {
+        type: "highpass",
+        id: "p1",
+        fromPreset: "telephone",
+        enabled: true,
+        ...(amount === undefined ? {} : { presetAmount: amount }),
+        params: defaultAudioFxParams("highpass"),
+      },
+      {
+        type: "lowpass",
+        id: "p2",
+        fromPreset: "telephone",
+        enabled: true,
+        params: defaultAudioFxParams("lowpass"),
+      },
+      { type: "reverb", id: "own", enabled: true, params: defaultAudioFxParams("reverb") },
+    ],
+  });
+
+  it("exposes one blend for the whole preset, not one per node", () => {
+    // The reason this exists: a preset's nodes share no automatable parameter,
+    // and its worklet effects expose no AudioParams at all, so there is nothing
+    // to aim a lane at node-by-node.
+    const built = buildFxChain(asCtx(ctx()), chainWith());
+    expect(Object.keys(built.presets)).toEqual(["telephone"]);
+    // Two gains in opposition, the same shape an effect's own mix knob has.
+    expect(built.presets.telephone).toHaveLength(2);
+  });
+
+  it("blends dry against wet at the stored amount", () => {
+    const built = buildFxChain(asCtx(ctx()), chainWith(0.25));
+    const [wet, dry] = built.presets.telephone ?? [];
+    expect(wet?.param.value).toBeCloseTo(0.25, 6);
+    expect(dry?.param.value).toBeCloseTo(0.75, 6);
+  });
+
+  it("is fully applied when nothing says otherwise", () => {
+    // Every chain written before this shipped means "all of it".
+    const [wet, dry] = buildFxChain(asCtx(ctx()), chainWith()).presets.telephone ?? [];
+    expect(wet?.param.value).toBe(1);
+    expect(dry?.param.value).toBe(0);
+  });
+
+  it("pushes a changed amount into the running graph rather than rebuilding", () => {
+    // Switching a preset off is a value change, and a rebuild would restart the
+    // audio underneath it.
+    const built = buildFxChain(asCtx(ctx()), chainWith(1));
+    expect(built.update(chainWith(0))).toBe(true);
+    const [wet, dry] = built.presets.telephone ?? [];
+    expect(wet?.param.value).toBe(0);
+    expect(dry?.param.value).toBe(1);
+  });
+
+  it("wraps nothing around effects the author placed themselves", () => {
+    const built = buildFxChain(asCtx(ctx()), chain("peaking", "reverb"));
+    expect(Object.keys(built.presets)).toEqual([]);
+  });
+
+  it("unwires the blend on dispose", () => {
+    // The wrap belongs to the chain rather than to any effect, so it is not in
+    // `handles` — without this a rebuild leaves a crossfade connected to the
+    // graph it used to bridge.
+    const c = ctx();
+    buildFxChain(asCtx(c), chainWith(0.5)).dispose();
+    const live = c.created.filter((n) => n.kind === "gain" && !n.disconnected);
+    expect(live).toEqual([]);
+  });
+});
+
+describe("a preset's wrap stays with the nodes it belongs to", () => {
+  const peak = (over: Partial<HfAudioFxNode>): HfAudioFxNode =>
+    ({
+      type: "peaking",
+      enabled: true,
+      params: defaultAudioFxParams("peaking"),
+      ...over,
+    }) as HfAudioFxNode;
+
+  it("rebuilds when a reorder moves a node across a preset boundary", () => {
+    // The type sequence is identical either way, so without preset identity in
+    // the shape the chain updated in place and left the wet/dry wrap bracketing
+    // the hand-added effect instead of the preset's — preview blending out the
+    // author's own node while the render, which rebuilds, blended out the
+    // preset's.
+    const before: HfAudioFxChain = {
+      version: 1,
+      nodes: [peak({ id: "p1", fromPreset: "boom-tame" }), peak({ id: "own" })],
+    };
+    const after: HfAudioFxChain = {
+      version: 1,
+      nodes: [peak({ id: "own" }), peak({ id: "p1", fromPreset: "boom-tame" })],
+    };
+    expect(buildFxChain(asCtx(ctx()), before).update(after)).toBe(false);
+  });
+
+  it("gives every run of one preset its own blend", () => {
+    // A preset pulled apart by a reorder occupies two runs. Keyed by id and
+    // assigned, the second wrap overwrote the first, so a whole-preset lane
+    // reached one fragment and the switch silently left the rest applied.
+    const split: HfAudioFxChain = {
+      version: 1,
+      nodes: [
+        peak({ id: "t1", fromPreset: "telephone" }),
+        { type: "reverb", id: "own", enabled: true, params: defaultAudioFxParams("reverb") },
+        peak({ id: "t2", fromPreset: "telephone" }),
+      ],
+    };
+    const built = buildFxChain(asCtx(ctx()), split);
+    // Two wraps, so two wet/dry pairs — four params under the one id.
+    expect(built.presets.telephone).toHaveLength(4);
+  });
+
+  it("pushes an amount into each run of a split preset, not one of them twice", () => {
+    const at = (amount: number): HfAudioFxChain => ({
+      version: 1,
+      nodes: [
+        peak({ id: "t1", fromPreset: "telephone", presetAmount: amount }),
+        { type: "reverb", id: "own", enabled: true, params: defaultAudioFxParams("reverb") },
+        peak({ id: "t2", fromPreset: "telephone", presetAmount: amount }),
+      ],
+    });
+    const built = buildFxChain(asCtx(ctx()), at(1));
+    expect(built.update(at(0))).toBe(true);
+    // Every wet leg off and every dry leg fully open: switching the preset off
+    // has to silence all of it, not the last fragment only.
+    const wets = (built.presets.telephone ?? []).filter((_, i) => i % 2 === 0);
+    const drys = (built.presets.telephone ?? []).filter((_, i) => i % 2 === 1);
+    for (const t of wets) expect(t.param.value).toBe(0);
+    for (const t of drys) expect(t.param.value).toBe(1);
+  });
+});
