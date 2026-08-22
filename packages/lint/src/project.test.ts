@@ -89,7 +89,9 @@ describe("blank_root_with_standalone_composition", () => {
     expect(finding?.severity).toBe("error");
     expect(finding?.message).toContain("compositions/index.html");
     expect(finding?.message).toContain("index.html");
+    expect(finding?.message).toContain("publish");
     expect(finding?.fixHint).toContain("data-composition-src");
+    expect(finding?.suggestedComposition).toBe("compositions/index.html");
   });
 
   it("treats non-rendering script, style, link, meta, and template children as blank", async () => {
@@ -172,6 +174,24 @@ describe("blank_root_with_standalone_composition", () => {
       .find((item) => item.code === "blank_root_with_standalone_composition");
 
     expect(finding).toBeDefined();
+  });
+
+  it("does not treat a composition that only mounts another composition as standalone", async () => {
+    const project = makeProject(validHtml(), {
+      "wrapper.html": `<!doctype html><html><body>
+  <div data-composition-id="wrapper" data-width="1920" data-height="1080" data-start="0" data-duration="5">
+    <div data-composition-src="compositions/scene.html" data-start="0" data-duration="5"></div>
+  </div>
+</body></html>`,
+      "scene.html": `<template><div data-composition-id="scene"><p>Scene</p></div></template>`,
+    });
+
+    const { results } = await lintProject(project);
+    const finding = results
+      .flatMap((result) => result.result.findings)
+      .find((item) => item.code === "blank_root_with_standalone_composition");
+
+    expect(finding).toBeUndefined();
   });
 });
 
@@ -612,6 +632,25 @@ describe("templating tokens are checked on the raw src, before cleanAssetUrl", (
       const c = await codes(projectWith(`<div style="mask-image: url(${url})"></div>`));
       expect(c.has("texture_mask_asset_not_found")).toBe(false);
     }
+  });
+
+  // `\bsrc\s*=` also matched the tail of `data-var-src="bg"`, and `[^>]*` is greedy,
+  // so a real src earlier in the same tag lost to the variable id: bindings were
+  // reported as a missing file named after the variable.
+  it("reports the real src, not the data-var-src variable id", async () => {
+    const { results } = await lintProject(
+      projectWith(`<img src="assets/logo.png" data-var-src="bg" />`),
+    );
+    const finding = results
+      .flatMap((entry) => entry.result.findings)
+      .find((f) => f.code === "missing_local_asset");
+    expect(finding?.message).toContain("assets/logo.png");
+    expect(finding?.message).not.toContain("bg");
+  });
+
+  it("does not invent a missing asset for a binding on an element whose src resolves", async () => {
+    const c = await codes(projectWith(`<img src="${"${imgUrl}"}" data-var-src="bg" />`));
+    expect(c.has("missing_local_asset")).toBe(false);
   });
 
   it("still flags a genuinely missing local video file", async () => {
