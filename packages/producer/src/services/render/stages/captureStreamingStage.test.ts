@@ -6,6 +6,7 @@ import { createCapturePlan } from "../capturePlan.js";
 type MinimalEngineConfig = {
   forceScreenshot: boolean;
   ffmpegStreamingTimeout: number;
+  lowMemoryMode?: boolean;
 };
 
 const writeFrame = mock((_buffer: Buffer) => true);
@@ -21,6 +22,7 @@ let failInitializeSession = false;
 let hangParallelUntilAbort = false;
 let hangSequentialUntilStall = false;
 let sessionWorkerEncodeEnabled = false;
+let captureSessionMode: "drawelement" | "screenshot" = "drawelement";
 let failPrepareCaptureSessionForReuse = false;
 let initializeSessionErrorMessage = "initialize failed";
 const browserConsoleBuffer = ["[FrameCapture:ERROR] page.goto failed"];
@@ -59,6 +61,7 @@ mock.module("@hyperframes/engine", () => ({
     browserConsoleBuffer,
     options: { captureBeyondViewport: false },
     workerEncodeEnabled: sessionWorkerEncodeEnabled,
+    captureMode: captureSessionMode,
   }),
   createFrameReorderBuffer: () => ({
     waitForFrame: async () => {},
@@ -75,8 +78,26 @@ mock.module("@hyperframes/engine", () => ({
     _opts: unknown,
     _hook: unknown,
     signal?: AbortSignal,
+    onProgress?: (progress: unknown) => void,
   ) => {
     if (hangParallelUntilAbort) {
+      onProgress?.({
+        totalFrames: 100,
+        capturedFrames: 0,
+        activeWorkers: 2,
+        workerProgress: new Map([
+          [0, 0],
+          [1, 0],
+        ]),
+        latestWorkerPhase: {
+          workerId: 0,
+          phase: "session_init",
+          browserExecutable: "C:/Chrome/chrome.exe",
+          browserVersion: "Chrome/152.0.7977.30",
+          canvasDrawElement: true,
+          gpuBackend: "d3d11/nvidia",
+        },
+      });
       // Simulate a wedged worker: make no frame progress, then reject with the
       // pool's generic string once aborted (by the parent or the watchdog).
       await new Promise<void>((_resolve, reject) => {
@@ -273,6 +294,8 @@ describe("runCaptureStreamingStage", () => {
     // A stalled render must surface as a stall (→ pinned fallback), never as
     // the raw "[Parallel] Capture failed" or a cancellation.
     expect((caught as Error).message).toContain("stalled");
+    expect((caught as Error).message).toContain("phase=session_init");
+    expect((caught as Error).message).toContain("Chrome/152.0.7977.30");
     // Parent signal never fired, so the orchestrator won't read this as a cancel.
     expect(input.abortSignal).toBeUndefined();
   });
@@ -354,6 +377,44 @@ describe("runCaptureStreamingStage", () => {
 
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toContain("stalled");
+  });
+
+  it("reports the actual screenshot mode and closes a wedged low-memory session", async () => {
+    hangSequentialUntilStall = true;
+    captureSessionMode = "screenshot";
+    closeCaptureSession.mockClear();
+    const prev = process.env.HF_DE_STALL_MS;
+    process.env.HF_DE_STALL_MS = "50";
+    const { runCaptureStreamingStage } = await import("./captureStreamingStage.js");
+    const cfg = {
+      forceScreenshot: true,
+      ffmpegStreamingTimeout: 3_600_000,
+      lowMemoryMode: true,
+    };
+    const baseInput = createInput(cfg);
+    const input = {
+      ...baseInput,
+      totalFrames: 10,
+      plan: { ...baseInput.plan, forceScreenshot: true },
+    };
+
+    let caught: unknown;
+    try {
+      await runCaptureStreamingStage(input);
+    } catch (error) {
+      caught = error;
+    } finally {
+      hangSequentialUntilStall = false;
+      captureSessionMode = "drawelement";
+      if (prev === undefined) delete process.env.HF_DE_STALL_MS;
+      else process.env.HF_DE_STALL_MS = prev;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error & { cause?: Error }).cause?.name).toBe("SequentialCaptureStallError");
+    expect((caught as Error).message).toContain("Sequential screenshot capture stalled");
+    expect((caught as Error).message).not.toContain("drawElement");
+    expect(closeCaptureSession).toHaveBeenCalledTimes(1);
   });
 
   it("still honors the pre-rename HF_DE_PARALLEL_STALL_MS env var for one release", async () => {

@@ -53,7 +53,7 @@ import {
   isMemberGroupHidden,
 } from "../audioGroups";
 import { clampNativeMediaVolume } from "../audioGain";
-import { quantizeTimeToFrame } from "../inline-scripts/parityContract";
+import { quantizeTimeToFrame, snapTimeToFrameBoundary } from "../inline-scripts/parityContract";
 import { STUDIO_MANUAL_EDIT_GESTURE_ATTR } from "../editing/draftMarkers";
 import type {
   RuntimeDeterministicAdapter,
@@ -67,6 +67,10 @@ import { shouldAttemptPeriodicTimelineBind } from "./timelineRebindPolicy";
 import { installStudioCustomEase } from "./customEase";
 import { parseNumeric } from "./startExpression";
 import { parseStrictFiniteTimingNumber } from "./playbackRate";
+import {
+  MEDIA_START_BASIS_ATTR,
+  resolveAbsoluteMediaStartSeconds as resolveAuthoredMediaStartSeconds,
+} from "../mediaTiming";
 import {
   clearRuntimeData,
   setRuntimeData,
@@ -691,18 +695,11 @@ export function initSandboxRuntimeModular(): void {
       return resolveStartForElement(element, inheritedStart);
     }
 
-    // Both timing conventions exist in shipped projects:
-    //   - composition-local media, e.g. host@20 + video@0 => root@20
-    //   - legacy root-global PIP media, e.g. host@45.4 + video@45.4 => root@45.4
-    // Preserve the global value when its authored start already falls inside
-    // the host's absolute window. A long local clip can overlap that window
-    // even when its start is local (host@39.233 + video@0/duration=80), so the
-    // duration cannot disambiguate the timing convention.
-    const hostDuration = context.inheritedDuration;
-    const hostEnd = hostDuration != null && hostDuration > 0 ? inheritedStart + hostDuration : null;
-    const startsInsideHostWindow =
-      authoredStart >= inheritedStart && (hostEnd == null || authoredStart < hostEnd);
-    return startsInsideHostWindow ? authoredStart : inheritedStart + authoredStart;
+    return resolveAuthoredMediaStartSeconds({
+      authoredStart,
+      hostStart: inheritedStart,
+      basis: element.getAttribute(MEDIA_START_BASIS_ATTR),
+    });
   };
 
   window.__hfResolveMediaStartSeconds = resolveAbsoluteMediaStartSeconds;
@@ -746,16 +743,16 @@ export function initSandboxRuntimeModular(): void {
     }
     const computedEnd =
       duration != null && duration > 0 ? start + duration : Number.POSITIVE_INFINITY;
-    const frameAlignedStart = window.__HF_EXPORT_RENDER_SEEK_CONFIG
-      ? quantizeTimeToFrame(start, state.canonicalFps)
+    const visibilityStart = window.__HF_EXPORT_RENDER_SEEK_CONFIG
+      ? snapTimeToFrameBoundary(start, state.canonicalFps)
       : start;
-    const frameAlignedEnd =
+    const visibilityEnd =
       window.__HF_EXPORT_RENDER_SEEK_CONFIG && Number.isFinite(computedEnd)
-        ? quantizeTimeToFrame(computedEnd, state.canonicalFps)
+        ? snapTimeToFrameBoundary(computedEnd, state.canonicalFps)
         : computedEnd;
     return (
-      currentTime >= frameAlignedStart &&
-      (Number.isFinite(frameAlignedEnd) ? currentTime < frameAlignedEnd : true)
+      currentTime >= visibilityStart &&
+      (Number.isFinite(visibilityEnd) ? currentTime < visibilityEnd : true)
     );
   };
 
