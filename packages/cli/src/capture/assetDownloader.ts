@@ -13,8 +13,16 @@ import type { CatalogedAsset } from "./assetCataloger.js";
 import { CAPTURE_USER_AGENT } from "./userAgent.js";
 import { rankIconCandidates, type IconCandidate } from "./faviconRanker.js";
 import { classifyIcon, type IconShape } from "./iconClassifier.js";
+import {
+  readBoundedResponse,
+  createCaptureDownloadBudget,
+  type DownloadByteBudget,
+} from "./readBoundedResponse.js";
+import { captureFontExtension, captureFontFilename } from "./captureFontValidation.js";
+import { captureImageExtension } from "./captureImageValidation.js";
 
 interface DownloadBudgetOptions {
+  byteBudget?: DownloadByteBudget;
   remainingMs?: () => number;
 }
 
@@ -189,10 +197,12 @@ async function fetchAndInspectIcon(
   stem: string,
   outputDir: string,
   timeoutMs: number,
+  byteBudget?: DownloadByteBudget,
 ): Promise<{ record: IconRecord; buffer: Buffer } | null> {
-  const ext = extname(new URL(icon.href).pathname) || ".ico";
-  const buffer = await fetchBuffer(icon.href, timeoutMs);
+  const buffer = await fetchBuffer(icon.href, timeoutMs, 2 * 1024 * 1024, byteBudget);
   if (!buffer) return null;
+  const ext = await captureImageExtension(buffer);
+  if (!ext) return null;
 
   const file = `assets/${stem}${ext}`;
   writeFileSync(join(outputDir, file), buffer);
@@ -271,6 +281,7 @@ async function downloadDeclaredIcons(
         stem,
         outputDir,
         Math.min(10_000, remainingMs),
+        options.byteBudget,
       );
       if (!got) {
         drops.unavailable++;
@@ -302,6 +313,7 @@ export async function downloadAssets(
   faviconLinks?: IconCandidate[],
   options: DownloadBudgetOptions = {},
 ): Promise<{ assets: DownloadedAsset[]; drops: AssetDropCounts; icons: IconManifest }> {
+  options = { ...options, byteBudget: options.byteBudget ?? createCaptureDownloadBudget() };
   const assetsDir = join(outputDir, "assets");
   mkdirSync(assetsDir, { recursive: true });
 
@@ -405,14 +417,22 @@ export async function downloadAssets(
     const results = await Promise.allSettled(
       batch.map(async ({ url, isPoster, catalog }) => {
         const parsedUrl = new URL(url);
-        const pathExt = extname(parsedUrl.pathname);
-        const ext = pathExt && pathExt.length <= 5 ? pathExt : ".jpg";
-        const buffer = await fetchBuffer(url, Math.min(10_000, remainingMs));
+        const buffer = await fetchBuffer(
+          url,
+          Math.min(10_000, remainingMs),
+          20 * 1024 * 1024,
+          options.byteBudget,
+        );
         if (!buffer) {
           drops.unavailable++;
           return null;
         }
-        const isSvg = ext === ".svg" || url.includes(".svg");
+        const ext = await captureImageExtension(buffer);
+        if (!ext) {
+          drops.unavailable++;
+          return null;
+        }
+        const isSvg = ext === ".svg";
         const minSize = isSvg ? 200 : 10000;
         if (buffer.length < minSize) {
           drops["size-floor"]++;
@@ -464,17 +484,22 @@ export async function downloadAssets(
   if (tokens.ogImage && !downloadedUrls.has(normalizeUrl(tokens.ogImage))) {
     const remainingMs = options.remainingMs?.() ?? 10_000;
     try {
-      const ext = extname(new URL(tokens.ogImage).pathname) || ".jpg";
-      const localPath = `assets/og-image${ext}`;
       if (remainingMs <= 0) {
         drops["budget-exhausted"]++;
       } else {
-        const buffer = await fetchBuffer(tokens.ogImage, Math.min(10_000, remainingMs));
-        if (!buffer) {
+        const buffer = await fetchBuffer(
+          tokens.ogImage,
+          Math.min(10_000, remainingMs),
+          20 * 1024 * 1024,
+          options.byteBudget,
+        );
+        const ext = buffer && (await captureImageExtension(buffer));
+        if (!buffer || !ext) {
           drops.unavailable++;
         } else if (buffer.length <= 5000) {
           drops["size-floor"]++;
         } else {
+          const localPath = `assets/og-image${ext}`;
           writeFileSync(join(outputDir, localPath), buffer);
           assets.push({ url: tokens.ogImage, localPath, type: "image" });
         }
@@ -513,6 +538,7 @@ export async function downloadAndRewriteFonts(
   outputDir: string,
   options: DownloadBudgetOptions = {},
 ): Promise<{ css: string; drops: AssetDropCounts }> {
+  options = { ...options, byteBudget: options.byteBudget ?? createCaptureDownloadBudget() };
   const assetsDir = join(outputDir, "assets", "fonts");
   mkdirSync(assetsDir, { recursive: true });
   const drops = noDrops();
@@ -552,6 +578,7 @@ export async function downloadAndRewriteFonts(
     return aLatin - bLatin;
   });
 
+  const usedFontNames = new Set<string>();
   let rewritten = css;
   let count = 0;
 
@@ -575,13 +602,17 @@ export async function downloadAndRewriteFonts(
     count++;
 
     try {
-      const urlObj = new URL(fontUrl);
-      const filename = urlObj.pathname.split("/").pop() || `font-${count}.woff2`;
-      const localPath = join(assetsDir, filename);
-      const relativePath = `assets/fonts/${filename}`;
-
-      const buffer = await fetchBuffer(fontUrl, Math.min(10_000, remainingMs));
-      if (buffer) {
+      const buffer = await fetchBuffer(
+        fontUrl,
+        Math.min(10_000, remainingMs),
+        10 * 1024 * 1024,
+        options.byteBudget,
+      );
+      const extension = buffer && captureFontExtension(buffer);
+      if (buffer && extension) {
+        const filename = captureFontFilename(fontUrl, extension, usedFontNames);
+        const localPath = join(assetsDir, filename);
+        const relativePath = `assets/fonts/${filename}`;
         writeFileSync(localPath, buffer);
         rewritten = rewritten.split(fontUrl).join(relativePath);
       } else {
@@ -685,7 +716,13 @@ export async function safeFetch(url: string, init?: RequestInit): Promise<Respon
   return null; // too many redirects
 }
 
-async function fetchBuffer(url: string, timeoutMs = 10_000): Promise<Buffer | null> {
+async function fetchBuffer(
+  url: string,
+  timeoutMs: number,
+  maxBytes: number,
+  budget: DownloadByteBudget = createCaptureDownloadBudget(),
+): Promise<Buffer | null> {
+  if (budget.remainingBytes <= 0) return null;
   try {
     const res = await safeFetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -697,8 +734,7 @@ async function fetchBuffer(url: string, timeoutMs = 10_000): Promise<Buffer | nu
     if (ct.includes("text/xml") || ct.includes("text/html") || ct.includes("application/xml")) {
       return null;
     }
-    const ab = await res.arrayBuffer();
-    return Buffer.from(ab);
+    return await readBoundedResponse(res, maxBytes, budget);
   } catch {
     return null;
   }
