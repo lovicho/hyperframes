@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/cli",
-  "version": "0.8.33",
+  "version": "0.8.34",
   "description": "HyperFrames CLI — create, preview, and render HTML video compositions",
   "license": "Apache-2.0",
   "repository": {
@@ -70,7 +70,7 @@
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
   },
   "optionalDependencies": {
     "@google/genai": "^1.50.1"
