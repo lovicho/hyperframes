@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import type { CaptureOptions, EngineConfig, ExtractedFrames } from "@hyperframes/engine";
-import { DEFAULT_CONFIG, executeParallelCapture, mergeWorkerFrames } from "@hyperframes/engine";
+import {
+  DEFAULT_CONFIG,
+  DrawElementCaptureError,
+  executeParallelCapture,
+  mergeWorkerFrames,
+} from "@hyperframes/engine";
 import type { CompiledComposition } from "./htmlCompiler.js";
 
 // Replace only the two engine functions the adaptive-retry loop uses to touch
@@ -206,6 +211,40 @@ describe("executeDiskCaptureWithAdaptiveRetry — zero-progress bail (integratio
   afterEach(() => {
     vi.mocked(executeParallelCapture).mockReset();
     vi.mocked(mergeWorkerFrames).mockReset();
+  });
+
+  it("propagates an untrusted drawElement frame even if all disk frames exist", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "hf-de-untrusted-"));
+    const framesDir = join(workDir, "frames");
+    mkdirSync(framesDir);
+    const error = new Error("capture stage failed", {
+      cause: new DrawElementCaptureError(0, "No cached paint record"),
+    });
+    vi.mocked(executeParallelCapture).mockRejectedValueOnce(error);
+    vi.mocked(mergeWorkerFrames).mockImplementationOnce(async () => {
+      writeFileSync(join(framesDir, "frame_000000.jpg"), Buffer.alloc(100));
+    });
+    try {
+      await expect(
+        executeDiskCaptureWithAdaptiveRetry({
+          serverUrl: "http://localhost:0",
+          workDir,
+          framesDir,
+          totalFrames: 1,
+          initialWorkerCount: 1,
+          allowRetry: true,
+          frameExt: "jpg",
+          captureOptions: { width: 64, height: 64, fps: { num: 30, den: 1 } },
+          createBeforeCaptureHook: () => null,
+          cfg: DEFAULT_CONFIG,
+          log: makeLog(),
+          dedupPerfs: [],
+        }),
+      ).rejects.toBe(error);
+      expect(executeParallelCapture).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(workDir, { recursive: true, force: true });
+    }
   });
 
   it("runs exactly one attempt (no worker-halving retries) when an attempt captures zero frames", async () => {
@@ -2516,6 +2555,26 @@ describe("resolveParallelRouterRetryPlan (self-verify retry rollback)", () => {
 });
 
 describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic capture failures, including OOM)", () => {
+  it.each([
+    [false, false, true],
+    [true, false, false],
+    [false, true, false],
+  ])(
+    "routes an untrusted drawElement page unless cancelled/interrupted",
+    (isCancellation, isEncoderInterrupted, expected) => {
+      expect(
+        shouldRetryViaPinnedFallback({
+          isVerifyError: false,
+          isDeCaptureError: true,
+          isCancellation,
+          isEncoderInterrupted,
+          deWorkerInversion: undefined,
+          deParallelRouter: undefined,
+        }),
+      ).toBe(expected);
+    },
+  );
+
   // PRINFRA-488: a wedged renderer must be retryable on ANY routing. Before this,
   // a comp that engaged drawElement on the ordinary single-worker path had no
   // whole-render fallback, so one stalled frame failed the entire render.

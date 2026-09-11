@@ -88,6 +88,7 @@ import {
   cloneCaptureWarning,
   isMemoryExhaustionError,
   isDrawElementVerificationError,
+  isDrawElementCaptureError,
   getDrawElementVerificationDetails,
   augmentProtocolTimeoutError,
   augmentPageNavigationTimeoutError,
@@ -1161,8 +1162,9 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
       // `cancelled` guard; a worker-halving retry here would only re-run
       // drawElement and re-damage). Structural detection walks the aggregated
       // CaptureFailure → worker CaptureFailure → DrawElementVerificationError
-      // cause chain.
-      if (isDrawElementVerificationError(error)) {
+      // cause chain. Missing canvas/paint records also require this fresh-page
+      // recovery; their completed prefix must not make the attempt look valid.
+      if (isDrawElementVerificationError(error) || isDrawElementCaptureError(error)) {
         throw error;
       }
       const remaining = findMissingFrameRanges(
@@ -1882,6 +1884,8 @@ export function resolveParallelRouterRetryPlan(args: {
  */
 export function shouldRetryViaPinnedFallback(args: {
   isVerifyError: boolean;
+  /** An injected drawElement page cannot supply trusted pixels. */
+  isDeCaptureError?: boolean;
   isCancellation: boolean;
   isEncoderInterrupted?: boolean;
   deWorkerInversion: "inverted" | "reverted" | undefined;
@@ -1900,7 +1904,7 @@ export function shouldRetryViaPinnedFallback(args: {
   isSequentialCaptureStall?: boolean;
 }): boolean {
   if (args.isCancellation || args.isEncoderInterrupted) return false;
-  if (args.isVerifyError) return true;
+  if (args.isVerifyError || args.isDeCaptureError) return true;
   if (args.isDeRendererStall === true || args.isSequentialCaptureStall === true) return true;
   return args.deWorkerInversion === "inverted" || args.deParallelRouter === "routed";
 }
@@ -3672,6 +3676,7 @@ async function executeRenderPipeline(input: {
           // probeSession (if any) was consumed by it. See
           // shouldRetryViaPinnedFallback for exactly which errors qualify.
           const isVerifyError = isDrawElementVerificationError(err);
+          const isDeCaptureError = isDrawElementCaptureError(err);
           const isDeStall = isDeRendererStallError(err);
           const isSequentialStall = isSequentialCaptureStallError(err);
           const isCancellation =
@@ -3679,6 +3684,7 @@ async function executeRenderPipeline(input: {
           if (
             !shouldRetryViaPinnedFallback({
               isVerifyError,
+              isDeCaptureError,
               isCancellation,
               isEncoderInterrupted: err instanceof EncoderInterruptedError,
               deWorkerInversion,
@@ -3710,7 +3716,7 @@ async function executeRenderPipeline(input: {
                 ? "[Render] drawElement renderer stalled; re-rendering via screenshot"
                 : isSequentialStall
                   ? "[Render] sequential capture stalled; retrying on a fresh screenshot session"
-                  : "[Render] capture failed on the pinned worker count; re-rendering via screenshot",
+                  : "[Render] capture failed; re-rendering via a fresh screenshot session",
             { error: err instanceof Error ? err.message : String(err) },
           );
           observability.checkpoint(
@@ -3721,7 +3727,7 @@ async function executeRenderPipeline(input: {
                 ? "drawElement renderer stalled; retrying with forceScreenshot"
                 : isSequentialStall
                   ? "sequential capture stalled; retrying with a fresh screenshot session"
-                  : "capture failed on pinned worker count; retrying with forceScreenshot",
+                  : "capture failed; retrying with a fresh screenshot session",
           );
           const failedRouting = capturePlan.routing.kind;
           capturePlan = replanAfterFailure(
@@ -3870,32 +3876,31 @@ async function executeRenderPipeline(input: {
         try {
           captureRes = await invokeDiskCapture(capturePlan);
         } catch (err) {
-          // Disk-path drawElement self-verification tripped (a parallel disk
-          // worker's sampled frame diverged from its pre-injection ground
-          // truth — reachable only under the explicit fast-capture opt-in).
+          // Disk-path drawElement verification or capture failed. A canvas
+          // or paint-record failure cannot use the injected page as ground truth.
           // Same recovery contract as the streaming drain: re-render on the
           // screenshot baseline. Anything else keeps its existing semantics.
           if (
-            !isDrawElementVerificationError(err) ||
+            (!isDrawElementVerificationError(err) && !isDrawElementCaptureError(err)) ||
             err instanceof RenderCancelledError ||
             executionSignal?.aborted === true
           ) {
             throw err;
           }
-          deSelfVerifyFallback = true;
+          deSelfVerifyFallback = isDrawElementVerificationError(err);
           const t = deVerifyFallbackTelemetry(err);
-          deFallbackReason = t.reason;
+          deFallbackReason = deSelfVerifyFallback ? t.reason : "capture_error";
           deFallbackFailedDb = t.failedDb;
           deFallbackFrameIndex = t.frameIndex;
           deFallbackThresholdDb = t.thresholdDb;
           log.warn(
-            "[Render] drawElement self-verification failed on the parallel disk path; " +
+            "[Render] drawElement capture failed on the parallel disk path; " +
               "re-rendering via screenshot",
             { error: err instanceof Error ? err.message : String(err) },
           );
           observability.checkpoint(
             "capture_disk",
-            "drawElement self-verify failed; retrying with forceScreenshot",
+            "drawElement capture failed; retrying with a fresh screenshot session",
           );
           // The failed attempt's frames are untrusted BUT satisfy the
           // completeness check — wipe them so the retry re-captures everything
@@ -3916,7 +3921,9 @@ async function executeRenderPipeline(input: {
             probeSession = null;
             await closeOrphanedProbeForRetry(orphaned, closeCaptureSession, log, "disk verify");
           }
-          capturePlan = replanAfterFailure(capturePlan, { kind: "draw_element_verification" });
+          capturePlan = replanAfterFailure(capturePlan, {
+            kind: deSelfVerifyFallback ? "draw_element_verification" : "draw_element_capture",
+          });
           syncCapturePlan();
           updateCaptureObservability({
             forceScreenshot: capturePlan.forceScreenshot,
