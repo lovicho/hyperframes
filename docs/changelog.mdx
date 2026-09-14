@@ -9,6 +9,35 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.8.40"
+  description="Released - 2026-09-14"
+  tags={["Release", "Core"]}
+>
+Sandboxed compositions no longer lose audio while the timeline and visuals keep playing.
+
+## Fixes
+
+- **Core:** Web Audio routing now checks the document’s security origin with `window.origin`. Media without `crossorigin` stays out of Web Audio when that origin is opaque, even if the URL origins match ([293829a2c](https://github.com/heygen-com/hyperframes/commit/293829a2c1bde0707548b230b74b5cdf8e8985f2), [#3937](https://github.com/heygen-com/hyperframes/pull/3937)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.39...v0.8.40).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.39"
+  description="Released - 2026-09-14"
+  tags={["Release", "CLI", "Lint"]}
+>
+JSON transcripts now get stable word ids, so per-word caption overrides work without converting to SRT first. Lint no longer flags a valid next tag after a closing tag split across lines.
+
+## Fixes
+
+- **CLI:** JSON transcripts now get `w0`, `w1`, ... ids when loaded. Per-word caption overrides can key off those ids without converting to SRT first ([dc6d78b46](https://github.com/heygen-com/hyperframes/commit/dc6d78b46281ddf39cd5d45f6c3def39fb612a14), [#3770](https://github.com/heygen-com/hyperframes/pull/3770)).
+- **Lint:** A closing tag split across lines no longer makes the next sibling look unclosed ([f6041d759](https://github.com/heygen-com/hyperframes/commit/f6041d7597c8c53d381d4c27feb86b305b3317a4), [#3917](https://github.com/heygen-com/hyperframes/pull/3917)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.38...v0.8.39).
+</Update>
+
+<Update
   label="HyperFrames v0.8.38"
   description="Released - 2026-09-14"
   tags={["Release", "CLI", "Skills"]}
