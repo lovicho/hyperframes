@@ -27,6 +27,10 @@ export const examples: Example[] = [
     "Render PNG sequence (RGBA frames for AE/Nuke/Fusion)",
     "hyperframes render --format png-sequence --output frames/",
   ],
+  [
+    "Render HLS VOD (master playlist + MPEG-TS segments in a directory)",
+    "hyperframes render --format hls --output stream/",
+  ],
   ["High quality at 60fps", "hyperframes render --fps 60 --quality high --output hd.mp4"],
   ["Deterministic render via Docker", "hyperframes render --docker --output deterministic.mp4"],
   ["Parallel rendering with 6 workers", "hyperframes render --workers 6 --output fast.mp4"],
@@ -68,6 +72,8 @@ import {
   trackRenderComplete,
   trackRenderError,
   trackRenderObservation,
+  type RenderOutputShapeTelemetryPayload,
+  type RenderEnvironmentTelemetryPayload,
 } from "../telemetry/events.js";
 import { maybePromptRenderFeedback } from "../telemetry/feedback.js";
 import {
@@ -114,7 +120,7 @@ import {
 export default defineCommand({
   meta: {
     name: "render",
-    description: "Render a composition to MP4, WebM, MOV, GIF, or a PNG sequence",
+    description: "Render a composition to MP4, WebM, MOV, GIF, HLS, or a PNG sequence",
   },
   args: {
     dir: {
@@ -164,14 +170,22 @@ export default defineCommand({
     format: {
       type: "string",
       description:
-        "Output format: mp4, webm, mov, gif, png-sequence " +
+        "Output format: mp4, webm, mov, gif, png-sequence, hls " +
         "(MOV/WebM render with transparency; png-sequence writes RGBA frames " +
-        "to a directory for AE/Nuke/Fusion ingest; gif is best at 15fps for PRs/docs)",
+        "to a directory for AE/Nuke/Fusion ingest; gif is best at 15fps for PRs/docs; " +
+        "hls writes a VOD playlist directory — H.264/AAC, SDR only, no GPU encoding)",
       default: "mp4",
     },
     "gif-loop": {
       type: "string",
       description: "GIF loop count, 0 = infinite. Range: 0-65535. Only used with --format gif.",
+    },
+    "hls-segment-seconds": {
+      type: "string",
+      description:
+        "HLS target segment length in whole seconds (default: 4). Range: 1-60. " +
+        "Also fixes the encoder GOP at segment x fps frames so every segment " +
+        "starts on a keyframe. Only used with --format hls.",
     },
     "video-frame-format": {
       type: "string",
@@ -411,6 +425,12 @@ export interface RenderOptions {
   quality: "draft" | "standard" | "high";
   /** Authoring workflow skill that drove this render (telemetry attribution). */
   authoringSkill?: string;
+  /** Which step resolved authoringSkill: an explicit --skill flag, or the project's own config. */
+  authoringSkillSource?: "flag" | "project-config";
+  /** Raw --skill value when it failed normalizeSkillSlug (an unrecognized skill name was passed). */
+  authoringSkillInvalid?: string;
+  /** Names of HF_-/HYPERFRAMES_-prefixed env vars present at plan time (never values), capped at 20. */
+  hfEnvOverrides?: readonly string[];
   /**
    * Catalog items installed in this project and those the rendered composition
    * reaches. Resolved once in the render plan; absent on programmatic callers
@@ -419,6 +439,13 @@ export interface RenderOptions {
   catalogUsage?: CatalogUsage;
   format: RenderFormat;
   gifLoop?: number;
+  /** True when `createRenderPlan` clamped a requested `--fps` above 30 to 30 for `--format gif`. */
+  gifFpsCapped?: boolean;
+  /** Major FFmpeg/Chrome version from local preflight (telemetry only); absent on Docker renders. */
+  ffmpegVersionMajor?: number;
+  browserVersionMajor?: number;
+  /** HLS target segment length in seconds; ignored unless `format` is `"hls"`. */
+  hlsSegmentSeconds?: number;
   workers?: number;
   gpu: boolean;
   /**
@@ -742,6 +769,7 @@ async function renderDocker(
       quality: options.quality,
       format: options.format,
       gifLoop: options.gifLoop,
+      hlsSegmentSeconds: options.hlsSegmentSeconds,
       workers: options.workers,
       gpu: options.gpu,
       browserGpu: options.browserGpuMode === "hardware",
@@ -803,7 +831,12 @@ async function renderDocker(
       docker: true,
       gpu: options.gpu,
       authoringSkill: options.authoringSkill,
+      authoringSkillSource: options.authoringSkillSource,
+      authoringSkillInvalid: options.authoringSkillInvalid,
+      hfEnvOverrides: options.hfEnvOverrides,
       catalogUsage: options.catalogUsage,
+      ...renderOutputShapeTelemetryPayload(options),
+      ...renderEnvironmentTelemetryPayload(options),
       ...getMemorySnapshot(),
     }),
   );
@@ -812,7 +845,12 @@ async function renderDocker(
   // threaded back here; the summary shows render time only (never a wrong video
   // length). Probe the output with ffprobe if a duration figure is wanted here.
   runPostRenderStep("printRenderComplete", () =>
-    printRenderComplete(outputPath, elapsed, options.quiet),
+    printRenderComplete({
+      outputPath,
+      elapsedMs: elapsed,
+      quiet: options.quiet,
+      format: options.format,
+    }),
   );
   runPostRenderStep("warnIfWebmAlphaDropped", () =>
     warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
@@ -869,6 +907,11 @@ async function executeLocalRender(
     includeWindowsUnc: true,
     signal: cancellation.signal,
   });
+  options = {
+    ...options,
+    ffmpegVersionMajor: preflight.ffmpegVersionMajor,
+    browserVersionMajor: preflight.browserVersionMajor,
+  };
   cancellation.checkAncestors();
   cancellation.signal.throwIfAborted();
   const failedChecks = preflight.outcomes.filter((outcome) => !outcome.ok);
@@ -893,7 +936,10 @@ async function executeLocalRender(
     process.env.PRODUCER_HEADLESS_SHELL_PATH = preflight.browser.executablePath;
   }
 
-  if (!options.gpu && options.format === "mp4" && preflight.ffmpegPath) {
+  // HLS shares the H.264 encode path but cannot take the GPU fallback below:
+  // its fixed-length segments need the software encoder's forced-keyframe lock.
+  const isHls = options.format === "hls";
+  if (!options.gpu && (options.format === "mp4" || isHls) && preflight.ffmpegPath) {
     let encoderMode: H264EncoderMode = "software";
     try {
       encoderMode = await detectH264EncoderModeForRender(
@@ -904,12 +950,18 @@ async function executeLocalRender(
     } catch (error) {
       if (cancellation.signal.aborted) cancellation.signal.throwIfAborted();
       // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources
-      // have been inspected. Only forced SDR is definitely H.264 here.
-      if (error instanceof H264EncoderUnavailableError && options.hdrMode === "force-sdr") {
+      // have been inspected. Forced SDR and HLS are definitely H.264 here.
+      if (
+        error instanceof H264EncoderUnavailableError &&
+        (options.hdrMode === "force-sdr" || isHls)
+      ) {
         errorBox(
-          "MP4 H.264 encoder unavailable",
+          `${isHls ? "HLS" : "MP4"} H.264 encoder unavailable`,
           error.message,
-          `Install an FFmpeg build with libx264 support (${getFFmpegInstallHint()}), or render WebM instead: hyperframes render --format webm --output output.webm`,
+          `Install an FFmpeg build with libx264 support (${getFFmpegInstallHint()})` +
+            (isHls
+              ? "."
+              : ", or render WebM instead: hyperframes render --format webm --output output.webm"),
         );
         failCommand();
       }
@@ -919,6 +971,14 @@ async function executeLocalRender(
         const detail = error instanceof Error ? error.message : String(error);
         console.warn(c.warn(`  Unable to probe H.264 encoder capabilities: ${detail}`));
       }
+    }
+    if (encoderMode === "gpu" && isHls) {
+      errorBox(
+        "HLS H.264 encoder unavailable",
+        "FFmpeg does not include libx264, and HLS cannot fall back to VideoToolbox: fixed-length segments require the software encoder's forced-keyframe lock.",
+        `Install an FFmpeg build with libx264 support (${getFFmpegInstallHint()}).`,
+      );
+      failCommand();
     }
     if (encoderMode === "gpu") {
       console.warn(
@@ -968,6 +1028,7 @@ async function executeLocalRender(
       quality: options.quality,
       format: options.format,
       gifLoop: options.gifLoop,
+      hlsSegmentSeconds: options.hlsSegmentSeconds,
       workers: options.workers,
       useGpu: options.gpu,
       hdrMode: options.hdrMode,
@@ -1032,13 +1093,14 @@ async function executeLocalRender(
   }
   runPostRenderStep("trackRenderMetrics", () => trackRenderMetrics(job, elapsed, options, false));
   runPostRenderStep("printRenderComplete", () =>
-    printRenderComplete(
+    printRenderComplete({
       outputPath,
-      elapsed,
-      options.quiet,
-      job.perfSummary,
-      options.browserGpuMode,
-    ),
+      elapsedMs: elapsed,
+      quiet: options.quiet,
+      format: options.format,
+      perf: job.perfSummary,
+      requestedGpuMode: options.browserGpuMode,
+    }),
   );
   runPostRenderStep("warnIfWebmAlphaDropped", () =>
     warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
@@ -1089,6 +1151,29 @@ function getMemorySnapshot() {
   return {
     peakMemoryMb: bytesToMb(process.memoryUsage.rss()),
     memoryFreeMb: bytesToMb(freemem()),
+  };
+}
+
+/** Output-shape request facts, resolved before the pipeline starts (survives a pre-perfSummary render_error). */
+function renderOutputShapeTelemetryPayload(
+  options: RenderOptions,
+): RenderOutputShapeTelemetryPayload {
+  return {
+    outputResolutionPreset: options.outputResolution,
+    outputFormat: options.format,
+    hdrMode: options.hdrMode,
+    videoFrameFormat: options.videoFrameFormat,
+    gifFpsCapped: options.gifFpsCapped,
+  };
+}
+
+/** Toolchain facts from local preflight; undefined on Docker renders (the container runs its own). */
+function renderEnvironmentTelemetryPayload(
+  options: RenderOptions,
+): RenderEnvironmentTelemetryPayload {
+  return {
+    ffmpegVersionMajor: options.ffmpegVersionMajor,
+    browserVersionMajor: options.browserVersionMajor,
   };
 }
 
@@ -1548,9 +1633,14 @@ function handleRenderError(
     workers: options.workers,
     gpu: options.gpu,
     authoringSkill: options.authoringSkill,
+    authoringSkillSource: options.authoringSkillSource,
+    authoringSkillInvalid: options.authoringSkillInvalid,
+    hfEnvOverrides: options.hfEnvOverrides,
     elapsedMs: Date.now() - startTime,
     errorMessage: message,
     failedStage,
+    ...renderOutputShapeTelemetryPayload(options),
+    ...renderEnvironmentTelemetryPayload(options),
     // A bucketable failure taxonomy alongside the free-text error_message
     // above: error.name is one of ~20 typed producer error classes
     // (CaptureFailure, DrawElementCaptureError, SwiftShaderAssertionError, …);
@@ -1646,7 +1736,12 @@ function trackRenderMetrics(
     docker,
     gpu: options.gpu,
     authoringSkill: options.authoringSkill,
+    authoringSkillSource: options.authoringSkillSource,
+    authoringSkillInvalid: options.authoringSkillInvalid,
+    hfEnvOverrides: options.hfEnvOverrides,
     catalogUsage: options.catalogUsage,
+    ...renderOutputShapeTelemetryPayload(options),
+    ...renderEnvironmentTelemetryPayload(options),
     staticDedupEnabled: perf?.staticDedup?.enabled,
     staticDedupArmed: perf?.staticDedup?.armed,
     staticDedupSkipReason: perf?.staticDedup?.skipReason,
@@ -1664,6 +1759,15 @@ function trackRenderMetrics(
     compositionElementTags: perf?.drawElement?.compositionElementTags,
     arollVideoCount: perf?.drawElement?.arollVideoCount,
     heygenVideoCount: perf?.drawElement?.heygenVideoCount,
+    adaptersUsed: perf?.drawElement?.adaptersUsed,
+    audioCount: perf?.drawElement?.audioCount,
+    imageCount: perf?.drawElement?.imageCount,
+    subCompositionCount: perf?.drawElement?.subCompositionCount,
+    audioGroupCount: perf?.drawElement?.audioGroupCount,
+    colorGradingCount: perf?.drawElement?.colorGradingCount,
+    hasLut: perf?.drawElement?.hasLut,
+    rootBodyMismatch: perf?.drawElement?.rootBodyMismatch,
+    rootBodyDeltaPxBucket: perf?.drawElement?.rootBodyDeltaPxBucket,
     deShortBand: perf?.drawElement?.shortBand,
     deParallelRouter: perf?.drawElement?.parallelRouter,
     dePreRouterWorkers: perf?.drawElement?.preRouterWorkers,
@@ -1723,7 +1827,7 @@ function readOutputFootprint(outputPath: string): { fileSize: string; isDirector
   try {
     const stat = statSync(outputPath);
     if (!stat.isDirectory()) return { fileSize: formatBytes(stat.size), isDirectory: false };
-    // png-sequence output is a directory; sum contained file sizes so the
+    // png-sequence and hls write a directory; sum contained file sizes so the
     // user sees the deliverable footprint, not the directory inode size.
     let total = 0;
     for (const entry of readdirSync(outputPath, { withFileTypes: true })) {
@@ -1740,25 +1844,28 @@ function readOutputFootprint(outputPath: string): { fileSize: string; isDirector
   }
 }
 
-function printRenderComplete(
-  outputPath: string,
-  elapsedMs: number,
-  quiet: boolean,
-  perf?: RenderPerfSummary,
-  requestedGpuMode?: "auto" | "hardware" | "software",
-): void {
-  if (quiet) return;
+function printRenderComplete(input: {
+  outputPath: string;
+  elapsedMs: number;
+  quiet: boolean;
+  format: RenderFormat;
+  perf?: RenderPerfSummary;
+  requestedGpuMode?: "auto" | "hardware" | "software";
+}): void {
+  if (input.quiet) return;
+  const { outputPath, elapsedMs, perf } = input;
   const { fileSize, isDirectory } = readOutputFootprint(outputPath);
   const detail = formatRenderSummaryDetail({
     elapsedMs,
     outputDurationSeconds: perf?.compositionDurationSeconds,
     isDirectory,
     frameCount: perf?.totalFrames,
+    playlistDirectory: input.format === "hls",
   });
   console.log("");
   console.log(c.success("\u25C7") + "  " + c.accent(outputPath));
   console.log("   " + c.bold(fileSize) + c.dim(" \u00B7 " + detail));
-  if (perf) printRenderPipeline(perf, requestedGpuMode);
+  if (perf) printRenderPipeline(perf, input.requestedGpuMode);
 }
 
 function printRenderPipeline(
