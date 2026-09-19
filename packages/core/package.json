@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.48",
+  "version": "0.8.51",
   "description": "",
   "repository": {
     "type": "git",
@@ -190,6 +190,12 @@
       "import": "./src/audioAutomation.ts",
       "types": "./src/audioAutomation.ts"
     },
+    "./clip-facts": {
+      "bun": "./src/clipFacts.ts",
+      "node": "./dist/clipFacts.js",
+      "import": "./src/clipFacts.ts",
+      "types": "./src/clipFacts.ts"
+    },
     "./audio-gain": {
       "bun": "./src/audioGain.ts",
       "node": "./dist/audioGain.js",
@@ -250,6 +256,12 @@
       "node": "./dist/runtime/protocol.js",
       "import": "./src/runtime/protocol.ts",
       "types": "./src/runtime/protocol.ts"
+    },
+    "./runtime/clip-window": {
+      "bun": "./src/runtime/clipWindow.ts",
+      "node": "./dist/runtime/clipWindow.js",
+      "import": "./src/runtime/clipWindow.ts",
+      "types": "./src/runtime/clipWindow.ts"
     },
     "./runtime/stacking-context": {
       "bun": "./src/runtime/stackingContext.ts",
@@ -520,6 +532,10 @@
         "import": "./dist/audioAutomation.js",
         "types": "./dist/audioAutomation.d.ts"
       },
+      "./clip-facts": {
+        "import": "./dist/clipFacts.js",
+        "types": "./dist/clipFacts.d.ts"
+      },
       "./audio-gain": {
         "import": "./dist/audioGain.js",
         "types": "./dist/audioGain.d.ts"
@@ -560,6 +576,10 @@
       "./runtime/protocol": {
         "import": "./dist/runtime/protocol.js",
         "types": "./dist/runtime/protocol.d.ts"
+      },
+      "./runtime/clip-window": {
+        "import": "./dist/runtime/clipWindow.js",
+        "types": "./dist/runtime/clipWindow.d.ts"
       },
       "./runtime/stacking-context": {
         "import": "./dist/runtime/stackingContext.js",

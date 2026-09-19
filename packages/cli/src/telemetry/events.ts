@@ -1,3 +1,4 @@
+import type { BrowserInstallFacts } from "../browser/installFacts.js";
 import { redactTelemetryString, type OutputResolutionIssueKind } from "@hyperframes/core";
 import type { SubTimelineWaitOutcome } from "@hyperframes/engine";
 import { FEEDBACK_RATING_SCALE } from "../utils/feedbackRating.js";
@@ -99,6 +100,15 @@ export interface RenderObservabilityTelemetryPayload {
   /** Non-DE parallel-streaming router outcome ("screenshot" | "beginframe" —
    * routed; "eligible_off" — would route but the kill switch is off). */
   captureParallelStream?: string;
+  /** Chrome memory from the engine sampler (Phase −1, long-form render plan). */
+  captureChromeBrowserRssPeakMb?: number;
+  captureChromeRendererRssPeakMb?: number;
+  captureChromeRssLastMb?: number;
+  captureChromeGpuProcessSeenLastSample?: boolean;
+  captureChromeMemorySamples?: number;
+  captureCapturePath?: string;
+  captureSegmentIndex?: number;
+  captureSegmentRetries?: number;
   observabilityExtractVideoCount?: number;
   observabilityExtractedVideoCount?: number;
   observabilityExtractTotalFrames?: number;
@@ -171,6 +181,14 @@ function renderObservabilityEventProperties(props: RenderObservabilityTelemetryP
     de_fallback_frame_index: props.captureDeFallbackFrameIndex,
     de_fallback_threshold_db: props.captureDeFallbackThresholdDb,
     capture_parallel_stream: props.captureParallelStream,
+    chrome_browser_rss_peak_mb: props.captureChromeBrowserRssPeakMb,
+    chrome_renderer_rss_peak_mb: props.captureChromeRendererRssPeakMb,
+    chrome_rss_last_mb: props.captureChromeRssLastMb,
+    gpu_process_seen_last_sample: props.captureChromeGpuProcessSeenLastSample,
+    chrome_memory_samples: props.captureChromeMemorySamples,
+    capture_path: props.captureCapturePath,
+    segment_index: props.captureSegmentIndex,
+    segment_retries: props.captureSegmentRetries,
     observability_extract_video_count: props.observabilityExtractVideoCount,
     observability_extracted_video_count: props.observabilityExtractedVideoCount,
     observability_extract_total_frames: props.observabilityExtractTotalFrames,
@@ -221,12 +239,17 @@ function renderOutputShapeEventProperties(props: RenderOutputShapeTelemetryPaylo
 export interface RenderEnvironmentTelemetryPayload {
   ffmpegVersionMajor?: number;
   browserVersionMajor?: number;
+  browserInstall?: BrowserInstallFacts;
 }
 
 function renderEnvironmentEventProperties(props: RenderEnvironmentTelemetryPayload) {
   return {
     ffmpeg_version_major: props.ffmpegVersionMajor,
     browser_version_major: props.browserVersionMajor,
+    browser_build: props.browserInstall?.build,
+    browser_path_ascii: props.browserInstall?.pathAscii,
+    browser_path_length: props.browserInstall?.pathLength,
+    browser_path_drive: props.browserInstall?.drive,
   };
 }
 
@@ -401,6 +424,14 @@ export function trackRenderComplete(
     capturePeakMs?: number;
     // Resource usage
     peakMemoryMb?: number;
+    // Aggregate Chrome memory (RenderPerfSummary.chromeMemory); overrides the
+    // live observability values when both are present, because the live ones
+    // are only the last session's and the aggregate covers every worker.
+    chromeBrowserRssPeakMb?: number;
+    chromeRendererRssPeakMb?: number;
+    chromeRssLastMb?: number;
+    chromeGpuProcessSeenLastSample?: boolean;
+    chromeMemorySamples?: number;
     memoryFreeMb?: number;
     tmpPeakBytes?: number;
     // Per-stage timings (subset of RenderPerfSummary.stages)
@@ -438,6 +469,14 @@ export function trackRenderComplete(
       // studioRenderTelemetry.ts never populates drawElement, so without the
       // fallback the explicit key still wins the spread with an undefined.
       ...renderObservabilityEventProperties(props),
+      chrome_browser_rss_peak_mb:
+        props.chromeBrowserRssPeakMb ?? props.captureChromeBrowserRssPeakMb,
+      chrome_renderer_rss_peak_mb:
+        props.chromeRendererRssPeakMb ?? props.captureChromeRendererRssPeakMb,
+      chrome_rss_last_mb: props.chromeRssLastMb ?? props.captureChromeRssLastMb,
+      gpu_process_seen_last_sample:
+        props.chromeGpuProcessSeenLastSample ?? props.captureChromeGpuProcessSeenLastSample,
+      chrome_memory_samples: props.chromeMemorySamples ?? props.captureChromeMemorySamples,
       duration_ms: props.durationMs,
       fps: props.fps,
       quality: props.quality,

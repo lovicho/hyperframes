@@ -176,6 +176,12 @@
       "types": "./dist/audioAutomation.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./clip-facts": {
+      "source": "./src/clipFacts.ts",
+      "runtime": "./dist/clipFacts.js",
+      "types": "./dist/clipFacts.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./audio-gain": {
       "source": "./src/audioGain.ts",
       "runtime": "./dist/audioGain.js",
@@ -240,6 +246,12 @@
       "source": "./src/runtime/protocol.ts",
       "runtime": "./dist/runtime/protocol.js",
       "types": "./dist/runtime/protocol.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./runtime/clip-window": {
+      "source": "./src/runtime/clipWindow.ts",
+      "runtime": "./dist/runtime/clipWindow.js",
+      "types": "./dist/runtime/clipWindow.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./runtime/stacking-context": {

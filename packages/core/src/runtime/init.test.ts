@@ -949,6 +949,95 @@ describe("initSandboxRuntimeModular", () => {
     expect(clip.style.visibility).toBe("hidden");
   });
 
+  describe("at the composition's terminal time", () => {
+    const buildRoot = () => {
+      const root = document.createElement("div");
+      root.setAttribute("data-composition-id", "main");
+      root.setAttribute("data-root", "true");
+      root.setAttribute("data-start", "0");
+      root.setAttribute("data-width", "1920");
+      root.setAttribute("data-height", "1080");
+      document.body.appendChild(root);
+      return root;
+    };
+    const addClip = (root: HTMLElement, start: number, duration: number) => {
+      const clip = document.createElement("div");
+      clip.setAttribute("data-start", String(start));
+      clip.setAttribute("data-duration", String(duration));
+      root.appendChild(clip);
+      return clip;
+    };
+
+    it("keeps a clip that runs to the composition duration visible at and past the duration", () => {
+      const root = buildRoot();
+      const lastClip = addClip(root, 2.5, 2.5);
+      window.__timelines = { main: createMockTimeline(5) };
+      initSandboxRuntimeModular();
+
+      window.__player?.renderSeek(5 - 1e-9);
+      expect(lastClip.style.visibility).toBe("visible");
+      window.__player?.renderSeek(5);
+      expect(lastClip.style.visibility).toBe("visible");
+      window.__player?.renderSeek(5.5);
+      expect(lastClip.style.visibility).toBe("visible");
+    });
+
+    it("seeks a terminal video to its last authored frame and keeps it paused on a direct seek", () => {
+      const root = buildRoot();
+      const video = document.createElement("video");
+      video.setAttribute("data-start", "2.5");
+      video.setAttribute("data-duration", "2.5");
+      root.appendChild(video);
+      Object.defineProperty(video, "duration", { value: 10, configurable: true });
+      Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+      video.play = vi.fn(() => Promise.resolve());
+      window.__timelines = { main: createMockTimeline(5) };
+      initSandboxRuntimeModular();
+
+      window.__player?.renderSeek(5);
+
+      expect(video.style.visibility).toBe("visible");
+      expect(video.currentTime).toBe(2.5);
+      expect(video.paused).toBe(true);
+      expect(video.play).not.toHaveBeenCalled();
+    });
+
+    it("keeps a nested clip visible when its summed end falls one ulp short of the timeline duration", () => {
+      const root = buildRoot();
+      // GSAP reports 0.8 for a 0.7s tween followed by a 0.1s tween; the authored end sums to 0.7999999999999999.
+      const nested = addClip(root, 0.7, 0.1);
+      window.__timelines = { main: createMockTimeline(0.8) };
+      initSandboxRuntimeModular();
+
+      window.__player?.renderSeek(0.8);
+      expect(nested.style.visibility).toBe("visible");
+    });
+
+    it("still hides a clip that ended before the composition duration", () => {
+      const root = buildRoot();
+      const earlyClip = addClip(root, 0, 2.5);
+      addClip(root, 2.5, 2.5);
+      window.__timelines = { main: createMockTimeline(5) };
+      initSandboxRuntimeModular();
+
+      window.__player?.renderSeek(5);
+      expect(earlyClip.style.visibility).toBe("hidden");
+    });
+
+    it("never shows two back-to-back clips at their shared boundary", () => {
+      const root = buildRoot();
+      const first = addClip(root, 0, 2.5);
+      const second = addClip(root, 2.5, 2.5);
+      window.__timelines = { main: createMockTimeline(5) };
+      initSandboxRuntimeModular();
+
+      window.__player?.renderSeek(2.5);
+      expect([first.style.visibility, second.style.visibility]).toEqual(["hidden", "visible"]);
+      window.__player?.renderSeek(5);
+      expect([first.style.visibility, second.style.visibility]).toEqual(["hidden", "visible"]);
+    });
+  });
+
   it("keeps external composition hosts visible through their authored duration", async () => {
     const root = document.createElement("div");
     root.setAttribute("data-composition-id", "main");
@@ -3033,6 +3122,126 @@ describe("initSandboxRuntimeModular", () => {
     delete (window as Window & { __hfLottie?: unknown[] }).__hfLottie;
   });
 
+  describe("a root with no data-duration and no timeline takes its length from its clips", () => {
+    const mountRoot = (children: string) => {
+      document.body.innerHTML = `<div data-composition-id="main" data-root="true" data-start="0" data-width="1920" data-height="1080">${children}</div>`;
+      window.__timelines = {};
+      initSandboxRuntimeModular();
+    };
+
+    it("counts a timed image at the dropped-image default and reports the derived source", () => {
+      mountRoot('<img id="a" data-start="2" src="a.png" />');
+      expect(window.__player?.getDuration()).toBe(5);
+      expect(window.__hf?.durationSource).toEqual({
+        source: "derived",
+        seconds: 5,
+        pendingClips: 0,
+      });
+    });
+
+    it("counts a plain clip with data-start and data-duration", () => {
+      mountRoot('<div class="clip" data-start="1" data-duration="4"></div>');
+      expect(window.__player?.getDuration()).toBe(5);
+    });
+
+    it("stays at zero while a video's length is pending, so a renderer never locks in a short one", () => {
+      mountRoot(
+        '<div class="clip" data-start="0" data-duration="2"></div><video data-start="0"></video>',
+      );
+      expect(window.__player?.getDuration()).toBe(0);
+      expect(window.__hf?.durationSource).toEqual({
+        source: "unresolved",
+        seconds: null,
+        pendingClips: 1,
+      });
+    });
+
+    it("stays at zero while a sub-composition's own length is not known yet", () => {
+      mountRoot(
+        '<div class="clip" data-start="0" data-duration="2"></div><div data-composition-id="sub" data-start="0"></div>',
+      );
+      expect(window.__player?.getDuration()).toBe(0);
+      expect(window.__hf?.durationSource?.pendingClips).toBe(1);
+    });
+
+    it("stays at zero while a loaded Lottie has registered no animation, instead of locking in the clip's length", () => {
+      const lottieWindow = window as Window & { lottie?: unknown };
+      lottieWindow.lottie = { getRegisteredAnimations: () => [] };
+      try {
+        mountRoot('<div class="clip" data-start="0" data-duration="2"></div>');
+        expect(window.__player?.getDuration()).toBe(0);
+        expect(window.__hf?.durationSource).toEqual({
+          source: "unresolved",
+          seconds: null,
+          pendingClips: 1,
+        });
+      } finally {
+        delete lottieWindow.lottie;
+      }
+    });
+
+    it("treats a declared data-lottie-src or a loaded DotLottie as a pending clip too", () => {
+      mountRoot(
+        '<div class="clip" data-start="0" data-duration="2"></div><div data-lottie-src="a.json"></div>',
+      );
+      expect(window.__player?.getDuration()).toBe(0);
+      const dotLottieWindow = window as Window & { DotLottie?: unknown };
+      dotLottieWindow.DotLottie = class {};
+      try {
+        mountRoot('<div class="clip" data-start="0" data-duration="2"></div>');
+        expect(window.__hf?.durationSource?.pendingClips).toBe(1);
+      } finally {
+        delete dotLottieWindow.DotLottie;
+      }
+    });
+
+    it("uses the Lottie's own length once it is registered, not the clips' length", () => {
+      const lottieWindow = window as Window & { lottie?: unknown; __hfLottie?: unknown[] };
+      lottieWindow.lottie = { getRegisteredAnimations: () => [] };
+      lottieWindow.__hfLottie = [
+        { play: () => {}, pause: () => {}, totalFrames: 150, frameRate: 30 },
+      ];
+      try {
+        mountRoot('<div class="clip" data-start="0" data-duration="2"></div>');
+        expect(window.__player?.getDuration()).toBe(5);
+        expect(window.__hf?.durationSource).toBeUndefined();
+      } finally {
+        delete lottieWindow.lottie;
+        delete lottieWindow.__hfLottie;
+      }
+    });
+
+    it("posts the derived-length diagnostic only for a derived length", () => {
+      const spy = vi.spyOn(window, "postMessage");
+      const codes = () =>
+        spy.mock.calls
+          .map(([message]) => (message as { code?: string } | undefined)?.code)
+          .filter((code) => code === "composition_duration_derived");
+      mountRoot("<p>static</p>");
+      expect(codes()).toHaveLength(0);
+      mountRoot('<div class="clip" data-start="0" data-duration="2"></div>');
+      expect(codes()).toHaveLength(1);
+    });
+
+    it("reports no derived source when a timeline supplies the length", () => {
+      mountRoot('<div class="clip" data-start="0" data-duration="2"></div>');
+      expect(window.__hf?.durationSource?.source).toBe("derived");
+      document.body.innerHTML = "";
+      window.__timelines = {};
+      document.body.innerHTML =
+        '<div data-composition-id="main" data-root="true" data-start="0" data-duration="8"></div>';
+      initSandboxRuntimeModular();
+      expect(window.__player?.getDuration()).toBe(8);
+      expect(window.__hf?.durationSource).toBeUndefined();
+    });
+
+    it("stays at zero, reported unresolved, when there is no timed content", () => {
+      mountRoot("<p>static</p>");
+      expect(window.__player?.getDuration()).toBe(0);
+      expect(window.__hf?.durationSource?.source).toBe("unresolved");
+    });
+  });
+
   it("regression: a GSAP timeline's duration is unaffected by adapter duration inference", () => {
     // A GSAP composition can legitimately have an incidental, short CSS
     // animation running alongside the timeline (e.g. a decorative shimmer).
@@ -3092,6 +3301,42 @@ describe("initSandboxRuntimeModular", () => {
 
     expect(seekTimes.length).toBeGreaterThanOrEqual(2);
     expect(seekTimes[seekTimes.length - 1]).toBe(0);
+  });
+
+  it("posts assets-ready once, after the timeline, and only once a pending image settles", async () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "root");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-duration", "5");
+    root.setAttribute("data-width", "1920");
+    root.setAttribute("data-height", "1080");
+    const img = document.createElement("img");
+    const decodes: Array<() => void> = [];
+    Object.defineProperty(img, "complete", { value: false, configurable: true });
+    img.decode = () => new Promise<void>((resolve) => decodes.push(resolve));
+    root.appendChild(img);
+    document.body.appendChild(root);
+    window.__timelines = { root: createMockTimeline(5) };
+    const outbound: Array<Record<string, unknown>> = [];
+    vi.spyOn(window.parent, "postMessage").mockImplementation((message: unknown) => {
+      if (typeof message === "object" && message !== null) {
+        outbound.push(message as Record<string, unknown>);
+      }
+    });
+
+    initSandboxRuntimeModular();
+    const types = () => outbound.map((m) => m.type);
+    expect(outbound.find((m) => m.type === "timeline")?.assetsReady).toBe(false);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(types()).not.toContain("assets-ready");
+
+    decodes.forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(types()).toContain("assets-ready"));
+    window.__player!.renderSeek(1);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(types().filter((t) => t === "assets-ready")).toHaveLength(1);
+    expect(decodes).toHaveLength(1);
+    expect(types().indexOf("assets-ready")).toBeGreaterThan(types().indexOf("timeline"));
   });
 
   it("accepts replayed transport controls when the bridge announces ready without duplicate listeners", () => {
@@ -4133,6 +4378,20 @@ describe("derived duration floor recomputation", () => {
 
       document.querySelector("video")!.setAttribute("data-duration", "25");
       expect(await runFrames(1)).toBe(25);
+    });
+
+    it("re-derives when a speed-ramp lane is edited", async () => {
+      mountComposition(`<video data-start="0"></video>`);
+      const video = document.querySelector("video")!;
+      setNativeDuration(video, 10);
+      initSandboxRuntimeModular();
+      expect(await runFrames(2)).toBe(10);
+
+      video.setAttribute(
+        "data-automation",
+        JSON.stringify({ version: 1, lanes: [{ target: "rate", points: [{ t: 0, v: 2 }] }] }),
+      );
+      expect(await runFrames(1)).toBe(5);
     });
 
     it("re-derives when a clip is moved later on the timeline", async () => {

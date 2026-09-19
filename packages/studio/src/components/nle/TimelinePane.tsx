@@ -102,6 +102,12 @@ export interface TimelinePaneProps {
   ) => Promise<void> | void;
   onBlockedEditAttempt?: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
   onSelectTimelineElement?: (element: TimelineElement | null) => void;
+  /** Copy/paste/duplicate act on the store's own selection, not a passed
+   *  element, so unlike onDeleteElement they need no composition-basis wrapper. */
+  onCopyClip?: () => boolean;
+  onPasteClip?: () => Promise<void>;
+  onDuplicateClip?: () => Promise<boolean>;
+  canPasteClip?: () => boolean;
 }
 
 // fallow-ignore-next-line complexity
@@ -116,6 +122,10 @@ export function TimelinePane({
   onCompositionDrop,
   onBlockedEditAttempt,
   onSelectTimelineElement,
+  onCopyClip,
+  onPasteClip,
+  onDuplicateClip,
+  canPasteClip,
 }: TimelinePaneProps) {
   const {
     seek,
@@ -256,7 +266,7 @@ export function TimelinePane({
       {/* Timeline section — inner padding (not margin) keeps the divider's
           height math exact while giving the panel a gap from the shell edges. */}
       <div
-        className="relative flex flex-col flex-shrink-0 px-px pb-px"
+        className="relative flex flex-col shrink-0 px-px pb-px"
         style={{ height: timelineH }}
         aria-disabled={timelineDisabled || undefined}
       >
@@ -270,7 +280,7 @@ export function TimelinePane({
             }
           }}
         >
-          <div className="flex-shrink-0">{timelineToolbar}</div>
+          <div className="shrink-0">{timelineToolbar}</div>
           <Timeline
             sessionEpoch={timelineSessionEpoch}
             onSeek={seek}
@@ -288,9 +298,13 @@ export function TimelinePane({
             onBlockedEditAttempt={onBlockedEditAttempt}
             onSplitElement={handleSplitElement}
             onSelectElement={onSelectTimelineElement}
+            onCopyClip={onCopyClip}
+            onPasteClip={onPasteClip}
+            onDuplicateClip={onDuplicateClip}
+            canPasteClip={canPasteClip}
           />
         </div>
-        {timelineFooter && <div className="flex-shrink-0">{timelineFooter}</div>}
+        {timelineFooter && <div className="shrink-0">{timelineFooter}</div>}
         {timelineDisabled && (
           <div
             className="absolute inset-0 z-30 cursor-not-allowed bg-black/18 flex items-center justify-center"

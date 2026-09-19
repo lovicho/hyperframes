@@ -11,6 +11,7 @@ import {
   toDomPrecision,
   type PreviewZoomState,
 } from "./previewZoom";
+import { RULER_GUTTER_PX, usePreviewGuidesStore } from "../editor/previewGuidesStore";
 import { readStudioUiPreferences, writeStudioUiPreferences } from "../../utils/studioUiPreferences";
 interface NLEPreviewProps {
   projectId: string;
@@ -89,9 +90,10 @@ export function resolvePreviewStageSize(
   viewportHeight: number,
   compositionSize: PreviewCompositionSize | null,
   portrait: boolean | undefined,
+  gutterPx = 0,
 ): { width: number; height: number } {
-  const availableWidth = Math.max(0, viewportWidth - PREVIEW_STAGE_INSET_PX);
-  const availableHeight = Math.max(0, viewportHeight - PREVIEW_STAGE_INSET_PX);
+  const availableWidth = Math.max(0, viewportWidth - PREVIEW_STAGE_INSET_PX - 2 * gutterPx);
+  const availableHeight = Math.max(0, viewportHeight - PREVIEW_STAGE_INSET_PX - 2 * gutterPx);
   const aspectRatio =
     compositionSize && compositionSize.width > 0 && compositionSize.height > 0
       ? compositionSize.width / compositionSize.height
@@ -135,6 +137,7 @@ export const NLEPreview = memo(function NLEPreview({
     onStageRef?.(stageRef);
   }, [onStageRef]);
   const [compositionSize, setCompositionSize] = useState<PreviewCompositionSize | null>(null);
+  const gutterPx = usePreviewGuidesStore((s) => (s.rulerVisible ? RULER_GUTTER_PX : 0));
   const [stageSize, setStageSize] = useState(() => resolvePreviewStageSize(0, 0, null, portrait));
 
   const zoomRef = useRef<PreviewZoomState>(loadInitialZoom());
@@ -164,14 +167,16 @@ export const NLEPreview = memo(function NLEPreview({
 
     const updateStageSize = () => {
       const rect = viewport.getBoundingClientRect();
-      setStageSize(resolvePreviewStageSize(rect.width, rect.height, compositionSize, portrait));
+      setStageSize(
+        resolvePreviewStageSize(rect.width, rect.height, compositionSize, portrait, gutterPx),
+      );
     };
 
     updateStageSize();
     const observer = new ResizeObserver(updateStageSize);
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, [compositionSize, portrait]);
+  }, [compositionSize, portrait, gutterPx]);
 
   const onCompositionSizeChangeRef = useRef(onCompositionSizeChange);
   onCompositionSizeChangeRef.current = onCompositionSizeChange;
@@ -437,7 +442,7 @@ export const NLEPreview = memo(function NLEPreview({
     <div className="flex flex-col h-full min-h-0">
       <div
         ref={viewportRef}
-        className="relative flex-1 flex items-center justify-center p-2 overflow-hidden min-h-0 outline-none focus:ring-1 focus:ring-studio-accent/40 bg-neutral-950"
+        className="relative flex-1 flex items-center justify-center p-2 overflow-hidden min-h-0 outline-hidden focus:ring-1 focus:ring-studio-accent/40 bg-[var(--studio-preview-bg,var(--color-neutral-950))]"
         tabIndex={0}
         aria-label="Composition preview"
       >
@@ -487,14 +492,14 @@ export const NLEPreview = memo(function NLEPreview({
         </div>
         <div
           ref={hudRef}
-          className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 rounded-lg px-4 py-2 text-sm font-mono tabular-nums text-white/90 bg-black/60 backdrop-blur-sm shadow-lg"
+          className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 rounded-lg px-4 py-2 text-sm font-mono tabular-nums text-white/90 bg-black/60 backdrop-blur-xs shadow-lg"
           style={{ opacity: 0, transition: "opacity 200ms ease-in" }}
           aria-live="polite"
         />
         {!isPreviewAtFit(settledZoom) && (
           <button
             type="button"
-            className="absolute bottom-3 right-3 z-50 rounded-md px-2.5 py-1 text-xs font-medium text-white/80 bg-black/50 backdrop-blur-sm hover:bg-black/70 hover:text-white transition-colors"
+            className="absolute bottom-3 right-3 z-50 rounded-md px-2.5 py-1 text-xs font-medium text-white/80 bg-black/50 backdrop-blur-xs hover:bg-black/70 hover:text-white transition-colors"
             onClick={() => applyZoom(DEFAULT_PREVIEW_ZOOM)}
             aria-label="Reset zoom to fit"
             data-testid="preview-reset-zoom"

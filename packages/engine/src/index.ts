@@ -81,6 +81,9 @@ export {
   resolveHeadlessShellPath,
   resolveBrowserGpuMode,
   buildChromeArgs,
+  compositionRequiresWebGpu,
+  assertWebGpuAdapterAvailable,
+  WebGpuUnavailableError,
   ENABLE_BROWSER_POOL,
   BrowserLeasePool,
   type BuildChromeArgsOptions,
@@ -136,6 +139,10 @@ export {
   type CaptureFailureKind,
   type CaptureWorkerDiagnostic,
 } from "./services/captureFailure.js";
+export {
+  createChromeMemorySampler,
+  type ChromeMemoryStats,
+} from "./services/chromeMemorySampler.js";
 
 // ── Screenshot (BeginFrame) ─────────────────────────────────────────────────────
 export {
@@ -158,6 +165,8 @@ export {
 export {
   buildEncoderArgs,
   encodeFramesFromDir,
+  buildConcatArgs,
+  concatVideoFiles,
   encodeFramesChunkedConcat,
   muxVideoWithAudio,
   applyFaststart,
@@ -224,6 +233,7 @@ export {
 
 export {
   resolveReferencedStart,
+  resolveReferencedDuration,
   type RefResolverEl,
   type RefResolverDoc,
 } from "./services/referenceResolver.js";

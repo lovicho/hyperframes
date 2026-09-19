@@ -9,7 +9,7 @@ import { BlockParamsPanel } from "./editor/BlockParamsPanel";
 import { RenderQueuePanel } from "./renders/RenderQueuePanel";
 import { SlideshowPanel } from "./panels/SlideshowPanel";
 import { VariablesPanel } from "./panels/VariablesPanel";
-import { PanelTabButton } from "./PanelTabButton";
+import { RightPanelTabs, type RightPanelTabDescriptor } from "./RightPanelTabs";
 import type { RenderJob } from "./renders/useRenderQueue";
 import { STUDIO_FLAT_INSPECTOR_ENABLED } from "./editor/manualEditingAvailability";
 import { useSlideshowPersist } from "../hooks/useSlideshowPersist";
@@ -339,6 +339,51 @@ export function StudioRightPanel({
 
   const renderQueuePanel = <RenderQueuePanel />;
 
+  // Slideshow appears only for a slideshow composition, so the strip is built
+  // rather than written out: a tab that is not in this list is not reachable by
+  // an arrow key either.
+  const inspectorTabs: RightPanelTabDescriptor[] = [
+    {
+      id: "design",
+      label: "Design",
+      tooltip: "Element styles and properties",
+      active: designPaneOpen,
+      onSelect: () => handleInspectorPaneButtonClick("design"),
+    },
+    {
+      id: "layers",
+      label: "Layers",
+      tooltip: "Composition layer stack",
+      active: layersPaneOpen,
+      onSelect: () => handleInspectorPaneButtonClick("layers"),
+    },
+    {
+      id: "renders",
+      label: renderJobs.length > 0 ? `Renders (${renderJobs.length})` : "Renders",
+      tooltip: "Render queue and exports",
+      active: rightPanelTab === "renders",
+      onSelect: () => setRightPanelTab("renders"),
+    },
+    ...(isSlideshowComposition
+      ? [
+          {
+            id: "slideshow",
+            label: "Slideshow",
+            tooltip: "Slideshow branching editor",
+            active: rightPanelTab === "slideshow",
+            onSelect: () => setRightPanelTab("slideshow"),
+          },
+        ]
+      : []),
+    {
+      id: "variables",
+      label: "Variables",
+      tooltip: "Template variables — declare, preview with values",
+      active: rightPanelTab === "variables",
+      onSelect: () => setRightPanelTab("variables"),
+    },
+  ];
+
   return (
     <>
       {/* Vertical resize divider: 3px visible seam, 13px hit zone via the inner div. */}
@@ -347,7 +392,7 @@ export function StudioRightPanel({
         aria-label="Resize inspector panel"
         aria-orientation="vertical"
         tabIndex={0}
-        className="group relative w-[3px] flex-shrink-0 cursor-col-resize outline-none focus-visible:bg-studio-accent/20"
+        className="group relative w-[3px] shrink-0 cursor-col-resize outline-hidden focus-visible:bg-studio-accent/20"
         style={{ touchAction: "none" }}
         onPointerDown={(e) => handlePanelResizeStart("right", e)}
         onPointerMove={handlePanelResizeMove}
@@ -364,52 +409,19 @@ export function StudioRightPanel({
         {/* Asymmetric hit zone: 8px into the preview's p-2 gutter (the only dead
             space), the 3px seam, 2px into the card. Stops short of the 24px WCAG
             2.5.8 target because the next pixel each way is live. */}
-        <div className="absolute inset-y-0 -left-[8px] w-[13px]" />
+        <div className="absolute inset-y-0 left-[-8px] w-[13px]" />
         {/* Visible hairline */}
         <div className="absolute top-1/2 left-0 h-[52px] w-[3px] -translate-y-1/2 bg-white/12 transition-colors group-hover:bg-white/18 group-active:bg-white/24" />
       </div>
       <div
-        className="flex min-w-0 flex-shrink-0 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950"
+        className="flex min-w-0 shrink-0 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950"
         style={{ width: rightWidth }}
       >
         {captionEditMode ? (
           <CaptionPropertyPanel iframeRef={previewIframeRef} />
         ) : (
           <>
-            <div className="flex min-w-0 items-center gap-1 overflow-hidden border-b border-neutral-800 px-3 py-2">
-              <PanelTabButton
-                label="Design"
-                tooltip="Element styles and properties"
-                active={designPaneOpen}
-                onClick={() => handleInspectorPaneButtonClick("design")}
-              />
-              <PanelTabButton
-                label="Layers"
-                tooltip="Composition layer stack"
-                active={layersPaneOpen}
-                onClick={() => handleInspectorPaneButtonClick("layers")}
-              />
-              <PanelTabButton
-                label={renderJobs.length > 0 ? `Renders (${renderJobs.length})` : "Renders"}
-                tooltip="Render queue and exports"
-                active={rightPanelTab === "renders"}
-                onClick={() => setRightPanelTab("renders")}
-              />
-              {isSlideshowComposition && (
-                <PanelTabButton
-                  label="Slideshow"
-                  tooltip="Slideshow branching editor"
-                  active={rightPanelTab === "slideshow"}
-                  onClick={() => setRightPanelTab("slideshow")}
-                />
-              )}
-              <PanelTabButton
-                label="Variables"
-                tooltip="Template variables — declare, preview with values"
-                active={rightPanelTab === "variables"}
-                onClick={() => setRightPanelTab("variables")}
-              />
-            </div>
+            <RightPanelTabs tabs={inspectorTabs} activateOnFocus={STUDIO_FLAT_INSPECTOR_ENABLED} />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
               {rightPanelTab === "block-params" && activeBlockParams ? (
                 <BlockParamsPanel
@@ -444,7 +456,7 @@ export function StudioRightPanel({
                     role="separator"
                     aria-label="Resize Layers and Design panes"
                     aria-orientation="horizontal"
-                    className="group flex h-2 flex-shrink-0 cursor-row-resize items-center justify-center border-y border-neutral-800 bg-neutral-900"
+                    className="group flex h-2 shrink-0 cursor-row-resize items-center justify-center border-y border-neutral-800 bg-neutral-900"
                     style={{ touchAction: "none" }}
                     onPointerDown={handleInspectorSplitResizeStart}
                     onPointerMove={handleInspectorSplitResizeMove}
