@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef } from "react";
 import { usePlayerStore } from "../player";
 import type { TimelineElement } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
-import type { LeftSidebarHandle } from "../components/sidebar/LeftSidebar";
 import { isTypingTarget } from "../utils/typingTarget";
 import { useCaptionStore } from "../captions/store";
 import {
@@ -88,7 +87,6 @@ interface UseAppHotkeysParams {
   showToast: (message: string, tone?: "error" | "info") => void;
   syncHistoryPreviewAfterApply: UseEditHistoryActionsOptions["syncHistoryPreviewAfterApply"];
   waitForPendingDomEditSaves: () => Promise<void>;
-  leftSidebarRef: React.RefObject<LeftSidebarHandle | null>;
   handleCopy: () => boolean;
   handlePaste: () => Promise<void>;
   handleCut: () => Promise<boolean>;
@@ -103,6 +101,8 @@ interface UseAppHotkeysParams {
   onUngroupSelection?: () => void;
   /** Active composition path — used to decide whether undo/redo must resync the SDK session. */
   activeCompPath?: string | null;
+  /** Clicks still select and report; the preview cannot move, edit or delete anything. */
+  readOnlyPreview: boolean;
   /**
    * Force-reload the SDK session after undo/redo reverts the active comp file,
    * bypassing the self-write suppress window. Without this, the suppress window
@@ -125,7 +125,6 @@ export function useAppHotkeys({
   showToast,
   syncHistoryPreviewAfterApply,
   waitForPendingDomEditSaves,
-  leftSidebarRef,
   handleCopy,
   handlePaste,
   handleCut,
@@ -138,6 +137,7 @@ export function useAppHotkeys({
   onUngroupSelection,
   activeCompPath,
   forceReloadSdkSession,
+  readOnlyPreview,
 }: UseAppHotkeysParams) {
   const previewHistoryCleanupRef = useRef<(() => void) | null>(null);
 
@@ -204,9 +204,9 @@ export function useAppHotkeys({
     onToggleRecording,
     onGroupSelection,
     onUngroupSelection,
-    leftSidebarRef,
     domEditSelectionRef,
     showToast,
+    readOnlyPreview,
   };
 
   // ── Keydown dispatch ──

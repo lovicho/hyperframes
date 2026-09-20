@@ -1,12 +1,13 @@
 import { useOwnPreviewIframe, usePreviewIframeStore } from "./player/store/previewIframeStore";
 import { buildProjectApiPath } from "./utils/projectRouting";
 import { useState, useCallback, useRef, useMemo, useLayoutEffect } from "react";
-import type { LeftSidebarHandle, SidebarTab } from "./components/sidebar/LeftSidebar";
+import { useDismissingTabSetter, useRightPanelIntent } from "./hooks/useRightPanelIntents";
 import { useRenderQueue } from "./components/renders/useRenderQueue";
 import { usePlayerStore } from "./player";
 import { StudioOverlays } from "./components/StudioOverlays";
 import { SaveQueuePausedBanner } from "./components/SaveQueuePausedBanner";
 import { ExternalFileConflictBanner } from "./components/ExternalFileConflictBanner";
+import { ProjectUnreachableBanner } from "./components/ProjectUnreachableBanner";
 import { useCaptionStore } from "./captions/store";
 import { useCaptionSync } from "./captions/hooks/useCaptionSync";
 import { usePersistentEditHistory } from "./hooks/usePersistentEditHistory";
@@ -48,9 +49,9 @@ import type { DomEditSelection } from "./components/editor/domEditing";
 import { StudioHeader } from "./components/StudioHeader";
 import { useGestureCommit } from "./hooks/useGestureCommit";
 import { GestureTrailOverlay } from "./components/editor/GestureTrailOverlay";
-import { StudioLeftSidebar } from "./components/StudioLeftSidebar";
+import { StudioLeftPanels } from "./components/StudioLeftPanels";
 import { EditorShell } from "./components/EditorShell";
-import { StudioRightPanel } from "./components/StudioRightPanel";
+import { StudioRightPanels } from "./components/StudioRightPanels";
 import { TimelineToolbar } from "./components/TimelineToolbar";
 import { StudioPlaybackProvider, StudioShellProvider } from "./contexts/StudioContext";
 import { PanelLayoutProvider } from "./contexts/PanelLayoutContext";
@@ -63,8 +64,16 @@ import { useTimelineAddAtPlayhead } from "./hooks/useTimelineAddAtPlayhead";
 import { readStudioUrlStateFromWindow, resolveMasterCompositionPath } from "./utils/studioUrlState";
 import { useActiveComposition } from "./hooks/useActiveComposition";
 const getTimelineSelectionSet = () => usePlayerStore.getState().selectedElementIds;
+
+export interface StudioAppProps {
+  /** Clicks still select and report; the preview cannot move, edit or delete anything. */
+  readOnlyPreview?: boolean;
+  /** Short text shown on disabled hand-edit controls while `readOnlyPreview` is set. */
+  readOnlyPreviewReason?: string;
+}
+
 // fallow-ignore-next-line complexity
-export function StudioApp() {
+export function StudioApp({ readOnlyPreview = false, readOnlyPreviewReason }: StudioAppProps = {}) {
   const { projectId, resolving, waitingForServer } = useServerConnection();
   const initialUrlStateRef = useRef(readStudioUrlStateFromWindow());
   useStudioSessionStart(projectId, resolving, waitingForServer);
@@ -75,7 +84,6 @@ export function StudioApp() {
   const [previewDocumentVersion, refreshPreviewDocumentVersion] = usePreviewDocumentVersion();
   const [blockPreview, setBlockPreview] = useState<BlockPreviewInfo | null>(null);
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
-  const leftSidebarRef = useRef<LeftSidebarHandle>(null);
   const captionEditMode = useCaptionStore((s) => s.isEditMode);
   const captionHasSelection = useCaptionStore((s) => s.selectedSegmentIds.size > 0);
   const captionSync = useCaptionSync(projectId);
@@ -202,6 +210,13 @@ export function StudioApp() {
     setRightCollapsed: panelLayout.setRightCollapsed,
     setRightPanelTab: panelLayout.setRightPanelTab,
   });
+  const dismissBlockParams = useCallback(() => setActiveBlockParams(null), [setActiveBlockParams]);
+  const setRightPanelTab = useDismissingTabSetter(panelLayout.setRightPanelTab, dismissBlockParams);
+  const layout = useMemo(
+    () => ({ ...panelLayout, setRightPanelTab }),
+    [panelLayout, setRightPanelTab],
+  );
+
   const clearDomSelectionRef = useRef<() => void>(() => {});
   const domEditSelectionBridgeRef = useRef<DomEditSelection | null>(null);
   type DomEditDelete = (s: DomEditSelection, o?: { expandGroup?: boolean }) => Promise<void>;
@@ -234,7 +249,6 @@ export function StudioApp() {
     showToast,
     syncHistoryPreviewAfterApply: previewPersistence.syncHistoryPreviewAfterApply,
     waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
-    leftSidebarRef,
     handleCopy,
     handlePaste,
     handleCut,
@@ -247,10 +261,7 @@ export function StudioApp() {
     activeCompPath,
     forceReloadSdkSession: sdkHandle.forceReload,
     onToggleRecording: () => handleToggleRecordingRef.current(),
-  });
-  const sidebarTabRef = useRef({
-    select: (t: SidebarTab) => leftSidebarRef.current?.selectTab(t),
-    get: () => leftSidebarRef.current?.getTab() ?? "compositions",
+    readOnlyPreview,
   });
   const domEditSession = useDomEditSession({
     projectId,
@@ -264,7 +275,7 @@ export function StudioApp() {
     setSelectedTimelineElementId,
     setTimelineSelectionSet,
     setRightCollapsed: panelLayout.setRightCollapsed,
-    setRightPanelTab: panelLayout.setRightPanelTab,
+    setRightPanelTab,
     showToast,
     isRecordingRef: isGestureRecordingRef,
     refreshPreviewDocumentVersion,
@@ -286,12 +297,11 @@ export function StudioApp() {
     reloadPreview,
     setRefreshKey,
     openSourceForSelection: fileManager.openSourceForSelection,
-    selectSidebarTab: sidebarTabRef.current.select,
-    getSidebarTab: sidebarTabRef.current.get,
     sdkSession: editFlowSdkSession,
     publishSdkSession: sdkHandle.publish,
     forceReloadSdkSession: sdkHandle.forceReload,
     handleTimelineElementsDelete: timelineEditing.handleTimelineElementsDelete,
+    readOnlyPreview,
   });
   domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
   handleDomZIndexReorderCommitRef.current = domEditSession.handleDomZIndexReorderCommit;
@@ -347,6 +357,7 @@ export function StudioApp() {
     previewIframeRef,
     showToast,
     isGestureRecordingRef,
+    readOnlyPreview,
   });
   handleToggleRecordingRef.current = handleToggleRecording;
   const canvasRectRef = useRef<DOMRect | null>(null);
@@ -367,20 +378,18 @@ export function StudioApp() {
     },
     [appHotkeys, resetConsoleErrors, refreshPreviewDocumentVersion],
   );
-  const {
-    designPanelActive,
-    inspectorPanelActive,
-    inspectorButtonActive,
-    shouldShowMotionPath,
-    shouldShowSelectedDomBounds,
-  } = useInspectorState(
-    panelLayout.rightPanelTab,
-    panelLayout.rightInspectorPanes,
-    panelLayout.effectiveRightCollapsed,
-    isPlaying,
-    domEditSession.domEditSelection,
-    gestureState === "recording",
-  );
+  const rightPanel = useRightPanelIntent();
+  const { inspectorPanelActive, shouldShowMotionPath, shouldShowSelectedDomBounds } =
+    useInspectorState(
+      rightPanel,
+      isPlaying,
+      domEditSession.domEditSelection,
+      gestureState === "recording",
+    );
+  // The dock has no separate "railed by window width" state (it shrinks
+  // panels, never auto-hides the group), so rightCollapsed is already the
+  // value that decides whether the panel is actually showing.
+  const inspectorButtonActive = !panelLayout.rightCollapsed && inspectorPanelActive;
   useStudioUrlState({
     projectId,
     activeCompPath,
@@ -397,7 +406,7 @@ export function StudioApp() {
     applyMarqueeSelection: domEditSession.applyMarqueeSelection,
     buildDomSelectionFromTarget: domEditSession.buildDomSelectionFromTarget,
     applyDomSelection: domEditSession.applyDomSelection,
-    setRightPanelTab: panelLayout.setRightPanelTab,
+    setRightPanelTab,
     initialState: initialUrlStateRef.current,
   });
   const studioCtxValue = buildStudioContextValue({
@@ -437,7 +446,7 @@ export function StudioApp() {
   return (
     <StudioShellProvider value={studioCtxValue}>
       <StudioPlaybackProvider value={studioCtxValue}>
-        <PanelLayoutProvider value={panelLayout}>
+        <PanelLayoutProvider value={layout}>
           <FileManagerProvider value={fileManager}>
             <DomEditProvider value={domEditSession}>
               <div
@@ -467,27 +476,29 @@ export function StudioApp() {
                   />
                 )}
                 <ExternalFileConflictBanner coordinator={externalFileChanges} />
+                {sdkHandle.unreachableProject && (
+                  <ProjectUnreachableBanner projectId={sdkHandle.unreachableProject} />
+                )}
                 <EditorShell
-                  left={
-                    <StudioLeftSidebar
-                      leftSidebarRef={leftSidebarRef}
-                      onSelectComposition={handleSelectComposition}
-                      onAddBlock={handleAddBlock}
-                      onPreviewBlock={setBlockPreview}
-                      onLint={handleLint}
-                      linting={linting}
-                      lintFindingCount={lintModal?.length ?? findingsByFile.size}
-                      lintFindingsByFile={findingsByFile}
-                      lintHasError={hasLintError}
-                      onAddAssetToTimeline={handleAddAssetAtPlayhead}
-                      onAddCompositionToTimeline={handleAddCompositionAtPlayhead}
-                    />
-                  }
-                  right={
-                    panelLayout.effectiveRightCollapsed ? null : (
-                      <StudioRightPanel
-                        designPanelActive={designPanelActive}
+                  readOnlyPreview={readOnlyPreview}
+                  readOnlyPreviewReason={readOnlyPreviewReason}
+                  panels={
+                    <>
+                      <StudioLeftPanels
+                        onSelectComposition={handleSelectComposition}
+                        onAddBlock={handleAddBlock}
+                        onPreviewBlock={setBlockPreview}
+                        onLint={handleLint}
+                        linting={linting}
+                        lintFindingCount={lintModal?.length ?? findingsByFile.size}
+                        lintFindingsByFile={findingsByFile}
+                        lintHasError={hasLintError}
+                        onAddAssetToTimeline={handleAddAssetAtPlayhead}
+                        onAddCompositionToTimeline={handleAddCompositionAtPlayhead}
+                      />
+                      <StudioRightPanels
                         activeBlockParams={activeBlockParams}
+                        onDismissBlockParams={dismissBlockParams}
                         onCloseBlockParams={() => {
                           setActiveBlockParams(null);
                           panelLayout.setRightPanelTab("design");
@@ -504,7 +515,7 @@ export function StudioApp() {
                         onAutoGroupCarveSources={timelineEditing.handleAutoGroupCarveSources}
                         onAddMediaOverlay={handleAddMediaOverlay}
                       />
-                    )
+                    </>
                   }
                   timelineToolbar={timelineToolbar}
                   renderClipContent={renderClipContent}

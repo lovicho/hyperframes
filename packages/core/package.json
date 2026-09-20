@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.51",
+  "version": "0.8.56",
   "description": "",
   "repository": {
     "type": "git",
@@ -201,6 +201,12 @@
       "node": "./dist/audioGain.js",
       "import": "./src/audioGain.ts",
       "types": "./src/audioGain.ts"
+    },
+    "./speed-ramp": {
+      "bun": "./src/speedRamp.ts",
+      "node": "./dist/speedRamp.js",
+      "import": "./src/speedRamp.ts",
+      "types": "./src/speedRamp.ts"
     },
     "./color-grading": {
       "bun": "./src/colorGrading.ts",
@@ -539,6 +545,10 @@
       "./audio-gain": {
         "import": "./dist/audioGain.js",
         "types": "./dist/audioGain.d.ts"
+      },
+      "./speed-ramp": {
+        "import": "./dist/speedRamp.js",
+        "types": "./dist/speedRamp.d.ts"
       },
       "./color-grading": {
         "import": "./dist/colorGrading.js",

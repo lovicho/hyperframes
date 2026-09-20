@@ -22,13 +22,6 @@ export type RightPanelTab =
   | "block-params"
   | "slideshow"
   | "variables";
-export type RightInspectorPane = "layers" | "design";
-
-export interface RightInspectorPanes {
-  layers: boolean;
-  design: boolean;
-}
-
 export interface AgentModalAnchorPoint {
   x: number;
   y: number;
@@ -119,11 +112,21 @@ export function shouldIgnoreHistoryShortcut(target: EventTarget | null): boolean
   return isTypingTarget(target);
 }
 
-export function getHistoryShortcutLabel(action: "undo" | "redo"): string {
+function getHistoryShortcutLabel(action: "undo" | "redo"): string {
   const isMac =
     typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
   const modifier = isMac ? "Cmd" : "Ctrl";
   return action === "undo" ? `${modifier}+Z` : `${modifier}+Shift+Z`;
+}
+
+/** The Undo / Redo tooltip: the shortcut always, the last action's name when there is one. */
+export function historyTooltipLabel(
+  action: "undo" | "redo",
+  lastAction: string | null | undefined,
+): string {
+  const shortcut = getHistoryShortcutLabel(action);
+  const verb = action === "undo" ? "Undo" : "Redo";
+  return lastAction ? `${verb} ${lastAction} (${shortcut})` : `${verb} (${shortcut})`;
 }
 
 export type ElementMatchSelection = Pick<

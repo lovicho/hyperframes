@@ -9,6 +9,112 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.8.56"
+  description="Released - 2026-09-20"
+  tags={["Release", "Studio"]}
+>
+Host apps can now make the Studio preview read-only and restyle the timeline through CSS tokens. A host that embeds Studio no longer needs its own colour overrides or a second guard against edits.
+
+## Features
+
+- **Studio:** A host can make the preview read-only ([84e653166](https://github.com/heygen-com/hyperframes/commit/84e65316683c5636e83720d7d4a8cd612275df9d), [#4200](https://github.com/heygen-com/hyperframes/pull/4200)).
+- **Studio:** Theme timeline colours with CSS tokens ([9bd6da848](https://github.com/heygen-com/hyperframes/commit/9bd6da848fb39513ed4e21911c574315aab477e5), [#4211](https://github.com/heygen-com/hyperframes/pull/4211)).
+
+## Internal
+
+- **Studio:** Make timeline rows use manifest elements ([41b7202bc](https://github.com/heygen-com/hyperframes/commit/41b7202bca7e3d50eb698c1722ed76c9aeaca98d), [#4213](https://github.com/heygen-com/hyperframes/pull/4213)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.55...v0.8.56).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.55"
+  description="Released - 2026-09-20"
+  tags={["Release", "Studio"]}
+>
+A blocked GSAP edit now records which specific cause stopped it, so the largest editing failure in Studio can be broken down by reason instead of read as one undifferentiated bucket. The event carries nine distinct causes where it previously carried a single message.
+
+## Features
+
+- **Studio:** A blocked GSAP edit records which of nine causes it hit ([05d5abb92](https://github.com/heygen-com/hyperframes/commit/05d5abb92613a9a6a5261149924bc605ecba3d29), [#4214](https://github.com/heygen-com/hyperframes/pull/4214)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.54...v0.8.55).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.54"
+  description="Released - 2026-09-20"
+  tags={["Release", "Studio"]}
+>
+Studio can now edit timelines when hosted outside the main editor shell. Host apps can reuse this editing flow without wrapping it in the full editor.
+
+## Features
+
+- **Studio:** Export timeline editing for a host outside EditorShell ([5262062e7](https://github.com/heygen-com/hyperframes/commit/5262062e7be20b26a7c1a4ce4be2ec3831f151d6), [#4201](https://github.com/heygen-com/hyperframes/pull/4201)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.53...v0.8.54).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.53"
+  description="Released - 2026-09-20"
+  tags={["Release", "Studio"]}
+>
+Every Studio panel now lives on the dockable layout, and the arrangement is remembered between sessions. Host apps can import the header logo, button sizes and a stable stylesheet. Studio also stops reporting cancelled thumbnail loads as errors, which had been burying real problems in telemetry.
+
+## Features
+
+- **Studio:** Export the header logo, button sizes and a stable styles.css subpath ([2d84937e1](https://github.com/heygen-com/hyperframes/commit/2d84937e1f28ee60dd7dc23bdedfd324793e10d0), [#4197](https://github.com/heygen-com/hyperframes/pull/4197)).
+- **Studio:** All panels move onto the dockable, persisted layout ([98e8372a0](https://github.com/heygen-com/hyperframes/commit/98e8372a0aaaefd498a558db96ed2d2feac3a275), [#4192](https://github.com/heygen-com/hyperframes/pull/4192)).
+- **Studio:** The Renders panel on the shared primitives ([12d8c4244](https://github.com/heygen-com/hyperframes/commit/12d8c4244011632d1459ac95ed8de56e6d72e071), [#3772](https://github.com/heygen-com/hyperframes/pull/3772)).
+
+## Fixes
+
+- **Studio:** Stop counting extension-leaked AbortError rejections as errors ([83624d193](https://github.com/heygen-com/hyperframes/commit/83624d193e6b5924a974be16bdd383987a20f2f5), [#4209](https://github.com/heygen-com/hyperframes/pull/4209)).
+- **Release:** A stale local tag can no longer silently widen the changelog ([90e67ff5a](https://github.com/heygen-com/hyperframes/commit/90e67ff5a8e0a488720827a27120f1a990ed0664), [#4208](https://github.com/heygen-com/hyperframes/pull/4208)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.52...v0.8.53).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.52"
+  description="Released - 2026-09-19"
+  tags={["Release", "Studio", "Catalog", "CLI"]}
+>
+Studio's interface now runs on one shared set of buttons, tabs, menus and popovers, so controls look and behave the same everywhere. Undo and redo move into the timeline toolbar, and a dead project id in the URL no longer blocks editing for the rest of the tab.
+
+## Features
+
+- **Studio:** Move undo and redo into the timeline toolbar ([f9fc55218](https://github.com/heygen-com/hyperframes/commit/f9fc55218880ff62bb580d8a2340cfe4bf323282), [#4196](https://github.com/heygen-com/hyperframes/pull/4196)).
+- **Studio:** Host apps can place overlays on the preview and restyle its stage ([ef6432317](https://github.com/heygen-com/hyperframes/commit/ef64323174c94b58550cb32e59a6819daf1a5e41), [#4187](https://github.com/heygen-com/hyperframes/pull/4187)).
+- **Studio:** Header and inspector tabs on the shared primitives ([9bec64a29](https://github.com/heygen-com/hyperframes/commit/9bec64a293f77dfbbcdafa29a17616f027034f18), [#3624](https://github.com/heygen-com/hyperframes/pull/3624)).
+- **Studio:** Shared menu, popover and value-control primitives ([3ec26b5e2](https://github.com/heygen-com/hyperframes/commit/3ec26b5e27d0e935c8c30ecceed73ee4ef2599d4), [#4191](https://github.com/heygen-com/hyperframes/pull/4191)).
+- **Studio:** Dock dividers and tabs work from the keyboard and side columns fit narrow windows ([e505dcc5c](https://github.com/heygen-com/hyperframes/commit/e505dcc5c5b507c45b5010baa31b836b934dab29), [#4186](https://github.com/heygen-com/hyperframes/pull/4186)).
+- **Studio:** Shared Button, IconButton, Tooltip and Tabs primitives ([01aa446ed](https://github.com/heygen-com/hyperframes/commit/01aa446edf6a4282a6ac1fc080a002478f91434b), [#3622](https://github.com/heygen-com/hyperframes/pull/3622)).
+- **Studio:** Host apps can import the render queue from the package ([fd020ca27](https://github.com/heygen-com/hyperframes/commit/fd020ca27cfd6a3a78524e22d69339a3dcdf1740), [#4184](https://github.com/heygen-com/hyperframes/pull/4184)).
+- **Scripts:** Fail a PR whose After capture is a Before capture ([8d0722115](https://github.com/heygen-com/hyperframes/commit/8d0722115646000dca99bb3657e9ec938a0f1758), [#4177](https://github.com/heygen-com/hyperframes/pull/4177)).
+- **CLI:** Render events carry the browser's build and install-path shape ([aa05278b7](https://github.com/heygen-com/hyperframes/commit/aa05278b7815bd56cd284e9aa6fc1bec5dbb1752), [#4180](https://github.com/heygen-com/hyperframes/pull/4180)).
+- **Studio:** Fail the suite on a class that resolves to nothing ([93ff9a994](https://github.com/heygen-com/hyperframes/commit/93ff9a994d5f6f7770035a80bf3609d09f15f8c0), [#3623](https://github.com/heygen-com/hyperframes/pull/3623)).
+
+## Fixes
+
+- **Studio:** A stale project id in the URL no longer blocks editing for the tab ([3685b76a0](https://github.com/heygen-com/hyperframes/commit/3685b76a07283a5076bc185f5f0c19bad48d359c), [#4188](https://github.com/heygen-com/hyperframes/pull/4188)).
+- **CLI:** The contact sheet png test no longer waits on a Windows font cache build ([c610d8491](https://github.com/heygen-com/hyperframes/commit/c610d8491cdf85d97543764fc1a783000ab3b0eb), [#4181](https://github.com/heygen-com/hyperframes/pull/4181)).
+- **CLI:** A Studio render refuses with the browser check's own message ([2d8d44151](https://github.com/heygen-com/hyperframes/commit/2d8d44151ab6b7d47d531706f968d4fd3f07dde2), [#4176](https://github.com/heygen-com/hyperframes/pull/4176)).
+
+## Catalog
+
+- **Catalog:** Add the seven 3D-motion pieces as installable registry blocks ([f24ff8383](https://github.com/heygen-com/hyperframes/commit/f24ff838347390796ddab771fa1ae024b5dba2bc), [#4056](https://github.com/heygen-com/hyperframes/pull/4056)).
+
+## Internal
+
+- **Studio:** Preview consumers follow the live iframe from one shared owner ([b09619faa](https://github.com/heygen-com/hyperframes/commit/b09619faa895e2317bc36c12cdaeb6e2946f8f9c), [#4182](https://github.com/heygen-com/hyperframes/pull/4182)).
+- **Studio:** One hook owns file undo and redo ([fd6049f35](https://github.com/heygen-com/hyperframes/commit/fd6049f356150075e11ff0f86fed741c2770b6b5), [#4189](https://github.com/heygen-com/hyperframes/pull/4189)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.51...v0.8.52).
+</Update>
+
+<Update
   label="HyperFrames v0.8.51"
   description="Released - 2026-09-19"
   tags={["Release", "Studio", "Core", "CLI"]}
