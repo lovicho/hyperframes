@@ -6,18 +6,29 @@ type WatchCallback = (eventType: string, filename: string | Buffer | null) => vo
 const mockWatcher = new EventEmitter() as EventEmitter & { close: () => void };
 mockWatcher.close = vi.fn();
 
+const fakeDirs = { children: [] as string[], unwatchable: "" };
+
 vi.mock("node:fs", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs")>();
   return {
     ...original,
-    watch: vi.fn((_path: string, _options: unknown, onChange: WatchCallback) => {
+    watch: vi.fn((path: string, _options: unknown, onChange: WatchCallback) => {
+      if (fakeDirs.unwatchable && path.endsWith(fakeDirs.unwatchable)) {
+        throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+      }
       mockWatcher.on("change", onChange);
       return mockWatcher;
     }),
+    readdirSync: vi.fn((path: string) =>
+      path === "/fake/project/dir"
+        ? fakeDirs.children.map((name) => ({ name, isDirectory: () => true }))
+        : [],
+    ),
   };
 });
 
 const { shouldWatchProjectFile, createProjectWatcher } = await import("./fileWatcher.js");
+const { watch } = await import("node:fs");
 
 describe("shouldWatchProjectFile", () => {
   it("watches files that can affect the project signature", () => {
@@ -42,6 +53,8 @@ describe("createProjectWatcher", () => {
   beforeEach(() => {
     mockWatcher.removeAllListeners();
     vi.clearAllMocks();
+    fakeDirs.children = [];
+    fakeDirs.unwatchable = "";
     vi.useRealTimers();
   });
 
@@ -58,6 +71,30 @@ describe("createProjectWatcher", () => {
 
     expect(listener.mock.calls).toEqual([["scene-a.html"], ["scene-b.html"]]);
     projectWatcher.close();
+  });
+
+  it.runIf(process.platform === "linux")(
+    "keeps watching the rest of the tree when one subdirectory cannot be watched",
+    () => {
+      fakeDirs.children = ["full", "compositions"];
+      fakeDirs.unwatchable = "full";
+      const projectWatcher = createProjectWatcher("/fake/project/dir");
+
+      expect(vi.mocked(watch).mock.calls.map(([path]) => path)).toContain(
+        "/fake/project/dir/compositions",
+      );
+      projectWatcher.close();
+      expect(mockWatcher.close).toHaveBeenCalled();
+    },
+  );
+
+  it("degrades to no live reload when the project root cannot be watched", () => {
+    fakeDirs.unwatchable = "/fake/project/dir";
+    let projectWatcher: ReturnType<typeof createProjectWatcher> | null = null;
+    expect(() => {
+      projectWatcher = createProjectWatcher("/fake/project/dir");
+    }).not.toThrow();
+    expect(() => projectWatcher?.close()).not.toThrow();
   });
 
   // Regression: fs.watch can fail asynchronously (e.g. EMFILE from exhausted

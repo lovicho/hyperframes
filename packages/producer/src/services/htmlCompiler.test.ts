@@ -827,6 +827,27 @@ describe("detectRenderModeHints", () => {
     ).rejects.toThrow(/compositions\/does-not-exist\.html/);
   });
 
+  it("compileForRender preserves a bare fragment's markup, sibling styles, and script", async () => {
+    const projectDir = makeSubCompProject(
+      "hf-fragment-subcomp-",
+      [{ id: "intro", src: "compositions/intro.html" }],
+      {
+        "intro.html": `<style>.fragment-title { color: rgb(12, 34, 56); }</style>
+<div data-composition-id="intro" data-width="100" data-height="100"><div class="fragment-title">Bare fragment</div></div>
+<script>window.__fragmentLoaded = true;</script>`,
+      },
+    );
+    try {
+      const result = await compileForRender(projectDir, join(projectDir, "index.html"), projectDir);
+      const { document } = parseHTML(result.html);
+      expect(document.querySelector(".fragment-title")?.textContent).toBe("Bare fragment");
+      expect(result.html).toContain("rgb(12, 34, 56)");
+      expect(result.html).toContain("window.__fragmentLoaded = true");
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("compileForRender succeeds when the sub-composition file is valid (happy path)", async () => {
     const projectDir = makeSubCompProject(
       "hf-valid-subcomp-",
@@ -1224,17 +1245,19 @@ describe("template-wrapped sub-composition media offsets", () => {
 
     const compiled = await compileForRender(projectDir, indexPath, projectDir);
 
+    // The 4s clip closes with its 2s host (data-start 2 + data-duration 2),
+    // not at its own authored end.
     expect(compiled.videos).toHaveLength(1);
     expect(compiled.videos[0]).toMatchObject({
       id: "scene-video",
       start: 2,
-      end: 6,
+      end: 4,
     });
     expect(compiled.audios).toHaveLength(1);
     expect(compiled.audios[0]).toMatchObject({
       id: "scene-video-audio",
       start: 2,
-      end: 6,
+      end: 4,
     });
   });
 
