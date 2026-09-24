@@ -1,6 +1,20 @@
 export { createStudioApi } from "./createStudioApi.js";
 export { createProjectSignature, affectsProjectSignature } from "./helpers/projectSignature.js";
 export { compositionsAffectedBy } from "./helpers/compositionInputs.js";
+export {
+  openProjectHistory,
+  type ProjectHistory,
+  type ProjectHistoryOptions,
+  type HistoryListItem,
+  type HistoryResult,
+  type HistoryWindow,
+} from "./history/projectHistory.js";
+export {
+  START as HISTORY_START,
+  type HistoryEntry,
+  type HistoryFileChange,
+  type HistoryWho,
+} from "./history/historyLog.js";
 export type {
   StudioApiAdapter,
   ResolvedProject,
@@ -29,11 +43,14 @@ export {
   type FileMutationInput,
 } from "./helpers/applyFileMutations.js";
 export type { PreviewApiAdapter } from "./helpers/mediaProxyPreview.js";
+export { PREVIEW_BUNDLE_OPTIONS } from "./routes/preview.js";
 export { getMimeType, MIME_TYPES } from "./helpers/mime.js";
+export { requestSubPath } from "./helpers/requestSubPath.js";
 export {
   consumeFileWriteReceipt,
   identifyFileWrite,
   fileContentVersion,
+  settledFileTag,
   type FileWriteReceipt,
 } from "./helpers/fileVersion.js";
 export { buildSubCompositionHtml } from "./helpers/subComposition.js";

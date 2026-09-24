@@ -20,10 +20,17 @@ import type { StudioApiAdapter } from "../types";
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Moves the clock past settledFileTag's window, so a just-written asset gets an ETag. */
+function pastSettleWindow(): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 60_000);
+}
 
 function createProjectDir(): string {
   const projectDir = mkdtempSync(join(tmpdir(), "hf-preview-test-"));
@@ -75,6 +82,25 @@ async function getPreviewSignature(projectDir: string): Promise<string> {
 }
 
 describe("registerPreviewRoutes", () => {
+  it("adds its <base> even when a script mentions one, and keeps an authored <base>", async () => {
+    const projectDir = createProjectDir();
+    const app = new Hono();
+    registerPreviewRoutes(app, createAdapter(projectDir));
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!doctype html><html><head><script>if (0) document.write('<base href="../">');</script></head><body></body></html>`,
+    );
+    const injected = await (await app.request("http://localhost/projects/demo/preview")).text();
+    expect(injected).toContain('<base href="/api/projects/demo/preview/">');
+
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!doctype html><html><head><base href="/cdn/"></head><body></body></html>`,
+    );
+    const authored = await (await app.request("http://localhost/projects/demo/preview")).text();
+    expect(authored).not.toContain('<base href="/api/projects/demo/preview/">');
+  });
+
   it("injects Studio GSAP motion manifest runtime into project preview", async () => {
     const projectDir = createProjectDir();
     writeFileSync(
@@ -870,6 +896,7 @@ describe("hf-proxy negotiation and media codec map injection (U3)", () => {
     it("honors If-None-Match on a repeat request with a 304, without re-invoking resolveProxy", async () => {
       const projectDir = createProjectDir();
       writeFileSync(join(projectDir, "clip.mp4"), "original-hevc-bytes");
+      pastSettleWindow();
       const resolveProxyMock = vi.fn(async () => {
         const proxyPath = join(projectDir, "proxy.mp4");
         writeFileSync(proxyPath, "proxy-bytes");
@@ -899,9 +926,23 @@ describe("hf-proxy negotiation and media codec map injection (U3)", () => {
       expect(resolveProxyMock).toHaveBeenCalledTimes(1);
     });
 
+    it("tags no asset written in the last moments, so a same-size rewrite cannot reuse its tag", async () => {
+      const projectDir = createProjectDir();
+      writeFileSync(join(projectDir, "clip.mp4"), "original-hevc-bytes");
+      const { registerPreviewRoutes: register } = await loadPreviewModule({});
+      const app = new Hono();
+      register(app, createAdapter(projectDir));
+
+      const fresh = await app.request("http://localhost/projects/demo/preview/clip.mp4");
+
+      expect(fresh.status).toBe(200);
+      expect(fresh.headers.get("ETag")).toBeNull();
+    });
+
     it("counts one proxy request per resolved proxy, not per HTTP request", async () => {
       const projectDir = createProjectDir();
       writeFileSync(join(projectDir, "clip.mp4"), "original-hevc-bytes");
+      pastSettleWindow();
       const resolveProxyMock = vi.fn(async () => {
         const proxyPath = join(projectDir, "proxy.mp4");
         writeFileSync(proxyPath, "0123456789proxybytes");

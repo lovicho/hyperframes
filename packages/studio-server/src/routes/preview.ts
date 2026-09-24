@@ -3,12 +3,16 @@ import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { injectScriptsIntoHtml, stripEmbeddedRuntimeScripts } from "@hyperframes/core/compiler";
+import {
+  injectScriptsIntoHtml,
+  stripEmbeddedRuntimeScripts,
+  type BundleOptions,
+} from "@hyperframes/core/compiler";
 import { isWithinProjectRoot } from "@hyperframes/parsers/asset-resolution";
 import type { StudioApiAdapter } from "../types.js";
 import { resolveWithinProject } from "../helpers/safePath.js";
 import { getMimeType } from "../helpers/mime.js";
-import { buildSubCompositionHtml } from "../helpers/subComposition.js";
+import { buildSubCompositionHtml, hasBaseElement } from "../helpers/subComposition.js";
 import {
   resolveProjectAndSignature,
   resolveProjectSignature,
@@ -19,6 +23,7 @@ import {
 } from "../helpers/studioMotionRenderScript.js";
 import { ensureHfIds } from "@hyperframes/parsers/hf-ids";
 import { persistHfIdsIfNeeded, stampFileHfIds } from "../helpers/hfIdPersist.js";
+import { settledFileTag } from "../helpers/fileVersion.js";
 import { isVariablesPayload, VARIABLES_PAYLOAD_ERROR } from "../helpers/variablesPayload.js";
 import { injectPreviewVariables } from "../helpers/previewVariables.js";
 import {
@@ -42,6 +47,7 @@ import {
   resolvePreviewMediaCodecProbeCache,
   type PreviewApiAdapter,
 } from "../helpers/mediaProxyPreview.js";
+import { requestSubPath } from "../helpers/requestSubPath.js";
 
 const PROJECT_SIGNATURE_META = "hyperframes-project-signature";
 const GSAP_CDN_VERSION = "3.15.0";
@@ -307,6 +313,13 @@ function resolveProjectMainHtml(
   return null;
 }
 
+/** The bundler options every adapter's `bundle()` uses. This route serves project files under a
+ * `<base href>`, so assets keep their URLs: inlined base64 multiplies the document per reference. */
+export const PREVIEW_BUNDLE_OPTIONS = {
+  runtime: "placeholder",
+  inlineAssets: false,
+} as const satisfies BundleOptions;
+
 export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): void {
   const previewCacheHeaders = (etag: string) => ({
     "Cache-Control": "private, no-cache",
@@ -370,7 +383,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
 
       // Inject <base> for relative asset resolution
       const baseHref = `/api/projects/${project.id}/preview/`;
-      if (!bundled.includes("<base")) {
+      if (!hasBaseElement(bundled)) {
         bundled = bundled.replace(/<head>/i, `<head><base href="${baseHref}">`);
       }
 
@@ -459,9 +472,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     const vars = previewVariablesFromRequest(c.req.query("variables"));
     if (vars.error !== undefined) return c.json({ error: vars.error }, 400);
     const previewVariables = vars.values;
-    const compPath = decodeURIComponent(
-      c.req.path.replace(`/projects/${project.id}/preview/comp/`, "").split("?")[0] ?? "",
-    );
+    const compPath = requestSubPath(c.req.url, "projects/:id/preview/comp");
     const compFile = resolveWithinProject(project.dir, compPath);
     if (!compFile || !existsSync(compFile) || !statSync(compFile).isFile()) {
       return c.text("not found", 404);
@@ -504,9 +515,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
   api.get("/projects/:id/preview/*", async (c) => {
     const project = await adapter.resolveProject(c.req.param("id"));
     if (!project) return c.json({ error: "not found" }, 404);
-    const subPath = decodeURIComponent(
-      c.req.path.replace(`/projects/${project.id}/preview/`, "").split("?")[0] ?? "",
-    );
+    const subPath = requestSubPath(c.req.url, "projects/:id/preview");
     // Assets are read-only and should mirror the renderer: permit a path that
     // is lexically inside the project even if an explicit project symlink
     // targets a shared directory outside it. Composition source files still
@@ -550,15 +559,13 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
       }
     }
 
-    const etag = `"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}${proxyEtagSalt(proxyVariant)}"`;
+    const tag = settledFileTag(stat);
+    const etag = tag && `"${tag}${proxyEtagSalt(proxyVariant)}"`;
     const cacheHeaders: Record<string, string> = isText
       ? { "Cache-Control": "no-store" }
-      : {
-          "Cache-Control": "private, no-cache",
-          ETag: etag,
-        };
+      : { "Cache-Control": "private, no-cache", ...(etag && { ETag: etag }) };
 
-    if (!isText) {
+    if (!isText && etag) {
       const ifNoneMatch = c.req.header("If-None-Match");
       if (ifNoneMatch === etag) {
         return new Response(null, { status: 304, headers: cacheHeaders });
