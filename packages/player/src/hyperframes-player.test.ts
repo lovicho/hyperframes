@@ -2100,6 +2100,31 @@ describe("HyperframesPlayer runtime ready handshake", () => {
     });
   });
 
+  it("replays low-power-idle as a slow idle heartbeat, and a normal one without it", () => {
+    postSpy.mockClear();
+    player._onMessage(readyMessage());
+    expect(findControlCalls("set-idle-heartbeat")[0]?.[0]).toMatchObject({ slow: false });
+
+    player.setAttribute("low-power-idle", "");
+    postSpy.mockClear();
+    player._onMessage(readyMessage());
+    expect(findControlCalls("set-idle-heartbeat")[0]?.[0]).toMatchObject({
+      action: "set-idle-heartbeat",
+      slow: true,
+    });
+  });
+
+  it("sends low-power-idle to a ready runtime as soon as it changes", () => {
+    player._onMessage(readyMessage());
+    postSpy.mockClear();
+    player.setAttribute("low-power-idle", "");
+    expect(findControlCalls("set-idle-heartbeat")[0]?.[0]).toMatchObject({ slow: true });
+
+    postSpy.mockClear();
+    player.removeAttribute("low-power-idle");
+    expect(findControlCalls("set-idle-heartbeat")[0]?.[0]).toMatchObject({ slow: false });
+  });
+
   it("keeps runtime WebAudio media enabled outside slideshow embeds", () => {
     postSpy.mockClear();
 

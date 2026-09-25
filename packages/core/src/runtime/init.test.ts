@@ -17,6 +17,14 @@ it("schedules WebAudio element gain from author volume without bridge volume", (
   expect(source).not.toMatch(/vol\s*\*\s*state\.bridgeVolume/);
 });
 
+// The page log crosses into the host as text, so it must be one string.
+function loggedRuntimeFps(infoSpy: { mock: { calls: unknown[][] } }): unknown {
+  const prefix = "[hyperframes] render runtime fps ";
+  const call = infoSpy.mock.calls.find(([message]) => String(message).startsWith(prefix));
+  expect(call).toHaveLength(1);
+  return JSON.parse(String(call?.[0]).slice(prefix.length));
+}
+
 function createMockTimeline(duration: number): RuntimeTimelineLike {
   const state = { time: 0, paused: true, duration };
   return {
@@ -631,15 +639,12 @@ describe("initSandboxRuntimeModular", () => {
     window.__player?.renderSeek(1 / 60);
 
     expect(timeline.time()).toBeCloseTo(1 / 60, 6);
-    expect(infoSpy).toHaveBeenCalledWith(
-      "[hyperframes] render runtime fps",
-      expect.objectContaining({
-        canonicalFps: 60,
-        source: "render-options",
-        rawFpsSource: "render-options",
-        rawFps: 60,
-      }),
-    );
+    expect(loggedRuntimeFps(infoSpy)).toMatchObject({
+      canonicalFps: 60,
+      source: "render-options",
+      rawFpsSource: "render-options",
+      rawFps: 60,
+    });
   });
 
   it("activates a nested outro on frame 584 when its authored start rounds just above it", () => {
@@ -807,14 +812,11 @@ describe("initSandboxRuntimeModular", () => {
 
     initSandboxRuntimeModular();
 
-    expect(infoSpy).toHaveBeenCalledWith(
-      "[hyperframes] render runtime fps",
-      expect.objectContaining({
-        canonicalFps: 60,
-        source: "unknown",
-        rawFpsSource: "future-source",
-      }),
-    );
+    expect(loggedRuntimeFps(infoSpy)).toMatchObject({
+      canonicalFps: 60,
+      source: "unknown",
+      rawFpsSource: "future-source",
+    });
   });
 
   it("keeps the default 30fps renderSeek grid when export render fps is absent", () => {
@@ -1767,6 +1769,75 @@ describe("initSandboxRuntimeModular", () => {
     player?.seek(7);
     expect(hiddenClip.style.visibility).toBe("hidden");
     expect(hiddenClip.style.display).toBe("");
+  });
+
+  describe("a clip the visibility pass hides gets the author's inline display back", () => {
+    // A relative clip under a plain wrapper stays in flow (applyClipLayout only touches
+    // root children), so the pass hides it with display:none rather than visibility.
+    const mountClip = (display: string, priority = "", start = "2") => {
+      const root = document.createElement("div");
+      root.setAttribute("data-composition-id", "main");
+      root.setAttribute("data-root", "true");
+      root.setAttribute("data-start", "0");
+      root.setAttribute("data-duration", "10");
+      document.body.appendChild(root);
+      const wrapper = document.createElement("div");
+      root.appendChild(wrapper);
+      const clip = document.createElement("div");
+      clip.style.position = "relative";
+      clip.style.setProperty("display", display, priority);
+      clip.setAttribute("data-start", start);
+      clip.setAttribute("data-duration", "4");
+      wrapper.appendChild(clip);
+      window.__timelines = { main: createMockTimeline(10) };
+      initSandboxRuntimeModular();
+      return clip;
+    };
+
+    it("keeps the author's display:flex when a later clip appears", () => {
+      const clip = mountClip("flex");
+      window.__player?.seek(0);
+      expect(clip.style.display).toBe("none");
+      window.__player?.seek(3);
+      expect(clip.style.display).toBe("flex");
+    });
+
+    it("keeps an author's display:none !important once the clip's time comes", () => {
+      const clip = mountClip("none", "important");
+      window.__player?.seek(0);
+      window.__player?.seek(3);
+      expect(clip.style.getPropertyValue("display")).toBe("none");
+      expect(clip.style.getPropertyPriority("display")).toBe("important");
+    });
+
+    it("shows a clip whose inline display is a plain none at its start", () => {
+      const clip = mountClip("none");
+      window.__player?.seek(0);
+      expect(clip.style.display).toBe("none");
+      window.__player?.seek(3);
+      expect(clip.style.display).toBe("");
+    });
+
+    it("keeps an author's plain display:none through a data-hidden toggle", () => {
+      const clip = mountClip("none", "", "0");
+      window.__player?.seek(1);
+      clip.setAttribute("data-hidden", "");
+      window.__player?.seek(1);
+      clip.removeAttribute("data-hidden");
+      window.__player?.seek(1);
+      expect(clip.style.display).toBe("none");
+    });
+
+    it("keeps a data-hidden clip's own display, priority included, when the attribute goes", () => {
+      const clip = mountClip("grid", "important");
+      clip.setAttribute("data-hidden", "");
+      window.__player?.seek(3);
+      expect(clip.style.display).toBe("none");
+      clip.removeAttribute("data-hidden");
+      window.__player?.seek(3);
+      expect(clip.style.getPropertyValue("display")).toBe("grid");
+      expect(clip.style.getPropertyPriority("display")).toBe("important");
+    });
   });
 
   it("excludes a data-hidden audio clip from Web Audio scheduling", () => {
@@ -3900,13 +3971,10 @@ describe("initSandboxRuntimeModular", () => {
     expect(window.__player?.getDuration()).toBe(5);
   });
 
-  // applyClipLayout force-absolutizes authored root-level timed clips so they
-  // stack as overlays. But in Studio/preview the runtime also stamps `data-start`
-  // onto ID'd / GSAP-targeted *flow* children (a <header>/<footer> in a column)
-  // so the design panel can discover them — those must NOT be force-absolutized,
-  // or the layout collapses (footer shrink-wraps, `space-between` clusters). The
-  // marker `data-hf-autostamped` distinguishes them; these tests pin both halves.
-  describe("applyClipLayout: runtime-stamped clips stay in document flow", () => {
+  // applyClipLayout force-absolutizes authored root-level timed clips, leaves their
+  // position to CSS, and measures hidden clips as shown. Runtime-stamped flow
+  // children (`data-hf-autostamped`) stay in flow, or a flex column collapses.
+  describe("applyClipLayout", () => {
     const makeRoot = () => {
       const root = document.createElement("div");
       root.setAttribute("data-composition-id", "main");
@@ -3919,8 +3987,8 @@ describe("initSandboxRuntimeModular", () => {
     };
 
     // jsdom does no layout, so a static clip can report computed top "auto" or
-    // "" inconsistently. Pin the values the anchor gate keys on so the assertion
-    // reflects the real-browser path deterministically.
+    // "" inconsistently. Pin the values the layout pass reads so the assertion
+    // is deterministic.
     const overrideComputed = (
       target: HTMLElement,
       overrides: Partial<Record<"position" | "top" | "left" | "bottom" | "right", string>>,
@@ -3944,7 +4012,7 @@ describe("initSandboxRuntimeModular", () => {
       }) as typeof window.getComputedStyle);
     };
 
-    it("force-absolutizes an authored data-start clip (baseline behavior preserved)", () => {
+    it("force-absolutizes an authored data-start clip and leaves its position to CSS", () => {
       const root = makeRoot();
       const clip = document.createElement("div");
       clip.setAttribute("data-start", "0"); // authored clip, no autostamp marker
@@ -3961,8 +4029,88 @@ describe("initSandboxRuntimeModular", () => {
       initSandboxRuntimeModular();
 
       expect(clip.style.position).toBe("absolute");
-      expect(clip.style.top).toBe("0px");
-      expect(clip.style.left).toBe("0px");
+      expect(clip.style.top).toBe("");
+      expect(clip.style.left).toBe("");
+    });
+
+    // A browser reports "auto" for every box value of a display:none element and pixels once
+    // it shows. jsdom does no layout, so model that for the clip under test.
+    const modelBrowserLayout = (target: HTMLElement, shown: { width: string; height: string }) => {
+      const real = window.getComputedStyle.bind(window);
+      vi.spyOn(window, "getComputedStyle").mockImplementation(((
+        el: Element,
+        pseudo?: string | null,
+      ) => {
+        const style = real(el as Element, pseudo ?? undefined);
+        if (el !== target) return style;
+        const box = (): Record<string, string> => {
+          if (target.style.display === "none") {
+            return { width: "auto", height: "auto", top: "auto", left: "auto" };
+          }
+          return { ...shown, top: "499px", left: "784px" };
+        };
+        return new Proxy(style, {
+          get(t, prop) {
+            if (prop === "position") return target.style.position || "static";
+            if (prop === "bottom" || prop === "right") return "auto";
+            if (typeof prop === "string" && prop in box()) return box()[prop];
+            const value = Reflect.get(t, prop);
+            return typeof value === "function" ? value.bind(t) : value;
+          },
+        }) as CSSStyleDeclaration;
+      }) as typeof window.getComputedStyle);
+    };
+
+    it("keeps a clip that starts later where its CSS puts it (flex-centred title)", () => {
+      const root = makeRoot();
+      root.style.cssText = "display:flex;align-items:center;justify-content:center";
+      const title = document.createElement("h1");
+      title.setAttribute("data-start", "0.88");
+      title.setAttribute("data-duration", "5");
+      title.textContent = "Agent one";
+      root.appendChild(title);
+      modelBrowserLayout(title, { width: "352px", height: "82px" });
+
+      window.__timelines = { main: createMockTimeline(10) };
+      initSandboxRuntimeModular();
+
+      expect(title.style.display).toBe("none");
+      expect(title.style.position).toBe("absolute");
+      expect(title.style.top).toBe("");
+      expect(title.style.left).toBe("");
+    });
+
+    it("sizes an empty clip that starts later like one showing at load", () => {
+      const root = makeRoot();
+      const card = document.createElement("div");
+      card.setAttribute("data-start", "1");
+      card.setAttribute("data-duration", "5");
+      root.appendChild(card);
+      modelBrowserLayout(card, { width: "0px", height: "0px" });
+
+      window.__timelines = { main: createMockTimeline(10) };
+      initSandboxRuntimeModular();
+
+      expect(card.style.display).toBe("none");
+      expect(card.style.width).toBe("100%");
+      expect(card.style.height).toBe("100%");
+    });
+
+    it("puts back an author's display:none !important after measuring the clip", () => {
+      const root = makeRoot();
+      const card = document.createElement("div");
+      card.setAttribute("data-start", "0");
+      card.setAttribute("data-duration", "5");
+      card.style.setProperty("display", "none", "important");
+      root.appendChild(card);
+      modelBrowserLayout(card, { width: "0px", height: "0px" });
+
+      window.__timelines = { main: createMockTimeline(10) };
+      initSandboxRuntimeModular();
+
+      expect(card.style.width).toBe("100%");
+      expect(card.style.getPropertyValue("display")).toBe("none");
+      expect(card.style.getPropertyPriority("display")).toBe("important");
     });
 
     it("leaves a runtime-stamped flow child untouched so the layout is preserved", () => {
@@ -4022,68 +4170,80 @@ describe("initSandboxRuntimeModular", () => {
     });
   });
 
-  // #3458: cross-origin media with no CORS opt-in. `createMediaElementSource`
-  // returns a node that outputs silence per the Web Audio spec rather than
-  // throwing, so the composition played through with visuals animating and no
-  // sound, and nothing was logged.
-  describe("cross-origin audio without a CORS opt-in", () => {
-    // `WebAudioTransport.init()` does `new AudioContext()`, which jsdom does not
-    // provide — without a stub it returns false, `webAudioReady` stays false,
-    // and `scheduleWebAudioForActiveClips` is never reached at all, so every
-    // assertion below would pass for the wrong reason.
+  // jsdom has no AudioContext; without one `WebAudioTransport.init()` fails, Web Audio scheduling
+  // never runs, and every Web Audio assertion passes for the wrong reason.
+  function useMockAudioContext() {
+    const ctx = { time: 0, mediaElementSources: 0 };
     class MockAudioContext {
-      currentTime = 0;
       state = "running";
       destination = {};
+      get currentTime() {
+        return ctx.time;
+      }
       resume() {
         return Promise.resolve();
       }
       createGain() {
         return { gain: { value: 1 }, connect() {}, disconnect() {} };
       }
+      createMediaElementSource() {
+        ctx.mediaElementSources += 1;
+        return { connect() {}, disconnect() {} };
+      }
     }
     const originalAudioContext = (globalThis as Record<string, unknown>).AudioContext;
 
     beforeEach(() => {
+      ctx.time = 0;
+      ctx.mediaElementSources = 0;
       (globalThis as Record<string, unknown>).AudioContext = MockAudioContext;
     });
 
     afterEach(() => {
       (globalThis as Record<string, unknown>).AudioContext = originalAudioContext;
     });
+    return ctx;
+  }
 
-    /** `webAudio.init()` resolves on a microtask, so `webAudioReady` is still
-     *  false on the tick `initSandboxRuntimeModular()` returns. */
-    async function startPlayback() {
-      initSandboxRuntimeModular();
-      await Promise.resolve();
-      window.__player?.play();
-      await Promise.resolve();
-      await Promise.resolve();
-    }
+  /** `webAudio.init()` resolves on a microtask, so `webAudioReady` is still
+   *  false on the tick `initSandboxRuntimeModular()` returns. */
+  async function startPlayback() {
+    initSandboxRuntimeModular();
+    await Promise.resolve();
+    window.__player?.play();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
 
-    function mountAudio(src: string, attrs: Record<string, string> = {}) {
-      const root = document.createElement("div");
-      root.setAttribute("data-composition-id", "main");
-      root.setAttribute("data-root", "true");
-      root.setAttribute("data-start", "0");
-      root.setAttribute("data-duration", "10");
-      root.setAttribute("data-width", "1920");
-      root.setAttribute("data-height", "1080");
-      document.body.appendChild(root);
+  function mountAudio(src: string, attrs: Record<string, string> = {}) {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-start", "0");
+    root.setAttribute("data-duration", "10");
+    root.setAttribute("data-width", "1920");
+    root.setAttribute("data-height", "1080");
+    document.body.appendChild(root);
 
-      const audio = document.createElement("audio");
-      audio.setAttribute("data-start", "0");
-      audio.setAttribute("data-duration", "10");
-      audio.setAttribute("src", src);
-      for (const [name, value] of Object.entries(attrs)) audio.setAttribute(name, value);
-      audio.load = () => {};
-      audio.play = vi.fn(() => Promise.resolve());
-      root.appendChild(audio);
+    const audio = document.createElement("audio");
+    audio.setAttribute("data-start", "0");
+    audio.setAttribute("data-duration", "10");
+    audio.setAttribute("src", src);
+    for (const [name, value] of Object.entries(attrs)) audio.setAttribute(name, value);
+    audio.load = () => {};
+    audio.play = vi.fn(() => Promise.resolve());
+    root.appendChild(audio);
 
-      window.__timelines = { main: createMockTimeline(10) };
-      return audio;
-    }
+    window.__timelines = { main: createMockTimeline(10) };
+    return audio;
+  }
+
+  // #3458: cross-origin media with no CORS opt-in. `createMediaElementSource`
+  // returns a node that outputs silence per the Web Audio spec rather than
+  // throwing, so the composition played through with visuals animating and no
+  // sound, and nothing was logged.
+  describe("cross-origin audio without a CORS opt-in", () => {
+    useMockAudioContext();
 
     it("withholds Web Audio capture but still tries decode, which keeps the FX graph", async () => {
       // Decode is the BEST outcome here, not a consolation: a CDN that sends
@@ -4235,6 +4395,39 @@ describe("initSandboxRuntimeModular", () => {
 
         expect(audio.muted).toBe(false);
       });
+    });
+  });
+
+  describe("a voiceover routed through Web Audio", () => {
+    const ctx = useMockAudioContext();
+
+    it("holds the timeline while the voiceover buffers instead of seeking it forward", async () => {
+      const raf = createManualRaf();
+      vi.spyOn(performance, "now").mockImplementation(() => raf.now());
+      window.requestAnimationFrame =
+        raf.requestAnimationFrame as typeof window.requestAnimationFrame;
+      window.cancelAnimationFrame = raf.cancelAnimationFrame as typeof window.cancelAnimationFrame;
+      const audio = mountAudio("/assets/vo.mp3");
+      // Playing, but stuck buffering at 0 like a cold mp3.
+      const seeks: number[] = [];
+      Object.defineProperty(audio, "paused", { value: false, configurable: true });
+      Object.defineProperty(audio, "readyState", { value: 1, configurable: true });
+      Object.defineProperty(audio, "currentTime", {
+        get: () => 0,
+        set: (t: number) => seeks.push(t),
+        configurable: true,
+      });
+
+      await startPlayback();
+      expect(ctx.mediaElementSources).toBe(1);
+
+      for (let frame = 0; frame < 120; frame++) {
+        ctx.time += 1 / 60;
+        raf.step(1000 / 60);
+      }
+
+      expect(window.__player?.getTime()).toBeLessThan(0.1);
+      expect(seeks.filter((t) => t > 0.1)).toEqual([]);
     });
   });
 });

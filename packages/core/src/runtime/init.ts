@@ -1,6 +1,7 @@
 // fallow-ignore-file code-duplication complexity
 import { installRuntimeControlBridge, postRuntimeMessage, setRuntimeProtocolFps } from "./bridge";
 import { isInClipWindow } from "./clipWindow";
+import { revealTimedClipsAfterFirstPass } from "./timedClipHide";
 import { initRuntimeAnalytics, emitAnalyticsEvent } from "./analytics";
 import { injectCompositionCssVariables } from "./getVariables";
 import { createCssAdapter } from "./adapters/css";
@@ -195,6 +196,8 @@ function createSettledTracker(
   };
 }
 
+const SLOW_IDLE_HEARTBEAT_MS = 1000;
+
 export function initSandboxRuntimeModular(): void {
   const state = createRuntimeState();
   // Runtime-data handlers may replace the timeline object they mutate. Keep the
@@ -252,13 +255,14 @@ export function initSandboxRuntimeModular(): void {
   state.canonicalFps = exportRenderFps.fps ?? state.canonicalFps;
   setRuntimeProtocolFps(state.canonicalFps);
   if (window.__HF_EXPORT_RENDER_SEEK_CONFIG) {
-    console.info("[hyperframes] render runtime fps", {
+    const fpsDetail = JSON.stringify({
       canonicalFps: state.canonicalFps,
       source: exportRenderFps.source,
       rawFpsSource: exportRenderFps.rawFpsSource,
       rawFps: exportRenderFps.rawFps,
       fallbackReason: exportRenderFps.fallbackReason,
     });
+    console.info(`[hyperframes] render runtime fps ${fpsDetail}`);
   }
   let colorGradingRuntime: RuntimeColorGradingApi | null = null;
   let runtimeErrorListener: ((event: ErrorEvent) => void) | null = null;
@@ -625,11 +629,10 @@ export function initSandboxRuntimeModular(): void {
     const rootHeight = parseDimensionPx(rootEl.getAttribute("data-height"));
     if (rootWidth) rootEl.style.width = rootWidth;
     if (rootHeight) rootEl.style.height = rootHeight;
-    const children = Array.from(rootEl.children) as HTMLElement[];
-    for (const el of children) {
+    const clips = (Array.from(rootEl.children) as HTMLElement[]).filter((el) => {
       const tag = el.tagName.toLowerCase();
-      if (tag === "script" || tag === "style" || tag === "link" || tag === "meta") continue;
-      if (!el.hasAttribute("data-start")) continue;
+      if (tag === "script" || tag === "style" || tag === "link" || tag === "meta") return false;
+      if (!el.hasAttribute("data-start")) return false;
       // Runtime-stamped clips are NOT authored overlay clips. In Studio/preview
       // the runtime stamps `data-start` onto ID'd or GSAP-targeted flow children
       // (a <header>/<footer> in a flex column) so the design panel can discover
@@ -638,7 +641,14 @@ export function initSandboxRuntimeModular(): void {
       // `justify-content: space-between` clusters in the top-left. Leave them in
       // flow so the preview matches the rendered video, which never stamps
       // (production renders run as the top-level page, not in an iframe).
-      if (el.hasAttribute("data-hf-autostamped")) continue;
+      return !el.hasAttribute("data-hf-autostamped");
+    });
+    const displayNoneLiftedToMeasureShown = clips
+      .filter((el) => el.style.getPropertyValue("display") === "none")
+      .map((el) => ({ el, priority: el.style.getPropertyPriority("display") }));
+    for (const { el } of displayNoneLiftedToMeasureShown) el.style.removeProperty("display");
+    for (const el of clips) {
+      const tag = el.tagName.toLowerCase();
       const hasLegacyAnchoredDefaults =
         (el.style.top === "0px" || el.style.top === "0") &&
         (el.style.left === "0px" || el.style.left === "0") &&
@@ -683,22 +693,6 @@ export function initSandboxRuntimeModular(): void {
       if (shouldForceAbsolute) {
         el.style.position = "absolute";
       }
-      const hasExplicitVerticalAnchor =
-        Boolean(el.style.top) ||
-        Boolean(el.style.bottom) ||
-        computed.top !== "auto" ||
-        computed.bottom !== "auto";
-      if (!hasExplicitVerticalAnchor) {
-        el.style.top = "0";
-      }
-      const hasExplicitHorizontalAnchor =
-        Boolean(el.style.left) ||
-        Boolean(el.style.right) ||
-        computed.left !== "auto" ||
-        computed.right !== "auto";
-      if (!hasExplicitHorizontalAnchor) {
-        el.style.left = "0";
-      }
       if (tag !== "audio") {
         const forcedWidth = parseDimensionPx(el.getAttribute("data-width"));
         const forcedHeight = parseDimensionPx(el.getAttribute("data-height"));
@@ -719,6 +713,9 @@ export function initSandboxRuntimeModular(): void {
           el.style.height = "100%";
         }
       }
+    }
+    for (const { el, priority } of displayNoneLiftedToMeasureShown) {
+      el.style.setProperty("display", "none", priority);
     }
   };
 
@@ -2393,15 +2390,28 @@ export function initSandboxRuntimeModular(): void {
     timedClipIsLeaf = new WeakMap<Element, boolean>();
   };
 
-  // Which elements carry a `display:none` the visibility pass itself applied, so
-  // the un-hide branch can undo exactly that instead of re-deriving
-  // `isTimedClipInFlow`. That derived answer can flip between the hide and the
-  // show pass for the SAME element — `applyClipLayout` force-absolutizes a
-  // root-level clip after an earlier pass already cached it as in-flow and hid
-  // it — and the corrected, no-longer-in-flow reading then skips the removal,
-  // stranding the clip hidden for the rest of the render.
-  const timedClipDisplayNoneApplied = new WeakSet<HTMLElement>();
-  const dataHiddenDisplayRestores = new WeakMap<HTMLElement, string>();
+  // The author's inline display (value and priority) under each `display:none` the
+  // visibility pass applied, so showing the element puts exactly that back. Keyed on
+  // what was applied, not on `isTimedClipInFlow`: that answer can flip between the hide
+  // and the show pass once `applyClipLayout` force-absolutizes the clip.
+  const displayBeforeHide = new WeakMap<HTMLElement, { value: string; priority: string }>();
+  const hideByDisplay = (el: HTMLElement, plainNoneMayBeLeftover: boolean) => {
+    if (!displayBeforeHide.has(el)) {
+      const value = el.style.getPropertyValue("display");
+      const priority = el.style.getPropertyPriority("display");
+      // On the timed hide, a plain none may be a hide left behind (a Studio reveal restoring ours).
+      const isLeftoverHide = plainNoneMayBeLeftover && value === "none" && !priority;
+      displayBeforeHide.set(el, isLeftoverHide ? { value: "", priority: "" } : { value, priority });
+    }
+    el.style.display = "none";
+  };
+  const restoreDisplay = (el: HTMLElement) => {
+    const before = displayBeforeHide.get(el);
+    if (!before) return;
+    displayBeforeHide.delete(el);
+    if (before.value) el.style.setProperty("display", before.value, before.priority);
+    else el.style.removeProperty("display");
+  };
   const dataHiddenDisplayNodes = new WeakSet<HTMLElement>();
   // A data-hidden toggle on (or affecting) an audio element must re-schedule
   // WebAudio playback so the hidden clip's source is dropped/restored mid-
@@ -2452,17 +2462,17 @@ export function initSandboxRuntimeModular(): void {
       0,
       timingRevision,
     );
+    let decidedTimedClip = false;
     for (const rawNode of visibilityNodes) {
       if (!isHtmlElement(rawNode)) continue;
 
       if (rawNode.hasAttribute("data-hidden")) {
         if (!dataHiddenDisplayNodes.has(rawNode)) {
-          dataHiddenDisplayRestores.set(rawNode, rawNode.style.getPropertyValue("display"));
           dataHiddenDisplayNodes.add(rawNode);
           if (nodeAffectsAudio(rawNode)) hiddenAudioDirty = true;
           groupMuteDirty = true;
         }
-        rawNode.style.display = "none";
+        hideByDisplay(rawNode, false);
         if (isVideoElement(rawNode) || isImageElement(rawNode)) {
           colorGradingRuntime?.setSourceVisibility(rawNode, false);
         }
@@ -2470,13 +2480,7 @@ export function initSandboxRuntimeModular(): void {
       }
 
       if (dataHiddenDisplayNodes.has(rawNode)) {
-        const previousDisplay = dataHiddenDisplayRestores.get(rawNode);
-        if (previousDisplay) {
-          rawNode.style.display = previousDisplay;
-        } else {
-          rawNode.style.removeProperty("display");
-        }
-        dataHiddenDisplayRestores.delete(rawNode);
+        restoreDisplay(rawNode);
         dataHiddenDisplayNodes.delete(rawNode);
         if (nodeAffectsAudio(rawNode)) hiddenAudioDirty = true;
         groupMuteDirty = true;
@@ -2516,19 +2520,17 @@ export function initSandboxRuntimeModular(): void {
         }
       }
       rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
+      if (!isMediaElement(rawNode) && !isImageElement(rawNode)) decidedTimedClip = true;
       if (isVideoElement(rawNode) || isImageElement(rawNode)) {
         colorGradingRuntime?.setSourceVisibility(rawNode, isVisibleNow);
       }
       if (isVisibleNow) {
-        if (timedClipDisplayNoneApplied.has(rawNode)) {
-          rawNode.style.removeProperty("display");
-          timedClipDisplayNoneApplied.delete(rawNode);
-        }
+        restoreDisplay(rawNode);
       } else if (isTimedClipInFlow(rawNode) && isTimedClipLeaf(rawNode)) {
-        rawNode.style.display = "none";
-        timedClipDisplayNoneApplied.add(rawNode);
+        hideByDisplay(rawNode, true);
       }
     }
+    if (decidedTimedClip && revealTimedClipsAfterFirstPass()) colorGradingRuntime?.refresh();
     // Only when a `data-hidden` mutation actually moved something: the skips
     // this reschedule exists to re-run are what change the active set, so
     // firing it otherwise was an audible stop-and-restart across the whole mix
@@ -3265,7 +3267,9 @@ export function initSandboxRuntimeModular(): void {
       resolveStartSeconds: (element) => resolveStartForElement(element, 0),
     }),
     createAnimeJsAdapter(),
-    createLottieAdapter(),
+    createLottieAdapter({
+      resolveStartSeconds: (element) => resolveStartForElement(element, 0),
+    }),
     createThreeAdapter(),
     createMapboxAdapter(),
     createLeafletAdapter(),
@@ -3426,6 +3430,7 @@ export function initSandboxRuntimeModular(): void {
   let pausedSeekDeferredByManualGesture = false;
   // Set while the transport is parked (see scheduleNextTransportFrame).
   let transportParkTimerId: number | null = null;
+  let slowIdleHeartbeat = false;
   let transportWakeRequested = false;
   let parkedPollWitness = "";
   let lastSeenTimingRevision = -1;
@@ -3703,14 +3708,14 @@ export function initSandboxRuntimeModular(): void {
     state.capturedTimeline === lastTransportSeekTimeline;
 
   /**
-   * The parked loop. Two jobs the 60 Hz loop used to do implicitly:
+   * The parked loop has two jobs:
    *
    * 1. Keep the control bridge's paused heartbeat on its documented interval
-   *    (`state.bridgeMaxPostIntervalMs`) so a paused timeline still confirms
-   *    its position to any listener.
-   * 2. Re-read everything nothing can push (`readParkedPollWitness`). Polling
-   *    that 12 times a second instead of 60 is the whole reason the safety net
-   *    exists.
+   *    (`state.bridgeMaxPostIntervalMs`; a second after `set-idle-heartbeat`,
+   *    once the whole timeline is bound) so a paused timeline confirms its position.
+   * 2. Re-read everything nothing can push (`readParkedPollWitness`) on that
+   *    same beat: a timer, not a frame loop, is what keeps a paused runtime
+   *    cheap.
    */
   /**
    * Everything a parked transport still has to LOOK at, because no observer
@@ -3734,7 +3739,9 @@ export function initSandboxRuntimeModular(): void {
   const armParkTimer = () => {
     transportParkTimerId = window.setTimeout(
       parkedTransportHeartbeat,
-      state.bridgeMaxPostIntervalMs,
+      slowIdleHeartbeat && state.capturedTimeline && childrenBound
+        ? SLOW_IDLE_HEARTBEAT_MS
+        : state.bridgeMaxPostIntervalMs,
     );
   };
 
@@ -3874,14 +3881,14 @@ export function initSandboxRuntimeModular(): void {
       }
 
       // Audio-master clock: three tiers of timing precision.
-      // 1. WebAudio (AudioContext.currentTime): ~21µs, sample-accurate
+      // 1. WebAudio (AudioContext.currentTime) while it plays a decoded buffer: ~21µs, sample-accurate
       // 2. HTMLMediaElement (audio.currentTime): ~33ms, frame-accurate
       // 3. Monotonic (performance.now()): ~1ms, no audio coupling
       if (clock.isPlaying() && !state.mediaOutputMuted) {
         if (
           !state.nativeMediaSyncDisabled &&
           !state.webAudioMediaDisabled &&
-          webAudio.isActive() &&
+          webAudio.ownsClock() &&
           webAudio.context
         ) {
           const webAudioTime = webAudio.getTime();
@@ -4243,6 +4250,10 @@ export function initSandboxRuntimeModular(): void {
       applyPlaybackRate(rate);
       if (state.transportClock) state.transportClock.setRate(state.playbackRate);
       applyWebAudioRate();
+    },
+    onSetIdleHeartbeat: (slow) => {
+      slowIdleHeartbeat = slow;
+      wakeTransport();
     },
     onSetRootDuration: growRootDurationLive,
     onSetColorGrading: (target, grading) => {
