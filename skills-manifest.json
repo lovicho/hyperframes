@@ -2,8 +2,8 @@
   "source": "heygen-com/hyperframes",
   "skills": {
     "embedded-captions": {
-      "hash": "c6cac07dbd207deb",
-      "files": 142
+      "hash": "7c6f147f722cc4c4",
+      "files": 144
     },
     "faceless-explainer": {
       "hash": "7fda7a8bb75acabf",
@@ -18,7 +18,7 @@
       "files": 5
     },
     "hyperframes": {
-      "hash": "93ee5e4fad423610",
+      "hash": "938e6e1a2141d6b7",
       "files": 29
     },
     "hyperframes-animation": {
@@ -30,15 +30,15 @@
       "files": 7
     },
     "hyperframes-cli": {
-      "hash": "272d811ab4564fb7",
+      "hash": "2617903119c32228",
       "files": 11
     },
     "hyperframes-core": {
-      "hash": "bc03be27ef68003b",
+      "hash": "b632d12d11eb54e8",
       "files": 11
     },
     "hyperframes-creative": {
-      "hash": "171a9a4540ef1d99",
+      "hash": "922bce76a69b97d9",
       "files": 79
     },
     "hyperframes-keyframes": {
@@ -50,12 +50,12 @@
       "files": 12
     },
     "hyperframes-studio": {
-      "hash": "12fb9632d22e3259",
+      "hash": "0d9cbaa24ccc9d31",
       "files": 1
     },
     "media-use": {
-      "hash": "912204bb8f5fd200",
-      "files": 100
+      "hash": "004d60f9660a5f16",
+      "files": 102
     },
     "motion-graphics": {
       "hash": "3d3a35ffbe8b7e3e",
