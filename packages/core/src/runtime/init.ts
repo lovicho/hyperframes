@@ -3710,9 +3710,10 @@ export function initSandboxRuntimeModular(): void {
       if (dur > 0) {
         clock.setDuration(dur);
         if (clock.reachedEnd()) {
-          clock.seek(0);
-          state.currentTime = 0;
-          seekTimelineAndAdapters(0);
+          const start = clock.getPlayStart();
+          clock.seek(start);
+          state.currentTime = start;
+          seekTimelineAndAdapters(start);
         }
       } else {
         const rootEl = resolveRootCompositionElement();
@@ -4594,21 +4595,19 @@ export function initSandboxRuntimeModular(): void {
         colorGrading.redrawAnimated();
       }
 
-      // Looping is handled at the player layer (<hyperframes-player>),
-      // not the runtime. The clock pauses at duration; GSAP's repeat:-1
-      // is bypassed because we drive tl.totalTime(t) directly. The
-      // parent observes isPlaying=false at end and re-issues seek(0)+play()
-      // if its loop attribute is set.
+      // The clock stops at its end (GSAP's repeat:-1 is bypassed: we drive
+      // tl.totalTime(t) directly); the parent loops by seeking to its range
+      // start, or 0, and playing again.
       if (clock.isPlaying() && clock.reachedEnd()) {
         webAudio.stopAll();
         clock.detachAudioSource();
         clock.pause();
         state.isPlaying = false;
-        const dur = clock.getDuration();
-        if (Number.isFinite(dur)) {
-          clock.seek(dur);
-          state.currentTime = dur;
-          seekTimelineAndAdapters(dur);
+        const stop = clock.getStopTime();
+        if (Number.isFinite(stop)) {
+          clock.seek(stop);
+          state.currentTime = stop;
+          seekTimelineAndAdapters(stop);
         }
         runAdapters("pause");
         syncMediaForCurrentState(timingRevision);
@@ -4890,6 +4889,15 @@ export function initSandboxRuntimeModular(): void {
       wakeTransport();
     },
     onSetRootDuration: growRootDurationLive,
+    onSetPlayRange: (startSeconds, endSeconds) => {
+      clock.setPlayRange(startSeconds, endSeconds, state.canonicalFps);
+      const start = clock.getPlayStart();
+      if (clock.isPlaying() && (clock.now() < start || clock.reachedEnd())) {
+        transport.seek(start, { keepPlaying: true });
+        return;
+      }
+      postState(true);
+    },
     onSetColorGrading: (target, grading) => {
       colorGrading.setGrading(target, grading);
     },
@@ -4906,11 +4914,11 @@ export function initSandboxRuntimeModular(): void {
         clock.detachAudioSource();
         clock.pause();
         state.isPlaying = false;
-        const dur = clock.getDuration();
-        if (Number.isFinite(dur)) {
-          clock.seek(dur);
-          state.currentTime = dur;
-          seekTimelineAndAdapters(dur);
+        const stop = clock.getStopTime();
+        if (Number.isFinite(stop)) {
+          clock.seek(stop);
+          state.currentTime = stop;
+          seekTimelineAndAdapters(stop);
         }
         runAdapters("pause");
         syncMediaForCurrentState();
