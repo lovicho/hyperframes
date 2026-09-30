@@ -27,7 +27,10 @@ import {
   useTimelineDisplayLayout,
   useTimelineTrackLayout,
 } from "./useTimelineTrackLayout";
-import { useTimelineKeyframeHandlers } from "./useTimelineKeyframeHandlers";
+import {
+  cancelTimelineKeyframeRetime,
+  useTimelineKeyframeHandlers,
+} from "./useTimelineKeyframeHandlers";
 import { useTimelineGapHighlights } from "./useTimelineGapHighlights";
 import { useTimelineRazorInteraction } from "./TimelineRazorInteraction";
 import { useTimelinePerformanceTelemetry } from "./useTimelinePerformanceTelemetry";
@@ -40,6 +43,12 @@ import { useTimelineActiveClips } from "./useTimelineActiveClips";
 import { useTimelineLaneMoveRefresh } from "./useTimelineLaneMoveRefresh";
 import { useTimelineLogicalFocus } from "./useTimelineLogicalFocus";
 import { useTimelineEditContextOptional } from "../../contexts/TimelineEditContext";
+import {
+  refuseWhenReadOnly,
+  useAbandonEditsOnReadOnly,
+  useTimelineReadOnlyPress,
+} from "./timelineReadOnly";
+import { cancelBeatDrag } from "./BeatStrip";
 export function useTimelineProviderState({
   onSeek,
   onDrillDown,
@@ -92,6 +101,14 @@ export function useTimelineProviderState({
   });
   const theme = useMemo(() => ({ ...defaultTimelineTheme, ...themeOverrides }), [themeOverrides]);
   const editContext = useTimelineEditContextOptional();
+  const readOnlyPress = useTimelineReadOnlyPress();
+  const oneShotEdits = refuseWhenReadOnly(readOnlyPress, {
+    onBlockedEditAttempt,
+    onRazorSplitAll,
+    onToggleTrackHidden: editContext.onToggleTrackHidden,
+    onTogglePropertyGroupKeyframe: editContext.onTogglePropertyGroupKeyframe,
+    onRazorSplit: editContext.onRazorSplit,
+  });
   const refreshAfterLaneMove = useTimelineLaneMoveRefresh();
   useMusicBeatAnalysis();
   const timelineElements = usePlayerStore((s) => s.elements);
@@ -198,7 +215,7 @@ export function useTimelineProviderState({
     onMoveElements: pinnedOnMoveElements,
     onResizeElement: pinnedOnResizeElement,
     onResizeElements: pinnedOnResizeElements,
-    onBlockedEditAttempt,
+    onBlockedEditAttempt: oneShotEdits.onBlockedEditAttempt,
     onSeek,
     setShowPopover,
     setRangeSelectionRef,
@@ -218,6 +235,7 @@ export function useTimelineProviderState({
     onBlockDrop: pinnedOnBlockDrop,
     onCompositionDrop: pinnedOnCompositionDrop,
     sessionEpoch,
+    readOnlyPress,
   });
   const displayLayout = useTimelineDisplayLayout(draggedClip, trackOrder, rowGeometry);
   const { resizingElementIds, getPreviewElement, draggedElement, multiDragPreview, snapGuide } =
@@ -337,7 +355,7 @@ export function useTimelineProviderState({
       scrollRef,
       contentOrigin,
       pixelsPerSecond: pps,
-      onSplitAll: onRazorSplitAll,
+      onSplitAll: oneShotEdits.onRazorSplitAll,
     });
   const overlaysProps = useTimelineOverlaysState({
     elements: timelineElements,
@@ -405,6 +423,14 @@ export function useTimelineProviderState({
     handlePointerCancel,
   } = overlaysProps;
   const { rangeSelection, setRangeSelection } = overlays;
+  useAbandonEditsOnReadOnly(readOnlyPress !== null, () => {
+    setDraggedClip(null);
+    cancelBeatDrag();
+    cancelTimelineKeyframeRetime(scrollRef.current);
+    setClipContextMenu(null);
+    setKfContextMenu(null);
+    overlays.onDismissGapContextMenu();
+  });
   const laneGapStrips = useTimelineGapHighlights({
     gapHighlight,
     tracks,
@@ -484,22 +510,24 @@ export function useTimelineProviderState({
     onClickKeyframe,
     onShiftClickKeyframe,
     onMoveKeyframe,
-    onContextMenuKeyframe,
-    onContextMenuClip,
-    onContextMenuLane: (e: React.MouseEvent, track: number, time: number) => {
-      if (draggedClip?.started || resizingClip) return;
-      setClipContextMenu(null);
-      openGapMenu({ x: e.clientX, y: e.clientY, track, time });
-    },
+    ...refuseWhenReadOnly(readOnlyPress, {
+      onContextMenuKeyframe,
+      onContextMenuClip,
+      onContextMenuLane: (e: React.MouseEvent, track: number, time: number) => {
+        if (draggedClip?.started || resizingClip) return;
+        setClipContextMenu(null);
+        openGapMenu({ x: e.clientX, y: e.clientY, track, time });
+      },
+    }),
     onResizeElement,
     onMoveElement,
     beatDragging,
     draggedElement,
     snapGuide,
     multiDragPreview,
-    onToggleTrackHidden: editContext.onToggleTrackHidden,
-    onTogglePropertyGroupKeyframe: editContext.onTogglePropertyGroupKeyframe,
-    onRazorSplit: editContext.onRazorSplit,
+    onToggleTrackHidden: oneShotEdits.onToggleTrackHidden,
+    onTogglePropertyGroupKeyframe: oneShotEdits.onTogglePropertyGroupKeyframe,
+    onRazorSplit: oneShotEdits.onRazorSplit,
     onRazorSplitAll: editContext.onRazorSplitAll,
   };
   const holdNewClipContent = timelineFocus.rowVirtualizationActive && viewport.isScrolling;
@@ -515,7 +543,7 @@ export function useTimelineProviderState({
   );
   const timelineMeta = buildTimelineShellMeta({
     isDragOver: assetDrop.isDragOver,
-    hasFileDrop: !!onFileDrop,
+    hasFileDrop: !!onFileDrop && !readOnlyPress,
     drop: {
       onDragOver: assetDrop.handleAssetDragOver,
       onDragLeave: assetDrop.handleAssetDragLeave,

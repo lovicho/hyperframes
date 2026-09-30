@@ -37,4 +37,6 @@ export interface TimelineProps
   showAudioEffects?: boolean;
   showKeyframes?: boolean;
   trackPadding?: TimelineTrackPadding;
+  readOnly?: boolean;
+  onReadOnlyPress?: () => void;
 }

@@ -382,6 +382,7 @@ export function mergeTimelineElementsPreservingDowngrades(
   nextElements: TimelineElement[],
   currentDuration: number,
   nextDuration: number,
+  stillInPreview: (element: TimelineElement) => boolean = () => true,
 ): TimelineElement[] {
   const safeCurrentDuration = Number.isFinite(currentDuration) ? currentDuration : 0;
   const safeNextDuration = Number.isFinite(nextDuration) ? nextDuration : 0;
@@ -403,7 +404,8 @@ export function mergeTimelineElementsPreservingDowngrades(
       // re-adds. A TOP-LEVEL element missing from the fresh scan was genuinely
       // removed (undo of a split, a delete), so let it go — otherwise undoing a
       // split leaves a ghost clip in the timeline even though the file is reverted.
-      element.compositionSrc != null,
+      element.compositionSrc != null &&
+      stillInPreview(element),
   );
   if (preserved.length === 0) return nextElements;
   return [...nextElements, ...preserved];
