@@ -32,9 +32,9 @@ import {
   STUDIO_ORIGINAL_TRANSFORM_DISPLAY_ATTR,
   STUDIO_ROTATION_TRANSFORM_ORIGIN,
 } from "./manualEditsTypes";
-import { roundRotationAngle } from "./manualEditsParsing";
 import { gsapAnimatesProperty } from "./gsapAnimatesProperty";
 import { splitTopLevelWhitespace } from "./manualEditsStyleHelpers";
+import { roundTo3, roundToLayoutPx } from "../../utils/rounding";
 
 /* ── Gesture tracking ─────────────────────────────────────────────── */
 let studioManualEditGestureId = 0;
@@ -203,8 +203,8 @@ function writeStudioPathOffsetVars(
 ): void {
   prepareStudioPathOffsetBase(element, options.updateBase ?? true);
   element.setAttribute(STUDIO_PATH_OFFSET_ATTR, "true");
-  element.style.setProperty(STUDIO_OFFSET_X_PROP, `${Math.round(offset.x)}px`);
-  element.style.setProperty(STUDIO_OFFSET_Y_PROP, `${Math.round(offset.y)}px`);
+  element.style.setProperty(STUDIO_OFFSET_X_PROP, `${roundTo3(offset.x)}px`);
+  element.style.setProperty(STUDIO_OFFSET_Y_PROP, `${roundTo3(offset.y)}px`);
 }
 
 /* ── Path offset apply ────────────────────────────────────────────── */
@@ -325,7 +325,7 @@ export function applyStudioPathOffsetDraft(
   // Non-GSAP elements: use CSS translate as before.
   element.style.setProperty(
     "translate",
-    composeTranslateValue(element, `${Math.round(offset.x)}px`, `${Math.round(offset.y)}px`),
+    composeTranslateValue(element, `${roundTo3(offset.x)}px`, `${roundTo3(offset.y)}px`),
   );
   stripGsapTranslateFromTransform(element);
 }
@@ -342,7 +342,7 @@ function readParentFlexBasisPixels(
   if (display !== "flex" && display !== "inline-flex") return null;
 
   const direction = readStyleOrComputed(parent, "flex-direction").trim();
-  return Math.round(Math.max(1, direction.startsWith("column") ? size.height : size.width));
+  return roundToLayoutPx(Math.max(1, direction.startsWith("column") ? size.height : size.width));
 }
 
 function restoreStaleStudioScaleResize(element: HTMLElement): void {
@@ -417,8 +417,8 @@ function writeStudioBoxSizeVars(
   }
 
   element.setAttribute(STUDIO_BOX_SIZE_ATTR, "true");
-  element.style.setProperty(STUDIO_WIDTH_PROP, `${Math.round(Math.max(1, size.width))}px`);
-  element.style.setProperty(STUDIO_HEIGHT_PROP, `${Math.round(Math.max(1, size.height))}px`);
+  element.style.setProperty(STUDIO_WIDTH_PROP, `${roundToLayoutPx(Math.max(1, size.width))}px`);
+  element.style.setProperty(STUDIO_HEIGHT_PROP, `${roundToLayoutPx(Math.max(1, size.height))}px`);
 }
 
 function applyStudioBoxSizeDimensions(
@@ -428,8 +428,8 @@ function applyStudioBoxSizeDimensions(
   writeStudioBoxSizeVars(element, size);
   restoreStaleStudioScaleResize(element);
 
-  const width = Math.round(Math.max(1, size.width));
-  const height = Math.round(Math.max(1, size.height));
+  const width = roundToLayoutPx(Math.max(1, size.width));
+  const height = roundToLayoutPx(Math.max(1, size.height));
   element.style.setProperty("box-sizing", "border-box");
   element.style.setProperty("width", `${width}px`);
   element.style.setProperty("height", `${height}px`);
@@ -457,10 +457,26 @@ export function applyStudioBoxSize(
   applyStudioBoxSizeDimensions(element, size);
 }
 
+// The element's box before a resize draft first changed it; gone once the resize saves or is restored.
+const boxSizeDraftBases = new WeakMap<HTMLElement, { width: number; height: number }>();
+
+export function readStudioBoxSizeDraftBase(
+  element: HTMLElement,
+): { width: number; height: number } | null {
+  return boxSizeDraftBases.get(element) ?? null;
+}
+
+export function forgetStudioBoxSizeDraftBase(element: HTMLElement): void {
+  boxSizeDraftBases.delete(element);
+}
+
 export function applyStudioBoxSizeDraft(
   element: HTMLElement,
   size: { width: number; height: number },
 ): void {
+  if (!boxSizeDraftBases.has(element)) {
+    boxSizeDraftBases.set(element, { width: element.offsetWidth, height: element.offsetHeight });
+  }
   promoteInlineForTransform(element);
   applyStudioBoxSizeDimensions(element, size);
 }
@@ -509,7 +525,7 @@ function writeStudioRotationVars(
 ): void {
   prepareStudioRotationBase(element, options.updateBase ?? true);
   element.setAttribute(STUDIO_ROTATION_ATTR, "true");
-  element.style.setProperty(STUDIO_ROTATION_PROP, `${roundRotationAngle(rotation.angle)}deg`);
+  element.style.setProperty(STUDIO_ROTATION_PROP, `${roundTo3(rotation.angle)}deg`);
   element.style.setProperty("transform-origin", STUDIO_ROTATION_TRANSFORM_ORIGIN);
 }
 
@@ -529,6 +545,6 @@ export function applyStudioRotationDraft(element: HTMLElement, rotation: { angle
   element.setAttribute(STUDIO_ROTATION_DRAFT_ATTR, "true");
   element.style.setProperty(
     "rotate",
-    composeStudioRotationValue(element, `${roundRotationAngle(rotation.angle)}deg`),
+    composeStudioRotationValue(element, `${roundTo3(rotation.angle)}deg`),
   );
 }

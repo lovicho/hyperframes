@@ -31,7 +31,7 @@ import { commitWholePropertyOffset } from "./gsapWholePropertyOffsetCommit";
 import { commitGsapPositionFromDrag } from "./gsapDragPositionCommit";
 import { resolveTweenStart, resolveTweenDuration } from "../utils/globalTimeCompiler";
 import { isInstantHold, selectorFromSelection, writeTargetSelector } from "./gsapShared";
-import { roundTo3 } from "../utils/rounding";
+import { roundTo3, roundToLayoutPx } from "../utils/rounding";
 import { resolveGroupTween } from "./gsapRuntimeBridge";
 import { logResize } from "../utils/resizeDebug";
 import { animationWritesAnyProperty, type GsapEditOutcome } from "./gsapEditOutcome";
@@ -287,8 +287,8 @@ export async function tryGsapResizeIntercept(
     }
   } else {
     resizeProps = {
-      width: Math.round(size.width),
-      height: Math.round(size.height),
+      width: roundToLayoutPx(size.width),
+      height: roundToLayoutPx(size.height),
     };
   }
   // Finalize a scale-route commit: tear down the gesture's inline width/height
@@ -358,8 +358,8 @@ export async function tryGsapResizeIntercept(
     // persisted file agree exactly (commitStaticGsapPosition composes the same
     // rounded value from this delta).
     const corrected = {
-      x: Math.round(base.x + residual.x),
-      y: Math.round(base.y + residual.y),
+      x: roundTo3(base.x + residual.x),
+      y: roundTo3(base.y + residual.y),
     };
     logResize("scale-finalize", {
       dropPoint: scaleDraftDropPoint,

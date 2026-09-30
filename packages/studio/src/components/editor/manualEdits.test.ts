@@ -146,6 +146,20 @@ describe("studio manual edits", () => {
     expect(card.style.getPropertyValue("rotate")).toBe(`var(${STUDIO_ROTATION_PROP}, 0deg)`);
   });
 
+  it("keeps sub-pixel offsets, and box sizes on whole px so GSAP reads a -50% centring exactly", () => {
+    const document = createDocument(`<div id="card" style="width: 160px; height: 90px"></div>`);
+    const card = document.getElementById("card") as HTMLElement;
+    mockBoundingRect(card, 160, 90);
+
+    applyStudioPathOffsetDraft(card, { x: 14.25, y: -8.5 });
+    applyStudioBoxSizeDraft(card, { width: 240.4, height: 135.6 });
+
+    expect(card.style.getPropertyValue(STUDIO_OFFSET_X_PROP)).toBe("14.25px");
+    expect(card.style.getPropertyValue(STUDIO_OFFSET_Y_PROP)).toBe("-8.5px");
+    expect(card.style.getPropertyValue("width")).toBe("240px");
+    expect(card.style.getPropertyValue("height")).toBe("136px");
+  });
+
   it("applies box sizes through CSS dimensions and flex sizing overrides", () => {
     const document = createDocument(`
       <div style="display: flex; flex-direction: row">
@@ -188,24 +202,24 @@ describe("studio manual edits", () => {
     );
     const card = document.getElementById("card") as HTMLElement;
 
-    applyStudioRotation(card, { angle: 24.24 });
+    applyStudioRotation(card, { angle: 24.2468 });
 
-    expect(readStudioRotation(card)).toEqual({ angle: 24.2 });
-    expect(card.style.getPropertyValue(STUDIO_ROTATION_PROP)).toBe("24.2deg");
+    expect(readStudioRotation(card)).toEqual({ angle: 24.247 });
+    expect(card.style.getPropertyValue(STUDIO_ROTATION_PROP)).toBe("24.247deg");
     expect(card.style.getPropertyValue("rotate")).toContain("8deg");
     expect(card.style.getPropertyValue("rotate")).toContain(STUDIO_ROTATION_PROP);
     expect(card.style.getPropertyValue("transform-origin")).toBe("center center");
 
-    applyStudioRotationDraft(card, { angle: -12.26 });
-    expect(readStudioRotation(card)).toEqual({ angle: -12.3 });
-    expect(card.style.getPropertyValue("rotate")).toBe("calc(8deg + -12.3deg)");
+    applyStudioRotationDraft(card, { angle: -12.2604 });
+    expect(readStudioRotation(card)).toEqual({ angle: -12.26 });
+    expect(card.style.getPropertyValue("rotate")).toBe("calc(8deg + -12.26deg)");
     expect(card.style.getPropertyValue("transform-origin")).toBe("center center");
 
     const snapshot = captureStudioRotation(card);
     applyStudioRotationDraft(card, { angle: 45 });
     restoreStudioRotation(card, snapshot);
-    expect(readStudioRotation(card)).toEqual({ angle: -12.3 });
-    expect(card.style.getPropertyValue("rotate")).toBe("calc(8deg + -12.3deg)");
+    expect(readStudioRotation(card)).toEqual({ angle: -12.26 });
+    expect(card.style.getPropertyValue("rotate")).toBe("calc(8deg + -12.26deg)");
     expect(card.style.getPropertyValue("transform-origin")).toBe("center center");
   });
 

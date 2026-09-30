@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.96",
+  "version": "0.8.98",
   "description": "",
   "repository": {
     "type": "git",
@@ -57,6 +57,12 @@
       "node": "./dist/safePath.js",
       "import": "./src/safePath.ts",
       "types": "./src/safePath.ts"
+    },
+    "./atomic-file": {
+      "bun": "./src/atomicFile.ts",
+      "node": "./dist/atomicFile.js",
+      "import": "./src/atomicFile.ts",
+      "types": "./src/atomicFile.ts"
     },
     "./asset-paths": {
       "bun": "./src/compiler/rewriteSubCompPaths.ts",
@@ -491,6 +497,10 @@
       "./safe-path": {
         "import": "./dist/safePath.js",
         "types": "./dist/safePath.d.ts"
+      },
+      "./atomic-file": {
+        "import": "./dist/atomicFile.js",
+        "types": "./dist/atomicFile.d.ts"
       },
       "./asset-paths": {
         "import": "./dist/compiler/rewriteSubCompPaths.js",

@@ -29,6 +29,7 @@ import {
   setOwnText,
   getSiblingIndex,
   getGsapScript,
+  findGsapScriptElement,
   setGsapScript,
   getStyleSheet,
   setStyleSheet,
@@ -77,6 +78,9 @@ import {
   updateArcSegmentInScript,
   removeArcPathFromScript,
   unrollDynamicAnimations,
+  clipQueryRoot,
+  clipTweenMatcher,
+  hasExplicitTime,
 } from "@hyperframes/core/gsap-writer-acorn";
 import { deriveKeyframeBackfillDefaults } from "./keyframeBackfill.js";
 import {
@@ -457,6 +461,8 @@ function handleSetTiming(
   // we avoid re-fetching the script element on every iteration.
   const origScript = getGsapScript(parsed.document);
   const parsedGsap = origScript ? parseGsapScriptAcornForWrite(origScript) : null;
+  const scriptElement = findGsapScriptElement(parsed.document);
+  const clipRoot = scriptElement ? clipQueryRoot(scriptElement) : parsed.document;
   let currentScript = origScript;
 
   for (const id of ids) {
@@ -541,12 +547,17 @@ function handleSetTiming(
     // Sync GSAP tween positions: the GSAP script is the source of truth at play time —
     // the timeline rebuilds from it on every seek. Without this, DOM attribute edits
     // have zero playback effect; the script's position/duration silently overrides them.
-    // Match against BOTH the element's data-hf-id (the canonical form) AND its DOM
-    // id: the Studio GSAP panel / ensureElementAddressable author tweens as
-    // `#domId`, which selectorMatchesId(hfId) never matched — so moving/resizing
-    // those clips left their tweens unsynced.
-    const matchHfId = el.getAttribute("data-hf-id") ?? id;
-    const matchDomId = el.getAttribute("id");
+    const hfId = el.getAttribute("data-hf-id") ?? id;
+    const domId = el.getAttribute("id");
+    const carries = clipTweenMatcher(
+      [
+        `[data-hf-id="${hfId}"]`,
+        `[data-hf-id='${hfId}']`,
+        `#${hfId}`,
+        ...(domId ? [`#${domId}`] : []),
+      ],
+      clipRoot,
+    );
     if (parsedGsap && currentScript) {
       // A missing data-start means an implicit start of 0 (matching the server
       // shiftGsapPositions path); a malformed attr parses to NaN. Sanitize to a
@@ -566,10 +577,7 @@ function handleSetTiming(
           : 1;
       const remapStart = startChanged && newStart !== null ? newStart : oldStartNum;
       for (const { id: animId, animation } of parsedGsap.located) {
-        const matches =
-          selectorMatchesId(animation.targetSelector, matchHfId) ||
-          (matchDomId !== null && selectorMatchesId(animation.targetSelector, matchDomId));
-        if (!matches) continue;
+        if (!carries(animation)) continue;
         // Skip tweens whose position is a label or relative string ("+=0.5",
         // "<", ">"): relative positions already track their neighbours, and a
         // string position can't be safely shifted by the clip delta here.
@@ -581,7 +589,7 @@ function handleSetTiming(
         // explicit position arg → parsed as implicitPosition): the writer would
         // APPEND a position arg, collapsing the stagger onto one point. Duration
         // still scales below.
-        if ((startChanged || durChanged) && animation.implicitPosition !== true) {
+        if ((startChanged || durChanged) && hasExplicitTime(animation)) {
           const shifted = remapStart + (animation.position - oldStartNum) * ratio;
           updates.position = Math.max(0, Math.round(shifted * 1000) / 1000);
         }

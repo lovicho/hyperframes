@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/studio",
-  "version": "0.8.96",
+  "version": "0.8.98",
   "description": "",
   "repository": {
     "type": "git",
@@ -75,6 +75,7 @@
     "build": "vite build && tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:edit-accuracy": "bun tests/e2e/edit-accuracy/run.mjs",
     "test:webmcp-edit-loop": "node tests/e2e/webmcp-edit-loop.mjs",
     "test:timeline-virtualization": "TIMELINE_ROW_VIRTUALIZATION=on TIMELINE_ELEMENT_COUNT=50000 node tests/e2e/timeline-virtualization.mjs",
     "test:watch": "vitest",
@@ -102,7 +103,7 @@
     "@hyperframes/studio-server": "workspace:*",
     "@mcp-b/global": "^5.0.1",
     "@phosphor-icons/react": "^2.1.10",
-    "@tanstack/react-virtual": "^3.14.6",
+    "@tanstack/react-virtual": "^3.14.13",
     "bpm-detective": "^2.0.5",
     "cn": "0.2.4",
     "dockview-react": "8.3.1",
