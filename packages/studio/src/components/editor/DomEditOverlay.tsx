@@ -54,7 +54,8 @@ export interface DomEditOverlayProps {
   groupSelections?: DomEditSelection[];
   hoverSelection: DomEditSelection | null;
   allowCanvasMovement?: boolean;
-  /** "host": no hover, marquee or box re-select; Enter with nothing focused still opens text. */
+  allowBodyDrag?: boolean;
+  /** "host": no hover, marquee, box re-select, or body drag if allowBodyDrag is false; Enter still opens text. */
   canvasInput?: "overlay" | "host";
   onTextEditingChange?: (editing: boolean) => void;
   /** A click on a single selection's box, in either mode; the event may be the pointerup. */
@@ -128,6 +129,7 @@ export const DomEditOverlay = memo(function DomEditOverlay({
   groupSelections = [],
   hoverSelection,
   allowCanvasMovement = true,
+  allowBodyDrag = true,
   canvasInput = "overlay",
   onTextEditingChange,
   onSelectionBoxClick,
@@ -148,6 +150,7 @@ export const DomEditOverlay = memo(function DomEditOverlay({
 }: DomEditOverlayProps) {
   const readOnly = usePreviewReadOnly();
   const hostInput = canvasInput === "host";
+  const bodyDrag = allowBodyDrag || !hostInput;
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const onMarqueeSelectRef = useRef(onMarqueeSelect);
@@ -503,6 +506,7 @@ export const DomEditOverlay = memo(function DomEditOverlay({
           groupOverlayItems={groupOverlayItems}
           groupBounds={groupBounds}
           allowCanvasMovement={allowCanvasMovement}
+          allowBodyDrag={bodyDrag}
           groupCanMove={groupCanMove}
           gestures={gestures}
           onBoxMouseDown={suppressBoxMouseDown}
@@ -515,6 +519,7 @@ export const DomEditOverlay = memo(function DomEditOverlay({
           selection={selection}
           overlayRect={overlayRect}
           allowCanvasMovement={allowCanvasMovement}
+          allowBodyDrag={bodyDrag}
           cropOutlineInsetPx={cropOutlineInsetPx ?? undefined}
           boxRef={boxRef}
           boxChromeClass={boxChromeClass}

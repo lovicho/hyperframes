@@ -329,6 +329,13 @@ function pageAnimationsForOnePass(): () => Animation[] {
   return () => (list ??= document.getAnimations());
 }
 
+// A `<video>` joins only for a gain `el.volume` cannot express: capture is a one-way door.
+const joinsWebAudio = (el: Element): el is HTMLMediaElement =>
+  isAudioElement(el) || (isVideoElement(el) && Number.parseFloat(el.dataset.volume ?? "") > 1);
+const WEB_AUDIO_MEDIA = "audio[data-start], video[data-start]";
+const webAudioMediaIn = (root: ParentNode): HTMLMediaElement[] =>
+  Array.from(root.querySelectorAll(WEB_AUDIO_MEDIA)).filter(joinsWebAudio);
+
 export function initSandboxRuntimeModular(): void {
   const state = createRuntimeState();
   authoredMediaObserver?.disconnect();
@@ -2379,12 +2386,10 @@ export function initSandboxRuntimeModular(): void {
     }
   };
 
-  // Only `<audio>` reaches `createMediaElementSource` (see
-  // `scheduleWebAudioForActiveClips`, which queries `audio[data-start]`), so a
-  // cross-origin `<video>` is not affected and must not be reported as if it
-  // were.
+  // Only media `joinsWebAudio` admits when a play is scheduled reaches
+  // `createMediaElementSource`, so no other cross-origin media may be reported as if it did.
   const reportWebAudioRoute = (mediaEl: HTMLMediaElement) => {
-    if (!isAudioElement(mediaEl)) return;
+    if (!joinsWebAudio(mediaEl)) return;
     // Before resource selection settles, the verdict is built from `<source>`
     // children the browser might still pass over — good enough for the
     // schedule path's conservative withhold, not good enough to put in front
@@ -2571,8 +2576,12 @@ export function initSandboxRuntimeModular(): void {
   // started a second buffer source for every in-window clip on top of the ones
   // still sounding: the whole mix audibly doubled, slightly out of phase.
   let hiddenAudioDirty = false;
+  const affectsAudio = (el: Element): boolean =>
+    isMediaElement(el) &&
+    el.hasAttribute("data-start") &&
+    (joinsWebAudio(el) || webAudio.routesElement(el));
   const nodeAffectsAudio = (node: HTMLElement): boolean =>
-    node.matches("audio[data-start]") || node.querySelector("audio[data-start]") !== null;
+    affectsAudio(node) || Array.from(node.querySelectorAll(WEB_AUDIO_MEDIA)).some(affectsAudio);
 
   // An `<hf-audio-group>` carries no `data-start`, so it is never among
   // `visibilityNodes` above — group mute needs its own small diff pass.
@@ -2796,8 +2805,8 @@ export function initSandboxRuntimeModular(): void {
     const groupNeedsCapture = syncAudioGroupMute(currentTime);
     if ((hiddenAudioDirty || groupNeedsCapture) && clock.isPlaying()) {
       webAudio.stopAll();
-      for (const el of document.querySelectorAll("audio[data-start]")) {
-        if (isMediaElement(el) && isSilencedByHidden(el)) el.volume = 0;
+      for (const el of webAudioMediaIn(document)) {
+        if (isSilencedByHidden(el)) el.volume = 0;
       }
       scheduleWebAudioForActiveClips();
     }
@@ -4765,9 +4774,7 @@ export function initSandboxRuntimeModular(): void {
   const scheduleWebAudioForActiveClips = () => {
     if (state.nativeMediaSyncDisabled || state.webAudioMediaDisabled) return;
     const gen = webAudio.startGeneration();
-    const audioEls = document.querySelectorAll("audio[data-start]");
-    for (const rawEl of audioEls) {
-      if (!isMediaElement(rawEl) || !rawEl.isConnected) continue;
+    for (const rawEl of webAudioMediaIn(document)) {
       if (isSilencedByHidden(rawEl)) continue;
       const compStart = resolveAbsoluteMediaStartSeconds(rawEl);
       if (!Number.isFinite(compStart)) continue;
@@ -4814,7 +4821,9 @@ export function initSandboxRuntimeModular(): void {
           : Promise.resolve(null);
       void capture.then((scheduled) => {
         const replacedByNewerPass = gen !== webAudio.currentGeneration();
-        if (scheduled || !clock.isPlaying() || replacedByNewerPass) return;
+        // A video's picture must keep playing from the element, so it has no decode fallback.
+        if (scheduled || !isAudioElement(rawEl) || !clock.isPlaying() || replacedByNewerPass)
+          return;
         const effectiveRate = state.playbackRate * readElementPlaybackRate(rawEl);
         // Deliberately the FX/automation pair and NOT
         // `nativeUnexpressibleProcessing()`, which this route's diagnostic uses.

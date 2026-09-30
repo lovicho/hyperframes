@@ -449,6 +449,62 @@ describe("GSAP-element drag — dot-a flies regressions", () => {
   });
 });
 
+describe("a stylesheet translate after a committed GSAP drag", () => {
+  function draggedTitle(css: string, oldOffsetChannel = false, withGsap = true) {
+    const window = new Window();
+    const style = window.document.createElement("style");
+    style.textContent = css;
+    window.document.head.append(style);
+    const element = window.document.createElement("h1");
+    element.id = "title";
+    if (oldOffsetChannel) {
+      element.setAttribute("data-hf-studio-path-offset", "true");
+      element.style.setProperty(STUDIO_OFFSET_X_PROP, "30px");
+      element.style.setProperty(STUDIO_OFFSET_Y_PROP, "0px");
+      element.style.translate = `var(${STUDIO_OFFSET_X_PROP}, 0px) var(${STUDIO_OFFSET_Y_PROP}, 0px)`;
+    }
+    window.document.body.append(element);
+    element.getBoundingClientRect = () => new window.DOMRect(10, 20, 100, 50);
+    (window as unknown as { gsap: unknown }).gsap = withGsap && {
+      set: (el: HTMLElement, vars: { x?: number; y?: number }) =>
+        el.style.setProperty("transform", `translate(${vars.x ?? 0}px, ${vars.y ?? 0}px)`),
+      getProperty: () => 0,
+    };
+    const result = createManualOffsetDragMember({
+      key: "title",
+      selection: { element } as never,
+      element,
+      rect: { left: 10, top: 20, width: 100, height: 50, editScaleX: 1, editScaleY: 1 },
+    });
+    if (!result.ok) throw new Error("member not created");
+    applyManualOffsetDragCommit(result.member, 40, 30);
+    if (withGsap) expect(element.style.getPropertyValue("translate")).toBe("none");
+    endManualOffsetDragMembers([result.member]);
+    return element;
+  }
+
+  it("stays masked, so it is not applied on top of the committed transform", () => {
+    expect(
+      draggedTitle("#title { translate: 0 -200px; }").style.getPropertyValue("translate"),
+    ).toBe("none");
+  });
+
+  it("stays masked for an element still on the old offset channel", () => {
+    const element = draggedTitle("#title { translate: 0 -200px; }", true);
+    expect(element.hasAttribute("data-hf-studio-path-offset")).toBe(false);
+    expect(element.style.getPropertyValue("translate")).toBe("none");
+  });
+
+  it("is not masked when GSAP does not own the position", () => {
+    const element = draggedTitle("#title { translate: 0 -200px; }", true, false);
+    expect(element.style.getPropertyValue("translate")).toContain(STUDIO_OFFSET_X_PROP);
+  });
+
+  it("is not left behind when nothing sits under the draft's mask", () => {
+    expect(draggedTitle("").style.getPropertyValue("translate")).toBe("");
+  });
+});
+
 describe("resumeGsapTimelines", () => {
   it("unpauses exactly the timelines the drag start paused, then re-seeks the player", () => {
     const window = new Window();

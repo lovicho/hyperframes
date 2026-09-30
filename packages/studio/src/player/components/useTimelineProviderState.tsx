@@ -65,7 +65,8 @@ export function useTimelineProviderState({
   theme: themeOverrides,
   showAudioEffects = true,
   showKeyframes = true,
-  sessionEpoch = 0,
+  trackPadding,
+  sessionEpoch: sessionEpochProp,
   previewIframeRef,
   onZIndexReorder,
 }: TimelineProps = {}): TimelineContextValue {
@@ -107,6 +108,7 @@ export function useTimelineProviderState({
   const currentTime = usePlayerStore((s) => s.currentTime);
   const beatDragging = usePlayerStore((s) => s.beatDragging);
   const timelineSessionEpoch = usePlayerStore((s) => s.timelineSessionEpoch);
+  const sessionEpoch = sessionEpochProp ?? timelineSessionEpoch;
   const setFocusedEaseSegment = usePlayerStore((s) => s.setFocusedEaseSegment);
   const { zoomMode, manualZoomPercent, setZoomMode, setManualZoomPercent } = useTimelineZoom();
   const playheadRef = useRef<HTMLDivElement>(null);
@@ -143,6 +145,7 @@ export function useTimelineProviderState({
     gsapAnimations,
     selectedElementId,
     selectedElementIds,
+    trackPadding,
   );
   const timelineElementsRef = useRef(timelineElements);
   timelineElementsRef.current = timelineElements; // oxlint-disable-line react/refs -- event handlers read the latest elements
@@ -431,6 +434,7 @@ export function useTimelineProviderState({
     marqueeRect,
     laneGapStrips,
     dropPreview: assetDrop.dropPreview,
+    acceptsMediaDrop: !!(onFileDrop || onAssetDrop),
     theme,
     showAudioEffects,
     displayTrackOrder: displayLayout.displayTrackOrder,

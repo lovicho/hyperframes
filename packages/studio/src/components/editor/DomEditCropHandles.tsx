@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { DomEditSelection } from "./domEditing";
-import type { OverlayRect } from "./domEditOverlayGeometry";
+import { type OverlayRect, RESIZE_HANDLE_HIT_PX } from "./domEditOverlayGeometry";
 import {
   type CropEdge,
   cropRectFromInsets,
@@ -18,7 +18,7 @@ interface CropGestureState {
   startX: number;
   startY: number;
   startInsets: ClipPathInsetSides;
-  didMove: boolean;
+  insets: ClipPathInsetSides;
   /** Element frame captured at gesture start: pointer deltas rotate into it. */
   angleDeg: number;
   scaleX: number;
@@ -37,46 +37,52 @@ interface DomEditCropHandlesProps {
 // and centered inside the strip.
 const EDGE_HIT_THICKNESS = 12;
 const EDGE_HIT_LENGTH = 32;
+const EDGE_PILL_LENGTH = 24;
+const REPOSITION_HANDLE_PX = 22;
 
-/** Place an edge handle's hit strip just OUTSIDE the given crop edge
- *  (translate pushes it fully past the boundary). Keeps the element body free
- *  for moving. Corners stay free for the selection's own resize handles. */
-function edgeHandlePlacement(
-  edge: CropEdge,
-  rect: { left: number; top: number; width: number; height: number },
-) {
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  if (edge === "top") {
-    return { left: cx, top: rect.top, transform: "translate(-50%, -100%)" };
+type Rect = { left: number; top: number; width: number; height: number };
+
+/** An edge handle's hit strip, just OUTSIDE the crop edge so the body stays free
+ *  for moving, and short of the corner squares the resize dots own, with its
+ *  cursor and pill. Null when the edge is too short to leave any room. */
+function edgeHandleLayout(edge: CropEdge, rect: Rect) {
+  const vertical = edge === "left" || edge === "right";
+  const length = Math.min(
+    EDGE_HIT_LENGTH,
+    (vertical ? rect.height : rect.width) - RESIZE_HANDLE_HIT_PX,
+  );
+  if (length <= 0) return null;
+  const pill = Math.min(EDGE_PILL_LENGTH, length);
+  if (vertical) {
+    return {
+      hit: {
+        left: edge === "left" ? rect.left - EDGE_HIT_THICKNESS : rect.left + rect.width,
+        top: rect.top + (rect.height - length) / 2,
+        width: EDGE_HIT_THICKNESS,
+        height: length,
+      },
+      cursor: "ew-resize",
+      pill: { width: 4, height: pill },
+    };
   }
-  if (edge === "bottom") {
-    return { left: cx, top: rect.top + rect.height, transform: "translate(-50%, 0)" };
-  }
-  if (edge === "left") {
-    return { left: rect.left, top: cy, transform: "translate(-100%, -50%)" };
-  }
-  return { left: rect.left + rect.width, top: cy, transform: "translate(0, -50%)" };
+  return {
+    hit: {
+      left: rect.left + (rect.width - length) / 2,
+      top: edge === "top" ? rect.top - EDGE_HIT_THICKNESS : rect.top + rect.height,
+      width: length,
+      height: EDGE_HIT_THICKNESS,
+    },
+    cursor: "ns-resize",
+    pill: { width: pill, height: 4 },
+  };
+}
+
+/** The reposition handle's size: shrunk until its box clears the corner squares. */
+function repositionHandleSize(rect: Rect): number {
+  return Math.min(REPOSITION_HANDLE_PX, Math.max(rect.width, rect.height) - RESIZE_HANDLE_HIT_PX);
 }
 
 const EDGES: CropEdge[] = ["top", "right", "bottom", "left"];
-
-/** Hit-strip + pill dimensions for an edge handle, keyed on its orientation. */
-function edgeHandleMetrics(vertical: boolean): {
-  hitWidth: number;
-  hitHeight: number;
-  cursor: string;
-  pillWidth: number;
-  pillHeight: number;
-} {
-  return {
-    hitWidth: vertical ? EDGE_HIT_THICKNESS : EDGE_HIT_LENGTH,
-    hitHeight: vertical ? EDGE_HIT_LENGTH : EDGE_HIT_THICKNESS,
-    cursor: vertical ? "ew-resize" : "ns-resize",
-    pillWidth: vertical ? 4 : 24,
-    pillHeight: vertical ? 24 : 4,
-  };
-}
 
 /**
  * Always-on crop, integrated with the selection (no crop "mode"): while a
@@ -167,6 +173,7 @@ export function DomEditCropHandles({
     frame.scaleX,
     frame.scaleY,
   );
+  const repositionSize = repositionHandleSize(cropRect);
 
   const startCropGesture = (edge: CropEdge | "move", event: ReactPointerEvent<HTMLElement>) => {
     if (!onStyleCommit) return;
@@ -179,7 +186,7 @@ export function DomEditCropHandles({
       startX: event.clientX,
       startY: event.clientY,
       startInsets: state.insets,
-      didMove: false,
+      insets: state.insets,
       angleDeg: frame.angleDeg,
       scaleX: frame.scaleX,
       scaleY: frame.scaleY,
@@ -210,18 +217,23 @@ export function DomEditCropHandles({
       gesture.edge === "move"
         ? resolveCropInsetFromMoveDrag(drag)
         : resolveCropInsetFromEdgeDrag({ ...drag, edge: gesture.edge, width, height });
-    gesture.didMove = true;
+    gesture.insets = nextInsets;
     setState((prev) => ({ ...prev, insets: nextInsets }));
   };
 
-  const finishCropGesture = (event: ReactPointerEvent<HTMLElement>) => {
+  const endCropGesture = (event: ReactPointerEvent<HTMLElement>) => {
     const gesture = gestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (!gesture || gesture.pointerId !== event.pointerId) return null;
     event.preventDefault();
     event.stopPropagation();
     gestureRef.current = null;
     setDragging(false);
-    if (!gesture.didMove) return;
+    return gesture;
+  };
+
+  const finishCropGesture = (event: ReactPointerEvent<HTMLElement>) => {
+    const gesture = endCropGesture(event);
+    if (!gesture) return;
     // Commit to the file. The commit path re-applies the value to the live
     // element synchronously, so re-lift in the same turn to keep showing the full
     // content + dim while selected. Re-lift again on rejection so a failed commit
@@ -230,12 +242,10 @@ export function DomEditCropHandles({
     const reLift = () => {
       if (liftedRef.current) el.style.setProperty("clip-path", "none");
     };
-    const committedValue = buildInsetClipPathSides(state.insets, state.radius);
-    const cropped =
-      state.insets.top > 0 ||
-      state.insets.right > 0 ||
-      state.insets.bottom > 0 ||
-      state.insets.left > 0;
+    const { insets } = gesture;
+    const committedValue = buildInsetClipPathSides(insets, state.radius);
+    if (committedValue === buildInsetClipPathSides(gesture.startInsets, state.radius)) return;
+    const cropped = insets.top > 0 || insets.right > 0 || insets.bottom > 0 || insets.left > 0;
     const commit = onStyleCommit?.("clip-path", committedValue);
     // handleDomStyleCommit applies the persisted value to the live element
     // synchronously before its first await. Restore the crop-mode lift in this
@@ -250,12 +260,8 @@ export function DomEditCropHandles({
   };
 
   const cancelCropGesture = (event: ReactPointerEvent<HTMLElement>) => {
-    const gesture = gestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    event.stopPropagation();
-    gestureRef.current = null;
-    setDragging(false);
+    const gesture = endCropGesture(event);
+    if (!gesture) return;
     // Clip stays lifted; the dim follows the reset insets.
     setState((prev) => ({ ...prev, insets: gesture.startInsets }));
   };
@@ -317,7 +323,7 @@ export function DomEditCropHandles({
       {/* Reposition handle — a center circle shown only once cropped. Drag it to
           pan the crop window (which part of the element shows) without resizing
           the crop. It's a small, discrete target, so a body drag still MOVES. */}
-      {hasCrop && (
+      {hasCrop && repositionSize > 0 && (
         <button
           type="button"
           aria-label="Reposition crop"
@@ -325,11 +331,10 @@ export function DomEditCropHandles({
           data-dom-edit-crop-handle="true"
           className="pointer-events-auto absolute rounded-full border-2 border-studio-accent bg-studio-accent/30 shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
           style={{
-            left: cropRect.left + cropRect.width / 2,
-            top: cropRect.top + cropRect.height / 2,
-            width: 22,
-            height: 22,
-            transform: "translate(-50%, -50%)",
+            left: cropRect.left + (cropRect.width - repositionSize) / 2,
+            top: cropRect.top + (cropRect.height - repositionSize) / 2,
+            width: repositionSize,
+            height: repositionSize,
             cursor: "move",
             touchAction: "none",
           }}
@@ -340,16 +345,15 @@ export function DomEditCropHandles({
         />
       )}
       {/* Edge handles — drag a side to crop it. Positioned just OUTSIDE the crop
-          edge (via edgeHandlePlacement) so they never overlap the element body:
+          edge (via edgeHandleLayout) so they never overlap the element body:
           dragging the body always MOVES, only a handle crops. The pill is
           hover-revealed (or shown while dragging / once a crop exists) so the
           resting selection chrome stays uncluttered; the hit strip is always
           live, and the title names the affordance. */}
       {EDGES.map((edge) => {
-        const vertical = edge === "left" || edge === "right";
-        const place = edgeHandlePlacement(edge, cropRect);
+        const layout = edgeHandleLayout(edge, cropRect);
+        if (!layout) return null;
         const revealed = dragging || hasCrop || hotEdge === edge;
-        const m = edgeHandleMetrics(vertical);
         return (
           <button
             key={edge}
@@ -359,12 +363,8 @@ export function DomEditCropHandles({
             data-dom-edit-crop-handle="true"
             className="pointer-events-auto absolute flex items-center justify-center border-0 bg-transparent p-0"
             style={{
-              left: place.left,
-              top: place.top,
-              width: m.hitWidth,
-              height: m.hitHeight,
-              transform: place.transform,
-              cursor: m.cursor,
+              ...layout.hit,
+              cursor: layout.cursor,
               touchAction: "none",
             }}
             onPointerEnter={() => setHotEdge(edge)}
@@ -377,8 +377,7 @@ export function DomEditCropHandles({
             <span
               className="pointer-events-none rounded-full bg-studio-accent/90 shadow-[0_0_0_1px_rgba(0,0,0,0.4)] transition-opacity duration-100"
               style={{
-                width: m.pillWidth,
-                height: m.pillHeight,
+                ...layout.pill,
                 opacity: revealed ? 1 : 0,
               }}
             />
