@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Edit accuracy bench: real gestures in the built CLI Studio (build core, parsers, lint, studio-server first).
-// bun run --cwd packages/studio test:edit-accuracy -- --grid full|pr --jobs N [--shard i/n] [--filter re] [--lock path]
+// bun run --cwd packages/studio test:edit-accuracy -- --grid full|pr --jobs N [--shard i/n] [--filter re]
+//   [--lock path: the suite lock, taken per chunk] [--rerun: a confirmation run for the gate]
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import puppeteer from "puppeteer-core";
 import { resolveHeadlessShellPath } from "../../../../engine/src/index.ts";
 import { buildGrid, writeFixture } from "./grid.mjs";
 import { killServers, runCase, startServer, stopServer } from "./case.mjs";
+import { runSequence } from "./sequences.mjs";
 import { METRICS, score, writeReport } from "./report.mjs";
 import { renderBox } from "./render.mjs";
 import { aabb, boxDistance } from "./geometry.mjs";
@@ -29,6 +31,8 @@ const { values: opt } = parseArgs({
     port: { type: "string", default: "5800" },
     cli: { type: "string", default: join(REPO, "packages/cli/dist/cli.js") },
     lock: { type: "string" },
+    // Marks a confirmation run of cases that regressed, so the gate keeps it out of the banked baseline.
+    rerun: { type: "boolean", default: false },
   },
 });
 const [shard, shards] = opt.shard.split("/").map(Number);
@@ -90,6 +94,7 @@ async function withRender(dir, decoder, { reloaded, ...measured }, evidence) {
   };
 }
 
+// fallow-ignore-next-line complexity
 async function runOne(spec, browser, decoder, port) {
   const started = Date.now();
   const root = mkdtempSync(join(tmpdir(), "hf-edit-accuracy-"));
@@ -102,7 +107,7 @@ async function runOne(spec, browser, decoder, port) {
   let server;
   try {
     server = await startServer(opt.cli, dir, port, log, join(root, "home"));
-    const measured = await runCase({
+    const measured = await (spec.steps ? runSequence : runCase)({
       browser,
       spec,
       dir,
@@ -215,6 +220,7 @@ const meta = {
   studio,
   build,
   bench,
+  rerun: opt.rerun,
   grid:
     opt.grid +
     (opt.filter ? ` filter ${opt.filter}` : "") +

@@ -67,7 +67,9 @@ const itemBase = cn(
   "data-[disabled]:pointer-events-none data-[disabled]:opacity-40",
 );
 
-const itemDanger = cn("text-danger data-[highlighted]:bg-danger/15 data-[highlighted]:text-danger");
+const itemDanger = cn(
+  "text-danger-ink data-[highlighted]:bg-danger/15 data-[highlighted]:text-danger-ink",
+);
 
 export type MenuItemTone = "default" | "danger";
 
@@ -229,7 +231,7 @@ export function MenuCheckboxItem({
   return (
     <BaseMenu.CheckboxItem className={cn(itemBase, className)} {...props}>
       <span className="truncate">{children}</span>
-      <span className="flex size-3 shrink-0 items-center justify-center text-accent">
+      <span className="flex size-3 shrink-0 items-center justify-center text-accent-ink">
         <BaseMenu.CheckboxItemIndicator>✓</BaseMenu.CheckboxItemIndicator>
       </span>
     </BaseMenu.CheckboxItem>

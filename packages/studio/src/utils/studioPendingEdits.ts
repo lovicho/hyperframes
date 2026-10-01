@@ -27,6 +27,39 @@ function inspectDrainFailures(results: PromiseSettledResult<unknown>[]): {
   return { firstFailure };
 }
 
+function focusedField(): HTMLElement | null {
+  const active = document.activeElement;
+  return active instanceof HTMLElement &&
+    active.matches('input, textarea, select, [contenteditable="true"], [role="textbox"]')
+    ? active
+    : null;
+}
+
+export function hasStudioPendingEdits(): boolean {
+  return pendingEditPromises.size > 0 || focusedField() !== null;
+}
+
+export function isStudioEditSaving(): boolean {
+  return pendingEditPromises.size > 0;
+}
+
+export function afterStudioPendingEdits(run: () => void): () => void {
+  let waiting = true;
+  const check = () => {
+    if (!waiting) return;
+    if (isStudioEditSaving()) {
+      void Promise.allSettled([...pendingEditPromises]).then(check);
+      return;
+    }
+    waiting = false;
+    run();
+  };
+  check();
+  return () => {
+    waiting = false;
+  };
+}
+
 export function trackStudioPendingEdit(
   result: Promise<unknown> | unknown,
 ): Promise<unknown> | undefined {
@@ -40,12 +73,19 @@ export function trackStudioPendingEdit(
   return promise;
 }
 
+export function trackedStudioEdit<Args extends unknown[], R>(
+  edit: (...args: Args) => R,
+): (...args: Args) => R {
+  return (...args) => {
+    const result = edit(...args);
+    if (result instanceof Promise) trackStudioPendingEdit(result);
+    return result;
+  };
+}
+
 export async function flushStudioPendingEdits(): Promise<StudioPendingEditsDrainResult> {
-  const active = document.activeElement;
-  if (
-    active instanceof HTMLElement &&
-    active.matches('input, textarea, select, [contenteditable="true"], [role="textbox"]')
-  ) {
+  const active = focusedField();
+  if (active) {
     active.blur();
     // ponytail: Preserve synchronous/microtask blur commits, then cross one task boundary
     // so React effects triggered by the blur can register their flush listener.
@@ -56,15 +96,16 @@ export async function flushStudioPendingEdits(): Promise<StudioPendingEditsDrain
   window.dispatchEvent(
     new CustomEvent<StudioFlushPendingEditsDetail>(STUDIO_FLUSH_PENDING_EDITS_EVENT, { detail }),
   );
+  let conflict: StudioFileConflictError | undefined;
   let firstFailure: PromiseRejectedResult | undefined;
   while (detail.promises.length > 0 || pendingEditPromises.size > 0) {
     const promises = [...detail.promises, ...pendingEditPromises];
     detail.promises = [];
-    const results = await Promise.allSettled(promises);
-    const batchFailures = inspectDrainFailures(results);
-    if (batchFailures.conflict) return { status: "conflict", error: batchFailures.conflict };
+    const batchFailures = inspectDrainFailures(await Promise.allSettled(promises));
+    conflict ??= batchFailures.conflict;
     firstFailure ??= batchFailures.firstFailure;
   }
+  if (conflict) return { status: "conflict", error: conflict };
   return firstFailure ? { status: "failed", error: firstFailure.reason } : { status: "clean" };
 }
 

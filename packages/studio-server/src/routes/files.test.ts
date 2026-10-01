@@ -158,6 +158,7 @@ describe("registerFileRoutes", () => {
       path: "index.html",
       version: result.version,
       writeToken: "studio-insert-1",
+      from: fileContentVersion(before),
     });
 
     const committed = result.after;
@@ -428,6 +429,7 @@ describe("registerFileRoutes", () => {
       path: "image.png",
       version: payload.version,
       writeToken: "binary-write",
+      from: fileContentVersion(before),
     });
   });
 
@@ -541,6 +543,7 @@ describe("registerFileRoutes", () => {
       path: "index.html",
       version: payload.version,
       writeToken: "studio-write-1",
+      from: fileContentVersion("before"),
     });
     expect(payload.backupPath).toMatch(/^\.hyperframes\/backup\//);
     expect(readFileSync(join(projectDir, payload.backupPath!), "utf-8")).toBe("before");
@@ -734,6 +737,7 @@ describe("registerFileRoutes", () => {
       path: "index.html",
       version,
       writeToken: "studio-patch-1",
+      from: fileContentVersion('<div id="title">Before</div>'),
     });
   });
 
@@ -780,6 +784,7 @@ describe("registerFileRoutes", () => {
       path: "index.html",
       version,
       writeToken: "studio-layer-order-1",
+      from: fileContentVersion(original),
     });
     expect(readdirSync(join(projectDir, ".hyperframes", "backup"))).toHaveLength(1);
   });
@@ -884,6 +889,7 @@ describe("registerFileRoutes", () => {
         path: file.sourceFile,
         version,
         writeToken: "studio-group-drag-1",
+        from: fileContentVersion(`<div id="${file.sourceFile.replace(".html", "")}">Before</div>`),
       });
     }
   });
@@ -1105,6 +1111,7 @@ describe("registerFileRoutes", () => {
       path: "index.html",
       version: payload.files[0].version,
       writeToken: "cut-test",
+      from: fileContentVersion(before),
     });
   });
 
@@ -1712,6 +1719,49 @@ const tl = gsap.timeline({ paused: true });
     const declaration = html.indexOf("const tl = gsap.timeline");
     expect(html.indexOf('gsap.set("#card"')).toBeLessThan(declaration);
     expect(html.indexOf('tl.set("#card"')).toBeGreaterThan(declaration);
+  });
+
+  async function addFirstAnimation(sub: string): Promise<string> {
+    const projectDir = createProjectDir();
+    const app = new Hono();
+    registerFileRoutes(app, createAdapter(projectDir));
+    mkdirSync(join(projectDir, "compositions"), { recursive: true });
+    writeHtml(projectDir, "compositions/sub.html", sub);
+    const res = await app.request(
+      "http://localhost/projects/demo/gsap-mutations/compositions/sub.html",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "add",
+          targetSelector: "#card",
+          method: "to",
+          position: 0,
+          properties: { opacity: 0 },
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    return readFileSync(join(projectDir, "compositions/sub.html"), "utf-8");
+  }
+
+  it("a first animation in a sub-composition file lands inside its template", async () => {
+    const html = await addFirstAnimation(
+      '<template id="sub-template"><div data-composition-id="sub"><div id="card"></div></div></template>\n',
+    );
+    const close = html.indexOf("</template>");
+    expect(html.indexOf('window.__timelines["sub"]')).toBeGreaterThan(-1);
+    expect(html.lastIndexOf("<script")).toBeLessThan(close);
+    expect(html.slice(close).trim()).toBe("</template>");
+    expect(html).not.toContain("<body");
+  });
+
+  it("a first animation in a <body> file lands before </body>, outside its template", async () => {
+    const html = await addFirstAnimation(
+      '<body><template><div data-composition-id="sub"><div id="card"></div></div></template></body>\n',
+    );
+    expect(html.indexOf("<script")).toBeGreaterThan(html.indexOf("</template>"));
+    expect(html.lastIndexOf("</script>")).toBeLessThan(html.indexOf("</body>"));
   });
 
   it("consolidate-position-writes leaves exactly one position write per selector", async () => {

@@ -8,17 +8,22 @@ import { STUDIO_MOTION_PATH } from "../components/editor/studioMotion";
 import { createDomEditSaveQueue, type DomEditSaveDrainResult } from "../utils/domEditSaveQueue";
 import {
   flushStudioPendingEdits,
+  hasStudioPendingEdits,
   type StudioPendingEditsDrainResult,
 } from "../utils/studioPendingEdits";
 import { trackStudioEvent } from "../utils/studioTelemetry";
-import { applyUndoRestoreToPreview, type UndoRestoreFile } from "../utils/gsapUndoRestore";
+import {
+  applyUndoRestoreToPreview,
+  showRestoreInPlace,
+  type RestoreFiles,
+} from "../utils/gsapUndoRestore";
 import { usePlayerStore } from "../player";
 import { syncStoredAutomationFromPreview } from "../player/lib/automationStoreSync";
 
 /** The restore payload the undo/redo preview-sync consumes (from the history store). */
 interface HistoryPreviewRestore {
   paths?: string[];
-  files?: Record<string, UndoRestoreFile>;
+  files?: RestoreFiles;
 }
 
 // ── Types ──
@@ -154,6 +159,11 @@ export function usePreviewPersistence({
     if (result.status !== "clean") throw result.error;
   }, [drainPendingDomEditSaves]);
 
+  const settlePendingEdits = useCallback(async (): Promise<void> => {
+    await flushStudioPendingEdits();
+    await domEditSaveQueueRef.current?.waitForIdle();
+  }, []);
+
   const resetDomEditSaveQueueBreaker = useCallback(() => {
     domEditSaveQueueRef.current?.reset();
     setDomEditSaveQueuePaused(null);
@@ -202,19 +212,33 @@ export function usePreviewPersistence({
         reloadPreview,
       );
       if (strategy === "full") {
-        const player = usePlayerStore.getState();
-        player.setElements([]);
-        player.setSelectedElementId(null);
-        player.setTimelineReady(false);
+        usePlayerStore.getState().setSelectedElementId(null);
         return;
       }
       // A soft restore patched the reverted attributes onto the live preview, but the
       // player store keeps its own copy and that copy is what the automation lanes
       // draw — so without this an undone envelope edit stayed invisible until a
-      // reload. The full path above clears the store and waits for discovery instead.
+      // reload. The full path above waits for the reloaded preview to report instead.
       syncStoredAutomationFromPreview(previewIframeRef.current?.contentDocument ?? null);
     },
     [previewIframeRef, activeCompPathRef, reloadPreview],
+  );
+
+  // A restore the server has not confirmed yet: in place now, or not at all. A GSAP script re-run is not
+  // synchronous, and a pending save would land under it.
+  const showHistoryRestoreNow = useCallback(
+    (files: RestoreFiles): (() => void) | null => {
+      if (!domEditSaveQueueRef.current?.isIdle() || hasStudioPendingEdits()) return null;
+      const iframe = previewIframeRef.current;
+      const now = () => usePlayerStore.getState().currentTime;
+      const putBack = showRestoreInPlace(iframe, activeCompPathRef.current, files, now());
+      if (!putBack) return null;
+      return () => {
+        if (putBack(now())) syncStoredAutomationFromPreview(iframe?.contentDocument ?? null);
+        else void syncHistoryPreviewAfterApply({ paths: Object.keys(files) });
+      };
+    },
+    [previewIframeRef, activeCompPathRef, syncHistoryPreviewAfterApply],
   );
 
   // ── Migrate legacy studio-motion.json ──
@@ -234,10 +258,12 @@ export function usePreviewPersistence({
     queueDomEditSave,
     drainPendingDomEditSaves,
     waitForPendingDomEditSaves,
+    settlePendingEdits,
     domEditSaveQueuePaused,
     resetDomEditSaveQueueBreaker,
     applyCurrentStudioManualEditsToPreview,
     applyStudioManualEditsToPreview,
     syncHistoryPreviewAfterApply,
+    showHistoryRestoreNow,
   };
 }

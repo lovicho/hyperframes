@@ -1,8 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useContext, useEffect, useMemo, useRef } from "react";
+import { fadeGain } from "@hyperframes/core/audio-fade";
 import { useMountEffect } from "../../hooks/useMountEffect";
 import { useThumbnailLease } from "../../hooks/useThumbnailLease";
 import { createThumbnailKey, type ThumbnailPriority } from "../lib/thumbnailScheduler";
 import { decimatePeaks, loudnessToOpacity } from "./audioWaveformPeaks";
+import { ClipFadesContext, type ClipFadeShape } from "./TimelineClipFades";
 
 export interface AudioWaveformProps {
   audioUrl: string;
@@ -22,7 +24,10 @@ export interface AudioWaveformProps {
 
 const BAR_STEP = 3;
 
-type BarGeometry = { x: number; width: number; height: number };
+export const rendersWaveform = (el: { tag: string }) => el.tag === "audio";
+const FADE_GHOST_OPACITY = 0.27;
+
+type BarGeometry = { x: number; width: number; height: number; gain: number };
 
 function paintWaveformBars(
   context: CanvasRenderingContext2D,
@@ -33,11 +38,18 @@ function paintWaveformBars(
   amplitudes: readonly number[],
 ) {
   bars.forEach((bar, index) => {
-    const amplitude = amplitudes[index] ?? 0;
+    const opacity = loudnessToOpacity(amplitudes[index] ?? 0);
     context.fillStyle = `rgb(${waveformBaselineRgb})`;
     context.fillRect(bar.x, height - 2, bar.width, 2);
-    context.fillStyle = `rgba(${waveformBarRgb},${loudnessToOpacity(amplitude).toFixed(2)})`;
-    context.fillRect(bar.x, height - bar.height, bar.width, bar.height);
+    const paint = (alpha: number, top: number, barHeight: number) => {
+      context.fillStyle = `rgba(${waveformBarRgb},${alpha.toFixed(2)})`;
+      context.fillRect(bar.x, top, bar.width, barHeight);
+    };
+    const faded = bar.height * bar.gain;
+    if (faded > 0) paint(opacity, height - faded, faded);
+    if (faded < bar.height) {
+      paint(opacity * FADE_GHOST_OPACITY, height - bar.height, bar.height - faded);
+    }
   });
 }
 
@@ -47,6 +59,7 @@ export function drawWaveformCanvas(
   muted: boolean,
   trimStartFraction: number,
   trimEndFraction: number,
+  fades: ClipFadeShape | null = null,
 ) {
   const width = Math.max(1, canvas.clientWidth);
   const height = Math.max(1, canvas.clientHeight);
@@ -67,6 +80,9 @@ export function drawWaveformCanvas(
     x: (index * width) / amplitudes.length,
     width: Math.max(1, width / amplitudes.length),
     height: Math.max(3, amplitude * height),
+    gain: fades
+      ? fadeGain(((index + 0.5) / amplitudes.length) * fades.duration, fades.duration, fades)
+      : 1,
   }));
   const channelToken = muted ? "--timeline-waveform-muted-rgb" : "--timeline-waveform-bar-rgb";
   const waveformBarRgb = getComputedStyle(canvas).getPropertyValue(channelToken);
@@ -179,11 +195,12 @@ export const AudioWaveform = memo(function AudioWaveform({
   const peaks =
     snapshot.status === "ready" && snapshot.value.kind === "waveform" ? snapshot.value.peaks : null;
 
+  const fades = useContext(ClipFadesContext);
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !peaks) return;
-    drawWaveformCanvas(canvas, peaks, muted, trimStartFraction ?? 0, trimEndFraction ?? 1);
-  }, [muted, peaks, trimEndFraction, trimStartFraction]);
+    drawWaveformCanvas(canvas, peaks, muted, trimStartFraction ?? 0, trimEndFraction ?? 1, fades);
+  }, [fades, muted, peaks, trimEndFraction, trimStartFraction]);
 
   const setCanvasRef = useCallback(
     (canvas: HTMLCanvasElement | null) => {

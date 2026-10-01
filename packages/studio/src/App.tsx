@@ -30,6 +30,7 @@ import { useStudioSdkSessions } from "./hooks/useStudioSdkSessions";
 import { useStudioExternalFileChanges } from "./hooks/useStudioExternalFileChanges";
 import { useBlockHandlers } from "./hooks/useBlockHandlers";
 import { useAppHotkeys } from "./hooks/useAppHotkeys";
+import { trackedStudioEdit } from "./utils/studioPendingEdits";
 import { useClipboard } from "./hooks/useClipboard";
 import { deleteSelectedKeyframes } from "./hooks/timelineEditingHelpers";
 import { useCaptionDetection } from "./hooks/useCaptionDetection";
@@ -155,6 +156,7 @@ export function StudioApp({ readOnlyPreview = false, readOnlyPreviewReason }: St
     previewPersistence,
     pendingTimelineEditPathRef,
     reloadPreview,
+    onOutsideChange: editHistory.noteOutsideChange,
   });
   const invalidateGsapCacheRef = useRef<() => void>(() => {});
   const invalidateGsapCache = useCallback(() => invalidateGsapCacheRef.current(), []);
@@ -254,7 +256,8 @@ export function StudioApp({ readOnlyPreview = false, readOnlyPreviewReason }: St
     writeProjectFile: fileManager.writeProjectFile,
     showToast,
     syncHistoryPreviewAfterApply: previewPersistence.syncHistoryPreviewAfterApply,
-    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
+    showHistoryRestoreNow: previewPersistence.showHistoryRestoreNow,
+    settlePendingEdits: previewPersistence.settlePendingEdits,
     handleCopy,
     handlePaste,
     handleCut,
@@ -313,9 +316,10 @@ export function StudioApp({ readOnlyPreview = false, readOnlyPreviewReason }: St
     readOnlyPreview,
   });
   domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
-  handleDomZIndexReorderCommitRef.current = domEditSession.handleDomZIndexReorderCommit;
+  const { handleDomZIndexReorderCommit: zCommit, handleDomEditElementDelete: del } = domEditSession;
+  handleDomZIndexReorderCommitRef.current = trackedStudioEdit(zCommit);
   clearDomSelectionRef.current = domEditSession.clearDomSelection;
-  handleDomEditElementDeleteRef.current = domEditSession.handleDomEditElementDelete;
+  handleDomEditElementDeleteRef.current = trackedStudioEdit(del);
   resetKeyframesRef.current = domEditSession.handleResetSelectedElementKeyframes;
   invalidateGsapCacheRef.current = domEditSession.invalidateGsapCache;
   deleteSelectedKeyframesRef.current = () => deleteSelectedKeyframes(domEditSession);

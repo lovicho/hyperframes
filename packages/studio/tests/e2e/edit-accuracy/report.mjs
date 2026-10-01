@@ -3,16 +3,31 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { percentile } from "./geometry.mjs";
 
-const LIMIT_PX = 0.5;
+export const LIMIT_PX = 0.5;
+/** An undo or redo whose file write lands later than this after its key fails the undo check. */
+export const UNDO_WRITE_MAX_MS = 2000;
+const lateUndo = (r) => Math.max(r.undo.ms ?? 0, r.undo.redoMs ?? 0) > UNDO_WRITE_MAX_MS;
 // A frame over 1.5 vsyncs is dropped; raw rAF p95 stays reported so a different rule re-scores without a re-run.
 const DROPPED_FRAME_MS = 25;
 const WORK_MS = 8;
-export const METRICS = ["tracking", "press", "drop", "reload", "render", "undo", "smooth"];
+export const METRICS = [
+  "tracking",
+  "press",
+  "teleport",
+  "drop",
+  "reload",
+  "render",
+  "undo",
+  "text",
+  "smooth",
+];
 
 /** Worst-first value per metric; undo ranks by box distance, and its byte failures are counted apart. */
 const worstValue = {
   tracking: (r) => r.tracking.max,
   press: (r) => r.pressJump ?? 0,
+  teleport: (r) => r.teleport?.max ?? 0,
+  text: (r) => (r.text && !r.text.pass ? 1 : 0),
   drop: (r) => r.drop,
   reload: (r) => r.reload,
   render: (r) => r.render ?? 0,
@@ -50,10 +65,19 @@ export function score(spec, r) {
   const checks = {
     tracking: r.tracking.max <= LIMIT_PX,
     press: r.pressJump === null || r.pressJump <= LIMIT_PX,
+    // Null for a key gesture; a drag whose frames could not be measured fails.
+    teleport: r.teleport === null || r.teleport.pass === true,
+    // Text cases only: the typed word saved and shown after a reload (and a selected word stays editable).
+    text: !r.text || r.text.pass,
     drop: r.drop <= LIMIT_PX,
     reload: r.reload <= LIMIT_PX,
     render: r.render !== null && r.render <= LIMIT_PX,
-    undo: r.undo.bytes && r.undo.redoBytes && Math.max(r.undo.box, r.undo.redoBox) <= LIMIT_PX,
+    undo:
+      !r.undoTimeout &&
+      r.undo.bytes &&
+      r.undo.redoBytes &&
+      Math.max(r.undo.box, r.undo.redoBox) <= LIMIT_PX &&
+      !lateUndo(r),
     // Only drops beyond the blank page's, driven the same way in the same Chrome, are the edit's.
     smooth:
       smooth.dropped <= smooth.control.dropped &&
@@ -116,6 +140,7 @@ function summarize(results, seconds) {
     perMetric,
     unsettled: measured.filter((r) => r.unsettled.length).length,
     undoTimeouts: measured.filter((r) => r.undoTimeout).length,
+    undoSlow: measured.filter(lateUndo).length,
     renderErrors: measured.filter((r) => r.renderError).length,
     smooth: smoothSummary(measured),
     seconds: Math.round(seconds),
@@ -133,11 +158,12 @@ function table(summary, meta, results) {
     `Every metric counts except smoothness, which is reported against the blank-page control: ${summary.perMetric.find((m) => m.metric === "smooth").pass}/${summary.total} pass it, and ${summary.passing}/${summary.total} pass everything including it.`,
     "",
     `Studio ${meta.studio} (build ${meta.build}), bench ${meta.bench}, grid \`${meta.grid}\`, ${meta.date}, ${summary.seconds}s with ${meta.jobs} jobs, ${summary.errors} harness errors, load ${meta.load}.`,
-    `Pass: tracking, press jump, drop, reload and render ≤ ${LIMIT_PX} px; undo and redo byte-identical with the box ≤ ${LIMIT_PX} px; no more frames over ${DROPPED_FRAME_MS} ms than the blank-page control, and main-thread work ≤ ${WORK_MS} ms per frame at p95.`,
+    `Pass: tracking, press jump, teleport, drop, reload and render ≤ ${LIMIT_PX} px; undo and redo byte-identical with the box ≤ ${LIMIT_PX} px; no more frames over ${DROPPED_FRAME_MS} ms than the blank-page control, and main-thread work ≤ ${WORK_MS} ms per frame at p95.`,
     "",
     `Undo or redo left different bytes in ${summary.bytesDiffer.undo} undo and ${summary.bytesDiffer.redo} redo cases.`,
     `The preview never held still for 1 s within 15 s in ${summary.unsettled} cases; the metrics that snapshot feeds fail.`,
-    `An undo or redo write never landed within 15 s in ${summary.undoTimeouts} cases; undo fails there.`,
+    `An undo or redo write never landed within 60 s in ${summary.undoTimeouts} cases; undo fails there.`,
+    `An undo or redo write landed later than ${UNDO_WRITE_MAX_MS} ms after its key in ${summary.undoSlow} cases; undo fails there.`,
     `The producer failed to render ${summary.renderErrors} cases; render fails there.`,
     `Smoothness: ${summary.smooth.unknown} cases with unknown work; dropped frames per case (median/max) ${summary.smooth.dropped}, blank-page control ${summary.smooth.control}; raw rAF p95 (median/max) ${summary.smooth.p95} ms, control ${summary.smooth.controlP95} ms.`,
     "",
@@ -157,32 +183,37 @@ function table(summary, meta, results) {
   return lines.join("\n") + "\n";
 }
 
+/** One case as baseline.json holds it; the gate reads the same projection. */
+// fallow-ignore-next-line complexity
+export function entry(r) {
+  if (r.error) return { pass: false, error: true };
+  return {
+    pass: r.pass,
+    tracking: roundUp(r.tracking.max),
+    pressJump: roundUp(r.pressJump),
+    teleport: r.checks.teleport,
+    teleportPx: roundUp(r.teleport?.max ?? null),
+    ...(r.text && { text: r.text.pass }),
+    drop: roundUp(r.drop),
+    reload: roundUp(r.reload),
+    render: roundUp(r.render),
+    undo: r.checks.undo,
+    dropped: r.smooth.dropped,
+    controlDropped: r.smooth.control.dropped,
+    work: roundUp(r.smooth.workP95),
+    frameP95: roundUp(r.smooth.p95),
+    ...(r.unsettled.length && { unsettled: r.unsettled }),
+    ...(r.undoTimeout && { undoTimeout: r.undoTimeout }),
+    ...(lateUndo(r) && { undoMs: r.undo.ms, redoMs: r.undo.redoMs }),
+    ...(r.renderError && { renderError: true }),
+  };
+}
+
 /** One line per case, so a baseline diff reads case by case. */
 function baseline(meta, results) {
   const entries = [...results]
     .sort((a, b) => a.id.localeCompare(b.id))
-    // fallow-ignore-next-line complexity
-    .map((r) => {
-      const v = r.error
-        ? { pass: false, error: true }
-        : {
-            pass: r.pass,
-            tracking: roundUp(r.tracking.max),
-            pressJump: roundUp(r.pressJump),
-            drop: roundUp(r.drop),
-            reload: roundUp(r.reload),
-            render: roundUp(r.render),
-            undo: r.checks.undo,
-            dropped: r.smooth.dropped,
-            controlDropped: r.smooth.control.dropped,
-            work: roundUp(r.smooth.workP95),
-            frameP95: roundUp(r.smooth.p95),
-            ...(r.unsettled.length && { unsettled: r.unsettled }),
-            ...(r.undoTimeout && { undoTimeout: r.undoTimeout }),
-            ...(r.renderError && { renderError: true }),
-          };
-      return `    ${JSON.stringify(r.id)}: ${JSON.stringify(v)}`;
-    });
+    .map((r) => `    ${JSON.stringify(r.id)}: ${JSON.stringify(entry(r))}`);
   return `{\n  "studio": ${JSON.stringify(meta.studio)},\n  "build": ${JSON.stringify(meta.build)},\n  "bench": ${JSON.stringify(meta.bench)},\n  "grid": ${JSON.stringify(meta.grid)},\n  "cases": {\n${entries.join(",\n")}\n  }\n}\n`;
 }
 

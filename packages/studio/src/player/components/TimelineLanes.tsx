@@ -353,7 +353,6 @@ export function TimelineLanes({
                       fontSize: 11,
                       letterSpacing: "0.06em",
                       textTransform: "uppercase",
-                      opacity: 0.5,
                     }}
                   >
                     New track
