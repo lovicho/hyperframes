@@ -7,6 +7,7 @@ import {
   applySoftReloadFinalization,
   extractGsapScriptText,
   findGsapScriptElements,
+  readNestedFiles,
 } from "./gsapSoftReload";
 import { isCompositionTemplate } from "@hyperframes/parsers/hf-ids";
 import { findAuthoredElement, parseSavedSource } from "./authoredSource";
@@ -324,6 +325,18 @@ export function showRestoreInPlace(
   return null;
 }
 
+/** The other composition files a re-run of the restored script resets elements of; null when none. */
+export function readUndoNestedFiles(
+  iframe: HTMLIFrameElement | null,
+  activeCompPath: string | null,
+  files: RestoreFiles | undefined,
+  readFile: (path: string) => Promise<string>,
+): Promise<Map<string, string>> | null {
+  const active = files?.[activeCompPath ?? "index.html"];
+  const script = active ? extractGsapScriptText(active.restored) : null;
+  return script ? readNestedFiles(iframe, script, readFile) : null;
+}
+
 /**
  * Soft-apply an undo/redo restore to the live preview WITHOUT a full iframe
  * remount (which blanks the frame black and re-flashes the WebGL context). Eligible
@@ -338,9 +351,10 @@ export function showRestoreInPlace(
  *      element — so a canvas-position revert lands on the live DOM the runtime's
  *      seek-reapply reads from, not just on disk.
  *   2. The runtime refresh depends on what changed:
- *      - GSAP script text actually CHANGED between previous and restored → the
- *        restored script is re-run in place via applySoftReload (re-seeks to
- *        `currentTime`, re-folds manual edits).
+ *      - GSAP script text actually CHANGED between previous and restored, or a
+ *        synced element was parsed by GSAP → the restored script is re-run in
+ *        place via applySoftReload (re-seeks to `currentTime`, re-folds manual
+ *        edits, re-parses those elements); several scripts can't, so it reloads.
  *      - Script unchanged or absent (the overwhelmingly common undo: z-order,
  *        lane move, timing shift, style tweak) → NO script execution — the
  *        blink-free finalization only (seek + __hfForceTimelineRebind + manual
@@ -357,6 +371,7 @@ export function applyUndoRestoreToPreview(
   files: RestoreFiles | undefined,
   currentTime: number,
   reload: () => void,
+  nestedFiles?: Map<string, string> | null,
 ): "soft" | "full" {
   // The master view carries a NULL activeCompPath but the root iframe shows
   // index.html — the codebase-wide convention (`activeCompPath || "index.html"`).
@@ -383,12 +398,21 @@ export function applyUndoRestoreToPreview(
   const active = files[activeDocPath];
   const restoredScript = active ? extractGsapScriptText(active.restored) : null;
   const previousScript = active ? extractGsapScriptText(active.previous) : null;
-  if (restoredScript && restoredScript !== previousScript) {
+  const reparse = plan.scripted
+    ? plan.targets.map(({ live }) => live).filter((el) => "_gsap" in el)
+    : [];
+  if (reparse.length && !restoredScript) {
+    reloadPreview();
+    return "full";
+  }
+  if (restoredScript && (restoredScript !== previousScript || reparse.length)) {
     syncStaleEditMarks(doc, active);
     const result = applySoftReload(iframe, restoredScript, {
       onAsyncFailure: reloadPreview,
       currentTimeOverride: currentTime,
       authoredHtml: active.restored,
+      reparse,
+      nestedFiles,
     });
     if (result === "cannot-soft-reload") {
       reloadPreview();

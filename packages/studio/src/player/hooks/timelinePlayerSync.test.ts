@@ -13,9 +13,22 @@ describe("timelineElementsChanged", () => {
     ["audio group hidden", { audioGroupHidden: true }],
     ["fade in", { fadeIn: 1 }],
     ["fade out", { fadeOut: 1 }],
+    ["link", { link: "lk-1" }],
     ["source (re-pointed at its preview copy)", { src: "clip1.mp4?hf-proxy=h264" }],
   ])("sees a clip whose %s changed with no timing change", (_name, change) => {
     expect(timelineElementsChanged([clip], [{ ...clip, ...change }])).toBe(true);
     expect(timelineElementsChanged([{ ...clip, ...change }], [{ ...clip, ...change }])).toBe(false);
+  });
+
+  it("sees an unlink: the same clips re-derived without their link", () => {
+    const linked = { ...clip, link: "lk-1" };
+    expect(timelineElementsChanged([linked], [clip])).toBe(true);
+  });
+
+  it("sees restored group membership with identical timing and lane", () => {
+    const grouped = { ...clip, audioGroup: "G" };
+    expect(timelineElementsChanged([clip], [grouped])).toBe(true);
+    expect(timelineElementsChanged([grouped], [clip])).toBe(true);
+    expect(timelineElementsChanged([grouped], [{ ...grouped }])).toBe(false);
   });
 });

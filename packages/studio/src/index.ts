@@ -31,6 +31,11 @@ export {
   liveTime,
   formatTime,
 } from "./player";
+export { usePreviewIframeStore } from "./player/store/previewIframeStore";
+export {
+  openAudioGainDialog,
+  useAudioGainDialogStore,
+} from "./player/components/audioGainDialogStore";
 export type {
   PlayerHandle,
   PlayerHandleElement,
@@ -57,6 +62,13 @@ export { TimelineProvider, useTimelineContext } from "./player/components/Timeli
 export type { TimelineTheme } from "./player/components/timelineTheme";
 export { TRACK_H } from "./player/components/timelineLayout";
 export type { TimelineTrackPadding } from "./player/components/timelineLayout";
+export { displayTrackOrder } from "./player/components/useTimelineTrackDerivations";
+export { fadeHandleBoxes } from "./player/components/timelineClipFadeGeometry";
+export type {
+  FadeEdge,
+  FadeHandleBox,
+  FadeHandleClipBox,
+} from "./player/components/timelineClipFadeGeometry";
 
 // Clip content thumbnails: used by a host rendering its own timeline lane.
 export { AudioWaveform } from "./player/components/AudioWaveform";
@@ -143,6 +155,7 @@ export type {
 // A host's own waitForPendingDomEditSaves must also call this, or undo/redo
 // can race a write still in flight (see useTrackPendingTimelineEdit.ts).
 export { flushStudioPendingEdits } from "./utils/studioPendingEdits";
+export { revertNewestStudioPendingEdit } from "./utils/studioPendingEdits";
 export type { StudioPendingEditsDrainResult } from "./utils/studioPendingEdits";
 export type {
   CanEditTimelineElement,
@@ -175,6 +188,7 @@ export { TimelineHistoryButtons } from "./components/TimelineHistoryButtons";
 export type { TimelineHistoryButtonsProps } from "./components/TimelineHistoryButtons";
 export { AudioMeterStrip } from "./components/nle/AudioMeterStrip";
 export type { AudioMeterStripProps } from "./components/nle/AudioMeterStrip";
+export { useAudioMetersVisible } from "./utils/audioMeterVisibility";
 export { useClipboard } from "./hooks/useClipboard";
 export type { UseClipboardOptions } from "./hooks/useClipboard";
 
@@ -240,3 +254,10 @@ export type { MarqueeGestures, MarqueeGesturesDeps } from "./components/editor/m
 export { MarqueeOverlay } from "./components/editor/MarqueeOverlay";
 export type { MarqueeOverlayProps } from "./components/editor/MarqueeOverlay";
 export type { Rect as MarqueeRect } from "./utils/marqueeGeometry";
+
+export { buildStudioTools } from "./webmcp/useStudioAgentTools";
+export type { StudioAgentToolsDeps } from "./webmcp/useStudioAgentTools";
+export { collectStudioLookScene } from "./webmcp/tools/lookTools";
+export type { StudioLookSnapshot } from "./webmcp/tools/lookTools";
+export type { ModelContextTool } from "./webmcp/types";
+export type { ToolResult } from "./webmcp/toolResult";

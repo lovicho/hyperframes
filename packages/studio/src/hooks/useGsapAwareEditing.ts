@@ -93,6 +93,7 @@ export interface UseGsapAwareEditingParams {
     next: { width: number; height: number },
     offset?: { x: number; y: number },
     restore?: () => void,
+    undoKey?: string,
   ) => Promise<void>;
   commitPositionPatchToHtml: ElementOffsetStagerDeps["commitPositionPatchToHtml"];
   // GSAP script commit ops (from useGsapScriptCommits)
@@ -394,12 +395,11 @@ export function useGsapAwareEditing({
                 makeFetchFallback(selection),
               );
               assertGsapEditPersisted(outcome);
-              cropUndoKey = coalesceKey;
-              // What the resize actually did, not what its animations suggest
-              // it would do. An element whose scale is an instant hold has a
-              // scale-group tween and still commits width/height, so guessing
-              // from the tweens withheld an offset nobody had written and the
-              // element snapped back to its authored position on every drag.
+              // Saved before the buffered GSAP writes, so their reload stays the gesture's last render.
+              if (outcome.status === "element-size")
+                await handleDomBoxSizeCommit(selection, next, undefined, undefined, coalesceKey);
+              else cropUndoKey = coalesceKey;
+              // What the resize did, not what its tweens suggest: a scale hold still commits a size.
               const ownsDragOffset =
                 outcome.status === "persisted" && outcome.ownsDragOffset === true;
               logResize("intercept-handled", {

@@ -32,7 +32,13 @@ export interface UseDomGeometryCommitsParams {
   commitPositionPatchToHtml: (
     selection: DomEditSelection,
     patches: PatchOperation[],
-    options: { label: string; coalesceKey: string; coalesceMs?: number; skipRefresh?: boolean },
+    options: {
+      label: string;
+      coalesceKey: string;
+      coalesceMs?: number;
+      skipRefresh?: boolean;
+      deferRender?: boolean;
+    },
   ) => Promise<void>;
   readOnlyPreview: boolean;
 }
@@ -65,6 +71,7 @@ export function useDomGeometryCommits({
       next: { width: number; height: number },
       offset?: { x: number; y: number },
       restore?: () => void,
+      undoKey?: string,
     ) => {
       if (readOnlyPreview) return Promise.resolve();
       const element = selection.element;
@@ -80,7 +87,9 @@ export function useDomGeometryCommits({
       if (offset) patches.push(...writePlainMove(element, offset));
       return commitPositionPatchToHtml(selection, patches, {
         label: "Resize layer box",
-        coalesceKey: `box-size:${getDomEditTargetKey(selection)}`,
+        ...(undoKey
+          ? { coalesceKey: undoKey, coalesceMs: Number.POSITIVE_INFINITY, deferRender: true }
+          : { coalesceKey: `box-size:${getDomEditTargetKey(selection)}` }),
       }).catch((error) => {
         restoreStudioBoxSize(element, beforeSize);
         if (offset) restoreStudioPathOffset(element, beforeOffset);

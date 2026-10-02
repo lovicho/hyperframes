@@ -68,6 +68,8 @@ const ROUTES = {
     const half = legN(p, [p[0] + 90, p[1] + 45], 20);
     return [...half, { pause: 1000 }, ...legN(half.at(-1), [p[0] + 180, p[1] + 90], 20)];
   },
+  // Just before the release, Chromium resends the press point with no button down; the drop must not take it.
+  stray: (p) => [...legN(p, [p[0] + 180, p[1] + 90], 20), { stray: p }],
   edge: (p, v) => {
     const out = [Math.min(v.edge + 60, VIEWPORT.width - 2), p[1]];
     return legs(p, [out, [p[0] + 60, p[1] + 30]]);
@@ -116,6 +118,13 @@ function mergeSmooth(parts) {
     longTasks: parts.reduce((n, s) => n + s.longTasks, 0),
     intervals,
     work: parts.every((s) => s.work) ? parts.flatMap((s) => s.work) : null,
+    wallTimed: parts.reduce((n, s) => n + s.wallTimed, 0),
+    ...(parts.some((s) => s.unknown) && {
+      unknown: parts
+        .map((s) => s.unknown)
+        .filter(Boolean)
+        .join("; "),
+    }),
   };
 }
 
@@ -150,6 +159,8 @@ async function driveStep(ctx, step, state) {
   if (step.do === "undo") {
     await blurPreview(page);
     await chord(page, "Control+z");
+    // A key's DOM change reaches the CDP quads only after a frame; the next step reads from them.
+    await nextFrame(page);
     state.depth -= 1;
     // Undone back to the start, the box belongs where it began; any other undo leaves it unknown here.
     state.intended = state.depth === 0 ? state.start : null;
@@ -253,8 +264,13 @@ async function editText(c, step, state) {
   }
   // Typing with no session open would land on Studio's shortcuts, so a failed open types nothing.
   if (opened) {
-    await page.keyboard.type(step.word);
+    // One key per frame, as the nudges press theirs: a whole word in one frame is no typist's pace.
+    for (const key of step.word) {
+      await page.keyboard.type(key);
+      await nextFrame(page);
+    }
     await page.keyboard.press("Enter");
+    await nextFrame(page);
   }
   state.smooth.push(smoothness(await recording(page, false)));
   state.depth += 1;

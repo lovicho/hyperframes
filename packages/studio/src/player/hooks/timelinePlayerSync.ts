@@ -11,11 +11,13 @@ const RENDERED_FIELDS: readonly (keyof TimelineElement)[] = [
   "volume",
   "playbackRate",
   "hidden",
+  "audioGroup",
   "audioGroupVolume",
   "audioGroupHidden",
   "fadeIn",
   "fadeOut",
   "src",
+  "link",
 ];
 
 /** Whether a derived timeline changes any field that affects rendering. */

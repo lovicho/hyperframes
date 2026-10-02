@@ -170,9 +170,10 @@ describe("applyUndoRestoreToPreview", () => {
 
   describe("an undo that re-runs a changed script matches a fresh load of the restored file", () => {
     const script = (extra: string) => `window.__timelines["root"]=gsap.timeline();${extra}`;
+    const root = (body: string) => `<div data-composition-id="root">${body}</div>`;
     const undoScriptEdit = (live: string, authored: string, edit: string) => {
       const { iframe, contentWindow, doc } = buildLiveIframe(
-        `${live}<script>${script(edit)}</script>`,
+        `${root(live)}<script>${script(edit)}</script>`,
       );
       const clearProps = (targets: HTMLElement[]) =>
         targets.forEach((t) => t.removeAttribute("style"));
@@ -180,8 +181,8 @@ describe("applyUndoRestoreToPreview", () => {
       for (const el of doc.querySelectorAll("[style*=transform]")) Object.assign(el, { _gsap: {} });
       const files = {
         [ROOT]: {
-          previous: wrap(`${authored}<script>${script(edit)}</script>`),
-          restored: wrap(`${authored}<script>${script("")}</script>`),
+          previous: wrap(`${root(authored)}<script>${script(edit)}</script>`),
+          restored: wrap(`${root(authored)}<script>${script("")}</script>`),
         },
       };
       expect(applyUndoRestoreToPreview(iframe, ROOT, files, 3, vi.fn())).toBe("soft");
@@ -286,6 +287,25 @@ describe("applyUndoRestoreToPreview", () => {
     expect([...doc.querySelectorAll("script")].map((script) => script.textContent)).toEqual(
       previousScripts,
     );
+  });
+
+  it("full-reloads a style restore on a GSAP-parsed element when the file has two scripts", () => {
+    const scripts = [
+      `<script>window.__timelines["root"]=gsap.timeline().to("#a",{x:1});</script>`,
+      `<script>window.__timelines["captions"]=gsap.timeline().to("#a",{y:1});</script>`,
+    ].join("");
+    const { iframe, doc } = buildLiveIframe(`<div id="a" style="z-index: 8">t</div>${scripts}`);
+    Object.assign(doc.getElementById("a")!, { _gsap: {} });
+    const reloadPreview = vi.fn();
+    const files = {
+      [ROOT]: {
+        previous: wrap(`<div id="a" style="z-index: 8">t</div>${scripts}`),
+        restored: wrap(`<div id="a" style="z-index: 3">t</div>${scripts}`),
+      },
+    };
+
+    expect(applyUndoRestoreToPreview(iframe, ROOT, files, 3, reloadPreview)).toBe("full");
+    expect(reloadPreview).toHaveBeenCalledTimes(1);
   });
 
   it("full-reloads a multi-file restore", () => {

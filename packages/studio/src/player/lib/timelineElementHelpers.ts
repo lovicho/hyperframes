@@ -13,6 +13,7 @@ import { isFinitePositive } from "./playbackAdapter";
 import { getSourceScopedSelectorIndex } from "../../utils/sourceScopedSelectorIndex";
 import { HF_AUDIO_GROUP_TAG } from "@hyperframes/core/audio-groups";
 import { readElementFades } from "@hyperframes/core/audio-fade";
+import { elementVolume } from "./storedVolume";
 import {
   type AttrReader,
   clampPlaybackRate,
@@ -213,22 +214,38 @@ function setOptional<K extends keyof TimelineElement>(
   else entry[key] = value;
 }
 
-function readVolume(el: Element, media: Element): number | undefined {
-  const volume = Number.parseFloat(
-    el.getAttribute("data-volume") ?? media.getAttribute("data-volume") ?? "",
-  );
-  return Number.isFinite(volume) ? volume : undefined;
+/** The compiler's rule (timingCompiler): explicit data-has-audio wins; otherwise an unmuted <video> is audible. */
+export function isVideoAudible(opts: {
+  tag: string;
+  hasAudioAttr: string | null | undefined;
+  muted: boolean;
+}): boolean {
+  if (opts.hasAudioAttr === "true") return true;
+  if (opts.hasAudioAttr === "false" || opts.hasAudioAttr === "") return false;
+  return opts.tag.toLowerCase() === "video" && !opts.muted;
+}
+
+export function isAudibleVideoNode(el: Element): boolean {
+  if (el.tagName.toLowerCase() !== "video" || el.hasAttribute("muted")) return false;
+  return isVideoAudible({
+    tag: "video",
+    hasAudioAttr: el.getAttribute("data-has-audio"),
+    muted: false,
+  });
 }
 
 /** What the mixer gets: the compiler's `data-has-audio` rule, muted and volume. */
 function applyAudioMetadataFromElement(entry: TimelineElement, el: Element): void {
   const media = resolveMediaElement(el) ?? el;
   const muted = el.hasAttribute("muted") || media.hasAttribute("muted");
-  const hasAudio = el.getAttribute("data-has-audio");
-  const sound = hasAudio === null ? el.tagName === "VIDEO" && !muted : hasAudio === "true";
+  const sound = isVideoAudible({
+    tag: el.tagName,
+    hasAudioAttr: el.getAttribute("data-has-audio"),
+    muted,
+  });
   setOptional(entry, "hasAudio", sound ? true : undefined);
   setOptional(entry, "muted", muted ? true : undefined);
-  setOptional(entry, "volume", readVolume(el, media));
+  setOptional(entry, "volume", elementVolume(el, media));
 }
 
 function applyFadeMetadataFromElement(entry: TimelineElement, el: Element): void {

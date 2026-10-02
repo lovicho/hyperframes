@@ -14,6 +14,7 @@ import type { CommitMutationOptions } from "./gsapScriptCommitTypes";
 import { roundTo3 } from "../utils/rounding";
 import { classifyPropertyGroup } from "@hyperframes/core/gsap-parser";
 import { isInstantHold, idSelector, writeTargetSelector, tweenTargetsElement } from "./gsapShared";
+import { useStableHandlers } from "./useStableHandlers";
 
 type RecordedKeyframe = {
   percentage: number;
@@ -83,6 +84,7 @@ function reloadOnlyLast(index: number, count: number): Partial<CommitMutationOpt
 let gestureRecordingCommitCounter = 0;
 
 interface UseGestureCommitParams {
+  projectId?: string | null;
   domEditSessionRef: React.MutableRefObject<GestureSessionRef>;
   previewIframeRef: React.RefObject<HTMLIFrameElement | null>;
   showToast: (message: string, tone?: "error" | "info") => void;
@@ -98,6 +100,7 @@ export interface UseGestureCommitResult {
 
 // fallow-ignore-next-line complexity
 export function useGestureCommit({
+  projectId,
   domEditSessionRef,
   previewIframeRef,
   showToast,
@@ -401,5 +404,5 @@ export function useGestureCommit({
     readOnlyPreview,
   ]);
 
-  return { gestureState, gestureRecording, handleToggleRecording };
+  return useStableHandlers({ gestureState, gestureRecording, handleToggleRecording }, projectId);
 }
