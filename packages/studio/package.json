@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/studio",
-  "version": "0.8.113",
+  "version": "0.8.114",
   "description": "",
   "repository": {
     "type": "git",
@@ -81,6 +81,7 @@
     "test:thumbnail-save": "node tests/e2e/thumbnail-save.mjs",
     "test:timeline-virtualization": "TIMELINE_ROW_VIRTUALIZATION=on TIMELINE_ELEMENT_COUNT=50000 node tests/e2e/timeline-virtualization.mjs",
     "test:watch": "vitest",
+    "test:colors:browser": "node tests/e2e/native-css-colors.mjs",
     "report:sdk-cutover": "bun src/utils/sdkCutoverPolicy.report.ts",
     "test:timeline-default": "bun run test:timeline-virtualization"
   },
