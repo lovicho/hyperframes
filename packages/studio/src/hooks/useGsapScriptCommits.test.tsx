@@ -30,7 +30,11 @@ vi.mock("../utils/studioTelemetry", () => ({
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
-import type { MutationResult } from "./gsapScriptCommitTypes";
+import type {
+  CommitMutationCall,
+  CommitMutationOptions,
+  MutationResult,
+} from "./gsapScriptCommitTypes";
 import { persistSdkSerialize } from "../utils/sdkCutover";
 import { applyPreviewSync, useGsapScriptCommits } from "./useGsapScriptCommits";
 import { hasStudioPendingEdits } from "../utils/studioPendingEdits";
@@ -208,6 +212,34 @@ describe("applyPreviewSync", () => {
     );
 
     expect(previewFallbackLatch.pending).toBe(false);
+    expect(applySoftReload).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries a deferred write with no instant patch into the final batch render", () => {
+    const previewFallbackLatch = { pending: false };
+    applySoftReload.mockReturnValue("applied");
+    patchRuntimeTweenInPlace.mockReturnValue(true);
+    const group = {
+      label: "Move animated layer (group)",
+      softReload: true,
+      previewFallbackLatch,
+    };
+
+    applyPreviewSync(
+      FAKE_IFRAME,
+      result({ scriptText: "SCRIPT" }),
+      { ...group, deferPreviewSync: true },
+      vi.fn(),
+    );
+    expect(previewFallbackLatch.pending).toBe(true);
+    expect(applySoftReload).not.toHaveBeenCalled();
+
+    applyPreviewSync(
+      FAKE_IFRAME,
+      result({ scriptText: "SCRIPT" }),
+      { ...group, instantPatch: { selector: "#final", change: { kind: "set", props: { x: 2 } } } },
+      vi.fn(),
+    );
     expect(applySoftReload).toHaveBeenCalledTimes(1);
   });
 
@@ -416,6 +448,16 @@ function renderCommitHook(
 
 const selection: DomEditSelection = { id: "a", selector: "#a" } as DomEditSelection;
 
+async function commitBatch(calls: CommitMutationCall[], options: CommitMutationOptions) {
+  const deps = renderCommitHook();
+  const batch = deps.api.commitMutation.batch;
+  if (!batch) throw new Error("batch capability missing");
+  await act(async () => {
+    await batch(calls, options);
+  });
+  return deps;
+}
+
 function mockFetchResult(over: Partial<MutationResult> = {}): void {
   const body: MutationResult = {
     ok: true,
@@ -550,6 +592,32 @@ describe("runCommit — instantPatch wiring", () => {
     });
 
     expect(patchRuntimeTweenInPlace.mock.calls.map((call) => call[1])).toEqual(["#a", "#b"]);
+    expect(deps.reloadPreview).not.toHaveBeenCalled();
+  });
+
+  it("batch where a write without an instant patch soft-reloads instead of patching the rest", async () => {
+    // A corner resize saves size (no in-place patch) and position (patched) in one batch.
+    patchRuntimeTweenInPlace.mockReturnValue(true);
+    applySoftReload.mockReturnValue("applied");
+    mockFetchResult({ changed: true });
+    const position = { selector: "#a", change: { kind: "set" as const, props: { x: 10 } } };
+    const deps = await commitBatch(
+      [
+        {
+          selection,
+          mutation: { type: "update-property", property: "width", value: 300 },
+          options: { label: "Resize layer" },
+        },
+        {
+          selection,
+          mutation: { type: "update-property", property: "x", value: 10 },
+          options: { label: "Resize layer", instantPatch: position },
+        },
+      ],
+      { label: "Resize layer", softReload: true },
+    );
+
+    expect(applySoftReload).toHaveBeenCalledTimes(1);
     expect(deps.reloadPreview).not.toHaveBeenCalled();
   });
 
@@ -698,7 +766,9 @@ describe("runCommit — instantPatch wiring", () => {
       await deps.api.commitMutation(selection, { x: 10 }, { label: "drag", softReload: true });
     });
 
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/files/compositions%2Fsub.html"));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/files/compositions%2Fsub.html"), {
+      credentials: "omit",
+    });
     expect(applySoftReload).toHaveBeenCalledWith(
       expect.anything(),
       NESTED_SCRIPT,

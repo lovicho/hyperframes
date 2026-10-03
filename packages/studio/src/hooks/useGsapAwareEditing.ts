@@ -49,6 +49,7 @@ export interface UseGsapAwareEditingParams {
   domEditSelection: DomEditSelection | null;
   selectedGsapAnimations: GsapAnimation[];
   gsapCommitMutation: CommitMutation | null;
+  activeCompPath?: string | null;
   previewIframeRef: React.RefObject<HTMLIFrameElement | null>;
   showToast: (message: string, tone?: "error" | "info") => void;
   bumpGsapCache: () => void;
@@ -61,6 +62,7 @@ export interface UseGsapAwareEditingParams {
     selection: DomEditSelection | null,
     mutationType: string,
     label: string,
+    toast?: boolean,
   ) => void;
   // DOM fallbacks (from useDomEditCommits)
   stageElementPositionOffset: (
@@ -117,6 +119,7 @@ export function useGsapAwareEditing({
   domEditSelection,
   selectedGsapAnimations,
   gsapCommitMutation,
+  activeCompPath,
   previewIframeRef,
   showToast,
   bumpGsapCache,
@@ -190,6 +193,7 @@ export function useGsapAwareEditing({
 
   const handleGsapAwareGroupPathOffsetCommit = useGsapAwareGroupMove({
     gsapCommitMutation,
+    activeCompPath,
     previewIframeRef,
     makeFetchFallback,
     trackGsapInteractionFailure,
@@ -285,6 +289,7 @@ export function useGsapAwareEditing({
                 previewIframeRef.current,
                 commitMutation,
                 makeFetchFallback(selection),
+                offset,
               );
               assertGsapEditPersisted(outcome);
               // Saved before the buffered GSAP writes, so their reload stays the gesture's last render.

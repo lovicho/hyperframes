@@ -71,6 +71,7 @@ import {
   addMotionPathToScript,
   removeArcPathFromScript,
   addAnimationWithKeyframesToScript,
+  replaceTweenWithKeyframesInScript,
   splitAnimationsInScript,
   splitIntoPropertyGroupsFromScript,
   shiftPositionsInScript,
@@ -1299,6 +1300,25 @@ export type GsapMutationRequest =
 
 type GsapMutationResult = string | { script: string; skippedSelectors: string[] };
 
+function replaceInPlaceUnlessSetOrUnknown(
+  scriptText: string,
+  body: Extract<GsapMutationRequest, { type: "replace-with-keyframes" }>,
+): string {
+  const edit = { ...body, easeEach: resolveReplacementEaseEach(scriptText, body) };
+  const inPlace = replaceTweenWithKeyframesInScript(scriptText, body.animationId, edit);
+  if (inPlace !== null) return inPlace;
+  const script = removeAnimationFromScript(scriptText, body.animationId);
+  return addAnimationWithKeyframesToScript(
+    script,
+    body.targetSelector,
+    body.position,
+    body.duration,
+    body.keyframes,
+    body.ease,
+    edit.easeEach,
+  ).script;
+}
+
 function resolveReplacementEaseEach(
   scriptText: string,
   request: { animationId: string; easeEach?: string },
@@ -1779,17 +1799,7 @@ function executeGsapMutationAcorn(
       if (keyframesWritePosition(body.keyframes) || keyframesWriteRotation(body.keyframes)) {
         stripStudioEditsFromTarget(block.document, body.targetSelector);
       }
-      const script = removeAnimationFromScript(block.scriptText, body.animationId);
-      const added = addAnimationWithKeyframesToScript(
-        script,
-        body.targetSelector,
-        body.position,
-        body.duration,
-        body.keyframes,
-        body.ease,
-        resolveReplacementEaseEach(block.scriptText, body),
-      );
-      return added.script;
+      return replaceInPlaceUnlessSetOrUnknown(block.scriptText, body);
     }
     case "split-animations": {
       if (
@@ -2151,17 +2161,7 @@ async function executeGsapMutationRecast(
       if (keyframesWritePosition(body.keyframes) || keyframesWriteRotation(body.keyframes)) {
         stripStudioEditsFromTarget(block.document, body.targetSelector);
       }
-      const script = removeAnimationFromScript(block.scriptText, body.animationId);
-      const added = addAnimationWithKeyframesToScript(
-        script,
-        body.targetSelector,
-        body.position,
-        body.duration,
-        body.keyframes,
-        body.ease,
-        resolveReplacementEaseEach(block.scriptText, body),
-      );
-      return added.script;
+      return replaceInPlaceUnlessSetOrUnknown(block.scriptText, body);
     }
     case "split-animations": {
       if (

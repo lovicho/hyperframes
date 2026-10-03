@@ -4114,6 +4114,7 @@ export function initSandboxRuntimeModular(): void {
   });
 
   maybePublishRenderReady = () => {
+    if (state.tornDown) return;
     if (!externalCompositionsReady) {
       window.__renderReady = false;
       return;
@@ -4348,7 +4349,10 @@ export function initSandboxRuntimeModular(): void {
           tl.totalTime(tlSeekTime, suppressEvents);
           if (!suppressEvents && !hasZeroDurationCallbackTween(tl)) {
             // The first seek is the only eventful one; the re-render only refreshes styles.
-            rerenderGsapTimelineAt({ totalTime: tl.totalTime.bind(tl) }, tlSeekTime);
+            rerenderGsapTimelineAt(
+              { totalTime: tl.totalTime.bind(tl), getChildren: tl.getChildren?.bind(tl) },
+              tlSeekTime,
+            );
           }
         } else {
           tl.seek(tlSeekTime, suppressEvents);

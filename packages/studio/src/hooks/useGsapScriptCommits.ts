@@ -28,12 +28,13 @@ import {
   formatGsapMutationRejectionToast,
   readJsonResponseBody,
 } from "./gsapScriptCommitHelpers";
-import type {
-  CommitMutation,
-  CommitMutationCall,
-  CommitMutationOptions,
-  GsapScriptCommitsParams,
-  MutationResult,
+import {
+  gsapWriteFile,
+  type CommitMutation,
+  type CommitMutationCall,
+  type CommitMutationOptions,
+  type GsapScriptCommitsParams,
+  type MutationResult,
 } from "./gsapScriptCommitTypes";
 import { useGsapAnimationOps } from "./useGsapAnimationOps";
 import { useGsapArcPathOps } from "./useGsapArcPathOps";
@@ -44,13 +45,14 @@ import {
   useSafeGsapCommitMutation,
 } from "./useSafeGsapCommitMutation";
 import { studioWriteHeaders } from "../utils/studioFileVersion";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
 async function mutateGsapScript(
   projectId: string,
   sourceFile: string,
   mutation: Record<string, unknown>,
 ): Promise<MutationResult> {
-  const res = await fetch(
+  const res = await studioApiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/gsap-mutations/${encodeURIComponent(sourceFile)}`,
     {
       method: "POST",
@@ -69,7 +71,7 @@ async function mutateGsapScriptBatch(
   sourceFile: string,
   mutations: Record<string, unknown>[],
 ): Promise<MutationResult> {
-  const res = await fetch(
+  const res = await studioApiFetch(
     `/api/projects/${encodeURIComponent(projectId)}/gsap-mutations-batch/${encodeURIComponent(sourceFile)}`,
     {
       method: "POST",
@@ -266,7 +268,8 @@ export function applyPreviewSync(
   nestedFiles?: Map<string, string> | null,
 ): void {
   const patches = instantPatchesFor(options);
-  let needsFallback = options.previewFallbackLatch?.pending === true;
+  const writtenWithoutPatch = patches.length === 0;
+  let needsFallback = options.previewFallbackLatch?.pending === true || writtenWithoutPatch;
   if (patches.length > 0) {
     const deferSeek = options.deferPreviewSync === true;
     const missed = patches.find(
@@ -408,13 +411,14 @@ export function useGsapScriptCommits({ projectIdRef, activeCompPath, previewIfra
     if (!result) return;
     trackKeyframeCommit(mutations, result, options, calls.map((call) => call.options));
     options.onResult?.(result);
-    // Each call brings its own fast-path patch; the batch wrote them all, so the
-    // preview sync applies them all rather than just the last call's.
-    const instantPatches = calls
-      .map(({ options: callOptions }) => callOptions.instantPatch)
-      .filter((patch) => patch !== undefined);
+    // The batch wrote every call, so patch in place only when every call brought a patch; one
+    // without (a resize's size write) needs the reload, or the preview keeps the old value.
+    const instantPatches = calls.flatMap(({ options: callOptions }) =>
+      callOptions.instantPatch ? [callOptions.instantPatch] : [],
+    );
     const { instantPatch: _instantPatch, ...batchOptions } = options;
-    await finalizeSuccessfulMutation(pid, compositionPath, last.selection, last.mutation, targetPath, result, instantPatches.length > 0 ? { ...batchOptions, instantPatches } : batchOptions);
+    const allPatched = instantPatches.length === calls.length;
+    await finalizeSuccessfulMutation(pid, compositionPath, last.selection, last.mutation, targetPath, result, allPatched ? { ...batchOptions, instantPatches } : batchOptions);
   }, [showToast, finalizeSuccessfulMutation]);
 
   // Every GSAP-script commit is a read-modify-write of one file. Overlapping
@@ -442,14 +446,14 @@ export function useGsapScriptCommits({ projectIdRef, activeCompPath, previewIfra
     };
     const commit: CommitMutation = trackedStudioEdit((selection, mutation, options) => {
       if (!activeProjectId) return Promise.resolve();
-      const file = selection.sourceFile || activeCompPath || "index.html";
+      const file = gsapWriteFile(selection, activeCompPath);
       return serializeCommit(file, options.serializeKey, () =>
         runCommit(activeProjectId, activeCompPath, file, selection, mutation, options),
       );
     }) as CommitMutation;
     commit.batch = trackedStudioEdit((calls: CommitMutationCall[], options: CommitMutationOptions) => {
       if (!activeProjectId) return Promise.resolve();
-      const file = calls[0]?.selection.sourceFile || activeCompPath || "index.html";
+      const file = calls[0] ? gsapWriteFile(calls[0].selection, activeCompPath) : "index.html";
       return serializeCommit(file, options.serializeKey, () =>
         runBatchCommit(activeProjectId, activeCompPath, file, calls, options),
       );
