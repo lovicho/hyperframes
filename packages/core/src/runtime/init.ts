@@ -4534,6 +4534,26 @@ export function initSandboxRuntimeModular(): void {
     state.transportRafId = window.requestAnimationFrame(transportTick);
   };
 
+  const followedOrLongestRunningAudio = (
+    followed: HTMLMediaElement | null,
+  ): { el: HTMLMediaElement; start: number } | null => {
+    const audioEls = document.querySelectorAll("audio[data-start]");
+    let longest: { el: HTMLMediaElement; start: number; runsUntil: number } | null = null;
+    for (const el of followed ? [followed, ...audioEls] : audioEls) {
+      if (!isMediaElement(el) || !el.isConnected) continue;
+      if (isSilencedByHidden(el) || isUnplayable(el) || (el.ended && !el.loop)) continue;
+      if (!el.hasAttribute("src") && !el.querySelector("source[src]")) continue;
+      const start = resolveAbsoluteMediaStartSeconds(el);
+      const durAttr = parseStrictFiniteTimingNumber(el.dataset.duration);
+      const end = durAttr != null && durAttr > 0 ? start + durAttr : Infinity;
+      if (!Number.isFinite(start) || !isInClipWindow(state.currentTime, start, end)) continue;
+      if (el === followed) return { el, start };
+      const runsUntil = start + (resolveMediaElementDurationSeconds(el) ?? Infinity);
+      if (!longest || runsUntil > longest.runsUntil) longest = { el, start, runsUntil };
+    }
+    return longest;
+  };
+
   const transportTick = () => {
     if (state.tornDown || inTransportTick) return;
     inTransportTick = true;
@@ -4640,36 +4660,19 @@ export function initSandboxRuntimeModular(): void {
             clock.attachAudioSource({ currentTimeSeconds: webAudioTime });
           }
         } else {
-          const audioEls = document.querySelectorAll("audio[data-start]");
-          const followed = clock.audioElement();
-          let foundActive = false;
-          for (const rawEl of followed ? [followed, ...audioEls] : audioEls) {
-            if (!isMediaElement(rawEl) || !rawEl.isConnected) continue;
-            if (isSilencedByHidden(rawEl) || isUnplayable(rawEl)) continue;
-            if (!rawEl.hasAttribute("src") && !rawEl.querySelector("source[src]")) continue;
-            const start = resolveAbsoluteMediaStartSeconds(rawEl);
-            const durAttr = parseStrictFiniteTimingNumber(rawEl.dataset.duration);
-            const end = durAttr != null && durAttr > 0 ? start + durAttr : Infinity;
-            const mediaStart = readElementPlaybackStart(rawEl);
-            if (Number.isFinite(start) && isInClipWindow(state.currentTime, start, end)) {
-              if (!rawEl.paused) {
-                clock.attachAudioSource({
-                  el: rawEl,
-                  compositionStart: start,
-                  mediaStart,
-                  rate: readElementRateSpec(rawEl),
-                });
-                foundActive = true;
-              } else if (rawEl.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
-                // Audio is buffering — freeze visuals at last known position
-                // instead of falling through to monotonic (which runs ahead).
-                clock.attachAudioSource({ currentTimeSeconds: state.currentTime });
-                foundActive = true;
-              }
-              break;
-            }
-          }
-          if (!foundActive && clock.hasAudioSource()) {
+          const source = followedOrLongestRunningAudio(clock.audioElement());
+          if (source && !source.el.paused) {
+            clock.attachAudioSource({
+              el: source.el,
+              compositionStart: source.start,
+              mediaStart: readElementPlaybackStart(source.el),
+              rate: readElementRateSpec(source.el),
+            });
+          } else if (source && source.el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+            // Audio is buffering — freeze visuals at last known position
+            // instead of falling through to monotonic (which runs ahead).
+            clock.attachAudioSource({ currentTimeSeconds: state.currentTime });
+          } else if (clock.hasAudioSource()) {
             clock.detachAudioSource();
           }
         }
