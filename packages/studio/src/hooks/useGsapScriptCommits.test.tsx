@@ -36,8 +36,14 @@ import type {
   MutationResult,
 } from "./gsapScriptCommitTypes";
 import { persistSdkSerialize } from "../utils/sdkCutover";
+import { jsonResponse } from "./fetchStubTestUtils";
 import { applyPreviewSync, useGsapScriptCommits } from "./useGsapScriptCommits";
-import { hasStudioPendingEdits } from "../utils/studioPendingEdits";
+import {
+  beginStudioPendingEdit,
+  hasStudioPendingEdits,
+  paintBackNewestStudioPendingEdit,
+} from "../utils/studioPendingEdits";
+import { observeGsapGesture } from "./gsapGestureOutcome";
 
 // ── applyPreviewSync (pure preview-sync decision) ────────────────────────────
 
@@ -489,6 +495,42 @@ describe("a GSAP script commit", () => {
     await act(async () => void (await committed));
     expect(hasStudioPendingEdits()).toBe(false);
   });
+
+  it("a gesture's write after an await is still its edit, and once undo paints that edit back it saves without drawing it", async () => {
+    applySoftReload.mockReturnValue("applied");
+    let respond!: () => void;
+    const body: MutationResult = { ok: true, changed: true, after: "AFTER", scriptText: "SCRIPT" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve({ ok: true, json: async () => body } as unknown as Response);
+          }),
+      ),
+    );
+    const deps = renderCommitHook();
+    const edit = beginStudioPendingEdit(() => () => undefined);
+    const saved = edit.adopt(async () => {
+      const writes = observeGsapGesture(deps.api.commitMutation);
+      await Promise.resolve();
+      return writes.commit!(selection, { x: 10 }, { label: "Move layer", softReload: true });
+    });
+    edit.settle(saved);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+
+    const shown = paintBackNewestStudioPendingEdit();
+    expect(shown).not.toBeNull();
+    await act(async () => {
+      respond();
+      await saved;
+    });
+    expect(deps.onFileContentChanged).toHaveBeenCalledWith("index.html", "AFTER");
+    expect(applySoftReload).not.toHaveBeenCalled();
+
+    shown!.showAgain();
+    expect(applySoftReload).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("runCommit — instantPatch wiring", () => {
@@ -715,6 +757,22 @@ describe("runCommit — instantPatch wiring", () => {
     expect(trackStudioEvent.mock.calls.filter(([event]) => event === "keyframe")).toEqual([]);
   });
 
+  it("rejects a refused write with the server's reason in a toast", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "file changed on disk" }, 409)),
+    );
+    const deps = renderCommitHook();
+
+    await expect(
+      deps.api.commitMutation(selection, { type: "add-keyframe" }, { label: "Add" }),
+    ).rejects.toThrow();
+    expect(deps.showToast).toHaveBeenCalledWith(
+      expect.stringContaining("file changed on disk"),
+      "error",
+    );
+  });
+
   const NESTED_SCRIPT = 'window.__timelines["root"] = tl;';
   const SUB = `<template><div data-composition-id="sub"><div id="nwid" style="left: 40px"></div></div></template>`;
 
@@ -867,6 +925,8 @@ describe("runCommit — instantPatch wiring", () => {
         body: JSON.stringify({ mutations: [firstMutation, lastMutation] }),
       }),
     );
+    const [, init] = vi.mocked(fetch).mock.calls[0]!;
+    expect(new Headers(init?.headers).get("X-Hyperframes-Write-Token")).toBeTruthy();
     expect(deps.recordEdit).toHaveBeenCalledTimes(1);
     expect(deps.recordEdit).toHaveBeenCalledWith(
       expect.objectContaining({ label: "Resize", coalesceKey: "tx:resize:1" }),
