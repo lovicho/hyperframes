@@ -26,6 +26,7 @@ import {
 } from "./gsapParserAcorn.js";
 import {
   classifyPropertyGroup,
+  isTweenConfigKey,
   isXYPositionWrite,
   positionHoldForAnimation,
 } from "./gsapConstants.js";
@@ -199,38 +200,9 @@ function upsertProp(ms: MagicString, objNode: Node, key: string, value: unknown)
   }
 }
 
-/**
- * Vars keys that are NOT editable transform/style props: builtins
- * (duration/ease/delay), dropped callbacks, and extras (stagger/yoyo/repeat/…).
- * The exact union of recast's BUILTIN_VAR_KEYS + DROPPED_VAR_KEYS + EXTRAS_KEYS,
- * so both writers classify vars keys identically. (Distinct from the keyframe-
- * conversion NON_EDITABLE_VAR_KEYS below, which intentionally omits `ease`
- * because that path re-emits ease separately.)
- */
-const NON_EDITABLE_PROP_KEYS = new Set([
-  "duration",
-  "ease",
-  "delay",
-  "onComplete",
-  "onStart",
-  "onUpdate",
-  "onRepeat",
-  "stagger",
-  "yoyo",
-  "repeat",
-  "repeatDelay",
-  "snap",
-  "overwrite",
-  "immediateRender",
-]);
-
-/**
- * Editable transform/style key test: anything NOT a builtin, dropped callback, or
- * extras key. Mirrors recast's isEditablePropertyKey so both writers classify
- * vars keys identically.
- */
+/** Editable transform/style key test, the same split both parsers make. */
 function isEditableVarKey(key: string): boolean {
-  return !NON_EDITABLE_PROP_KEYS.has(key);
+  return !isTweenConfigKey(key);
 }
 
 /**
@@ -463,17 +435,82 @@ export function shiftPositionsInScript(
   delta: number,
   root?: ParentNode,
 ): string {
-  const parsed = parseGsapScriptAcornForWrite(script);
-  if (!parsed) return script;
-  const carries = clipTweenMatcher(targetSelector, root);
-  const ms = new MagicString(script);
-  let changed = false;
-  for (const entry of parsed.located) {
-    if (!carries(entry.animation) || !hasExplicitTime(entry.animation)) continue;
-    overwritePosition(ms, entry.call, shiftedPosition(entry.animation.position, delta));
-    changed = true;
+  return retimeClipTweensInScript(script, [{ kind: "shift", targetSelector, delta }], root).script;
+}
+
+export type ClipTweenRetime =
+  | { kind: "shift"; targetSelector: string; delta: number }
+  | {
+      kind: "scale";
+      targetSelector: string;
+      oldStart: number;
+      oldDuration: number;
+      newStart: number;
+      newDuration: number;
+    };
+
+const isLiveRetime = (r: ClipTweenRetime) =>
+  r.kind === "shift" || (r.oldDuration > 0 && r.newDuration > 0);
+
+/** Moves `animation`'s written position and duration for one retime; says which of the two it wrote. */
+function applyRetime(
+  animation: GsapAnimation,
+  retime: ClipTweenRetime,
+): { position: boolean; duration: boolean } {
+  if (retime.kind === "shift") {
+    if (!hasExplicitTime(animation)) return { position: false, duration: false };
+    animation.position = shiftedPosition(animation.position, retime.delta);
+    return { position: true, duration: false };
   }
-  return changed ? ms.toString() : script;
+  const touched = { position: false, duration: false };
+  if (!isLiveRetime(retime) || typeof animation.position !== "number") return touched;
+  const ratio = retime.newDuration / retime.oldDuration;
+  if (hasExplicitTime(animation)) {
+    const scaled = retime.newStart + (animation.position - retime.oldStart) * ratio;
+    animation.position = Math.max(0, Math.round(scaled * 1000) / 1000);
+    touched.position = true;
+  }
+  if (typeof animation.duration === "number" && animation.duration > 0) {
+    animation.duration = Math.max(0.001, Math.round(animation.duration * ratio * 1000) / 1000);
+    touched.duration = true;
+  }
+  return touched;
+}
+
+/**
+ * Applies `retimes` in order with one parse: the bytes equal running shift/scalePositionsInScript once
+ * per retime. `changed[i]` says whether retime i moved a value.
+ */
+export function retimeClipTweensInScript(
+  script: string,
+  retimes: readonly ClipTweenRetime[],
+  root?: ParentNode,
+): { script: string; changed: boolean[] } {
+  const changed = retimes.map(() => false);
+  const parsed = retimes.some(isLiveRetime) ? parseGsapScriptAcornForWrite(script) : null;
+  if (!parsed) return { script, changed };
+  // Matchers share one query cache: each selector is looked up in the DOM once, not once per clip.
+  const queries = new Map<string, Element[]>();
+  const matchers = retimes.map((r) => clipTweenMatcher(r.targetSelector, root, queries));
+  const ms = new MagicString(script);
+  let wrote = false;
+  for (const entry of parsed.located) {
+    const animation = { ...entry.animation };
+    let position = false;
+    let duration = false;
+    retimes.forEach((retime, i) => {
+      if (!matchers[i]!(animation)) return;
+      const before = [animation.position, animation.duration];
+      const touched = applyRetime(animation, retime);
+      position ||= touched.position;
+      duration ||= touched.duration;
+      if (before[0] !== animation.position || before[1] !== animation.duration) changed[i] = true;
+    });
+    if (position) overwritePosition(ms, entry.call, animation.position as number);
+    if (duration) upsertProp(ms, entry.call.varsArg, "duration", animation.duration);
+    wrote ||= position || duration;
+  }
+  return { script: wrote ? ms.toString() : script, changed };
 }
 
 /** Copies each tween on `fromSelector` for `toSelector`, `delta` seconds later, in its own argument text. Exact or
@@ -587,29 +624,11 @@ export function scalePositionsInScript(
   newDuration: number,
   root?: ParentNode,
 ): string {
-  if (oldDuration <= 0 || newDuration <= 0) return script;
-  const ratio = newDuration / oldDuration;
-  const parsed = parseGsapScriptAcornForWrite(script);
-  if (!parsed) return script;
-  const carries = clipTweenMatcher(targetSelector, root);
-  const ms = new MagicString(script);
-  let changed = false;
-  for (const entry of parsed.located) {
-    if (!carries(entry.animation) || typeof entry.animation.position !== "number") continue;
-    if (hasExplicitTime(entry.animation)) {
-      const newPos = Math.max(
-        0,
-        Math.round((newStart + (entry.animation.position - oldStart) * ratio) * 1000) / 1000,
-      );
-      overwritePosition(ms, entry.call, newPos);
-    }
-    if (typeof entry.animation.duration === "number" && entry.animation.duration > 0) {
-      const newDur = Math.max(0.001, Math.round(entry.animation.duration * ratio * 1000) / 1000);
-      upsertProp(ms, entry.call.varsArg, "duration", newDur);
-    }
-    changed = true;
-  }
-  return changed ? ms.toString() : script;
+  return retimeClipTweensInScript(
+    script,
+    [{ kind: "scale", targetSelector, oldStart, oldDuration, newStart, newDuration }],
+    root,
+  ).script;
 }
 
 export function addAnimationToScript(
@@ -1070,8 +1089,8 @@ export function updateKeyframeInScript(
   }
 
   // Array-form keyframes (`keyframes: [{x,y}, ...]`) carry no explicit percentages
-  // — GSAP distributes them evenly, and the runtime read assigns even percentages
-  // (0, 100/(n-1), …). Map the percentage back to an array index and overwrite that
+  // — GSAP ends step i of n at its cumulative share (getObjectArrayKeyframeTiming).
+  // Map the percentage back to an array index and overwrite that
   // element in place (preserving the array form). Without this the function bailed
   // on the ObjectExpression check, so dragging a motion-path node on an array-form
   // tween committed nothing (server no-op).
@@ -1207,11 +1226,12 @@ function convertArrayKeyframesToObject(script: string, target: Node): string {
     return `${JSON.stringify(`${timing.percentages[i]}%`)}: ${recordToCode(record)}`;
   });
   const ms = new MagicString(script);
-  ms.overwrite(kfPropNode.value.start, kfPropNode.value.end, `{ ${entries.join(", ")} }`);
-  if (
-    timing.totalDuration !== undefined &&
-    findPropertyNode(target.call.varsArg, "duration") === undefined
-  ) {
+  ms.overwrite(
+    kfPropNode.value.start,
+    kfPropNode.value.end,
+    `{ ${entries.join(", ")}, easeEach: "none" }`,
+  );
+  if (findPropertyNode(target.call.varsArg, "duration") === undefined) {
     upsertProp(ms, target.call.varsArg, "duration", timing.totalDuration);
   }
   return ms.toString();

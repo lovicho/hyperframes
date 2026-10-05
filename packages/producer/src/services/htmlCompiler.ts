@@ -53,6 +53,7 @@ import {
   inlineScriptRuns,
   styleElementsFor,
   insertBeforeCloseTag,
+  isRuntimeFileUrl,
 } from "@hyperframes/core/compiler";
 import {
   checkSubCompositionUsability,
@@ -87,7 +88,7 @@ import type { Page } from "puppeteer-core";
 import {
   injectDeterministicFontFaces,
   normalizeSystemFontPrimaryFamilies,
-} from "./deterministicFonts.js";
+} from "@hyperframes/core/fonts/embed";
 import { prepareAnimatedGifInputs } from "./animatedGifPrep.js";
 import { createStudioPositionSeekReapplyScript } from "@hyperframes/studio-server/manual-edits-render-script";
 import { getPositionEditsRenderScript } from "@hyperframes/core/runtime/position-edits-render";
@@ -1208,7 +1209,7 @@ export async function inlineExternalScripts(html: string): Promise<string> {
 
   for (const el of scripts) {
     const src = (el.getAttribute("src") || "").trim();
-    if (src && isHttpUrl(src)) {
+    if (src && isHttpUrl(src) && !isRuntimeFileUrl(src)) {
       externalScripts.push({ el: el as unknown as Element, src });
     }
   }
@@ -1776,7 +1777,7 @@ async function readLocalFont(absPath: string): Promise<LocalFontRead> {
 
 // fallow-ignore-next-line complexity
 async function embedLocalFontFaces(html: string, projectDir: string): Promise<string> {
-  const { fontToDataUri: toDataUri } = await import("./fontCompression.js");
+  const { fontToDataUri: toDataUri } = await import("@hyperframes/core/fonts/embed");
   const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
   const fontFaceRe = /@font-face\s*\{([^}]*)\}/gi;
   let result = html;
@@ -2017,6 +2018,7 @@ export async function compileForRender(
   );
 
   const coalescedHtml = await injectDeterministicFontFaces(normalizedFontHtml, {
+    logger: defaultLogger,
     failClosedFontFetch: options.failClosedFontFetch === true,
     allowSystemFontCapture: options.allowSystemFontCapture,
     abortSignal: options.abortSignal,

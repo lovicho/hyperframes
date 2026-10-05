@@ -57,6 +57,8 @@ import {
   removeAnimationFromScript as removeAnimAcorn,
   shiftPositionsInScript as shiftAcorn,
   scalePositionsInScript as scaleAcorn,
+  retimeClipTweensInScript,
+  type ClipTweenRetime,
   dedupePositionWritesInScript as dedupePosAcorn,
 } from "./gsapWriterAcorn.js";
 
@@ -236,15 +238,15 @@ describe("removeKeyframeFromScript: array-form keyframes (recast + acorn parity)
     const id = acornId(arrayScript);
     expect(parseGsapScript(arrayScript).animations[0]!.id).toBe(id);
 
-    const recastOut = removeKeyframeRecast(arrayScript, id, 67);
-    const acornOut = removeKeyframeAcorn(arrayScript, id, 67);
+    const recastOut = removeKeyframeRecast(arrayScript, id, 75);
+    const acornOut = removeKeyframeAcorn(arrayScript, id, 75);
 
     expect(recastOut).not.toBe(arrayScript);
     expect(acornOut).not.toBe(arrayScript);
 
     const recShape = shapeOf(recastOut);
     expect(recShape.keyframes?.keyframes.length).toBe(3);
-    // the 67% element { x: -320, y: 40 } is the one removed
+    // the 75% element { x: -320, y: 40 } is the one removed
     expect(JSON.stringify(recShape.keyframes)).not.toContain("-320");
     expect(modelOf(acornOut)).toEqual(modelOf(recastOut));
   });
@@ -1318,25 +1320,25 @@ describe("moveKeyframeInScript: array-form keyframes (recast + acorn parity)", (
   ] as const) {
     it(`${label}: normalizes the array then retimes the moved keyframe`, () => {
       const id = acornId(KF_ADD_ARRAY_SCRIPT);
-      const out = move(KF_ADD_ARRAY_SCRIPT, id, 50, 75);
+      const out = move(KF_ADD_ARRAY_SCRIPT, id, 66.7, 50);
       expect(out).not.toBe(KF_ADD_ARRAY_SCRIPT);
       const kfs = shapeOf(out).keyframes?.keyframes ?? [];
-      expect(kfs.map((k) => k.percentage)).toEqual([0, 75, 100]);
-      expect(kfs.find((k) => k.percentage === 75)!.properties).toEqual({ x: 50, y: 80 });
+      expect(kfs.map((k) => k.percentage)).toEqual([33.3, 50, 100]);
+      expect(kfs.find((k) => k.percentage === 50)!.properties).toEqual({ x: 50, y: 80 });
     });
   }
 
   it("parity: both writers reparse to the same model", () => {
     const id = acornId(KF_ADD_ARRAY_SCRIPT);
-    expect(modelOf(moveKeyframeAcorn(KF_ADD_ARRAY_SCRIPT, id, 50, 75))).toEqual(
-      modelOf(moveKeyframeRecast(KF_ADD_ARRAY_SCRIPT, id, 50, 75)),
+    expect(modelOf(moveKeyframeAcorn(KF_ADD_ARRAY_SCRIPT, id, 66.7, 50))).toEqual(
+      modelOf(moveKeyframeRecast(KF_ADD_ARRAY_SCRIPT, id, 66.7, 50)),
     );
   });
 
   it("leaves array-form source untouched when the destination is occupied", () => {
     const id = acornId(KF_ADD_ARRAY_SCRIPT);
-    expect(moveKeyframeAcorn(KF_ADD_ARRAY_SCRIPT, id, 50, 100)).toBe(KF_ADD_ARRAY_SCRIPT);
-    expect(moveKeyframeRecast(KF_ADD_ARRAY_SCRIPT, id, 50, 100)).toBe(KF_ADD_ARRAY_SCRIPT);
+    expect(moveKeyframeAcorn(KF_ADD_ARRAY_SCRIPT, id, 66.7, 100)).toBe(KF_ADD_ARRAY_SCRIPT);
+    expect(moveKeyframeRecast(KF_ADD_ARRAY_SCRIPT, id, 66.7, 100)).toBe(KF_ADD_ARRAY_SCRIPT);
   });
 
   it("normalizes duration-authored percentages before moving", () => {
@@ -1446,8 +1448,8 @@ describe("resizeKeyframedTweenInScript: preserves author intent (acorn + recast)
 // drag-to-retime re-keys existing keyframes to arbitrary percentages, which an
 // array can't host. Both writers now normalize array → object form first.
 const RESIZE_ARRAY_REMAP = [
-  { from: 0, to: 0 },
-  { from: 50, to: 25 },
+  { from: 33.3, to: 16.7 },
+  { from: 66.7, to: 33.3 },
   { from: 100, to: 100 },
 ];
 
@@ -1461,8 +1463,8 @@ describe("resizeKeyframedTweenInScript: array-form keyframes (recast + acorn par
       const out = resize(KF_ADD_ARRAY_SCRIPT, id, 0.2, 2, RESIZE_ARRAY_REMAP);
       expect(out).not.toBe(KF_ADD_ARRAY_SCRIPT);
       const kfs = shapeOf(out).keyframes?.keyframes ?? [];
-      expect(kfs.map((k) => k.percentage)).toEqual([0, 25, 100]);
-      expect(kfs.find((k) => k.percentage === 25)!.properties).toEqual({ x: 50, y: 80 });
+      expect(kfs.map((k) => k.percentage)).toEqual([16.7, 33.3, 100]);
+      expect(kfs.find((k) => k.percentage === 33.3)!.properties).toEqual({ x: 50, y: 80 });
     });
   }
 
@@ -1982,6 +1984,131 @@ tl.to("#el", { y: 50, duration: 1 }, "+=0.5");`;
 
   it("no-op when newDuration <= 0", () => {
     expect(scaleAcorn(POSITIONS_MULTI, "#hero", 0, 1, 2, 0)).toBe(POSITIONS_MULTI);
+  });
+});
+
+describe("retimeClipTweensInScript: one parse, the bytes of one call per retime", () => {
+  const { document } = parseHTML(`<html><body>
+<div id="scene" data-start="1" data-duration="4"><h1>Hi</h1><p id="child">Kid</p></div>
+<div id="side" data-start="0" data-duration="8"></div>
+</body></html>`);
+  const script = `const tl = gsap.timeline({ paused: true });
+tl.from("#scene", { opacity: 0, duration: 1 }, 1);
+tl.from("#scene h1", { y: 20, duration: 1.25 }, 1.5);
+tl.to("#child", { rotation: 90 });
+tl.to(["#child", "#side"], { x: 1, duration: 1 }, 0.2);
+tl.to("#side", { x: 5, duration: 1 }, 2);
+tl.to("#side", { y: 5, duration: 1 }, "+=0.5");
+tl.to("#hero", { opacity: 0, duration: 0.5 }, 0.0004);`;
+  const oneByOne = (source: string, retimes: ClipTweenRetime[]) =>
+    retimes.reduce(
+      (current, r) =>
+        r.kind === "shift"
+          ? shiftAcorn(current, r.targetSelector, r.delta, document)
+          : scaleAcorn(
+              current,
+              r.targetSelector,
+              r.oldStart,
+              r.oldDuration,
+              r.newStart,
+              r.newDuration,
+              document,
+            ),
+      source,
+    );
+  const cases: Array<[string, ClipTweenRetime[]]> = [
+    [
+      "shifts of several clips, one clamped at zero",
+      [
+        { kind: "shift", targetSelector: "#scene", delta: 2 },
+        { kind: "shift", targetSelector: "#side", delta: -0.5 },
+        { kind: "shift", targetSelector: "#hero", delta: 0.3333 },
+      ],
+    ],
+    [
+      "two retimes landing on the same tween, in order",
+      [
+        { kind: "shift", targetSelector: "#child", delta: -0.3 },
+        {
+          kind: "scale",
+          targetSelector: "#side",
+          oldStart: 0,
+          oldDuration: 8,
+          newStart: 1,
+          newDuration: 3,
+        },
+        { kind: "shift", targetSelector: "#side", delta: 0.75 },
+      ],
+    ],
+    [
+      "scales then a shift of the parent clip",
+      [
+        {
+          kind: "scale",
+          targetSelector: "#scene",
+          oldStart: 1,
+          oldDuration: 4,
+          newStart: 1,
+          newDuration: 7,
+        },
+        {
+          kind: "scale",
+          targetSelector: "#scene",
+          oldStart: 1,
+          oldDuration: 7,
+          newStart: 2,
+          newDuration: 7,
+        },
+        { kind: "shift", targetSelector: "#scene", delta: -1.5 },
+      ],
+    ],
+  ];
+  for (const [name, retimes] of cases) {
+    it(name, () => {
+      const folded = retimeClipTweensInScript(script, retimes, document);
+      expect(folded.script).toBe(oneByOne(script, retimes));
+      expect(folded.script).not.toBe(script);
+    });
+  }
+
+  it("answers every #id lookup from one DOM walk, duplicate ids included", () => {
+    const { document: dup } = parseHTML(`<html><body>
+<div id="a" data-start="0" data-duration="2"></div><div id="b" data-start="0" data-duration="2"></div>
+<div id="a" data-start="3" data-duration="2"></div></body></html>`);
+    const retimes: ClipTweenRetime[] = ["#a", "#b", "#c"].map((targetSelector) => ({
+      kind: "shift",
+      targetSelector,
+      delta: 1,
+    }));
+    const source = `const tl = gsap.timeline();\ntl.to("#b", { x: 1 }, 1);\ntl.to("#a", { y: 1 }, 2);`;
+    const expected = retimes.reduce(
+      (current, r) =>
+        r.kind === "shift" ? shiftAcorn(current, r.targetSelector, r.delta, dup) : current,
+      source,
+    );
+    const queried: string[] = [];
+    const real = dup.querySelectorAll.bind(dup);
+    dup.querySelectorAll = ((selector: string) => (
+      queried.push(selector), real(selector)
+    )) as typeof real;
+    expect(retimeClipTweensInScript(source, retimes, dup).script).toBe(expected);
+    expect(queried).toEqual(["[id]"]);
+  });
+
+  it("reports which retimes moved something and leaves a script nothing matches alone", () => {
+    const folded = retimeClipTweensInScript(
+      script,
+      [
+        { kind: "shift", targetSelector: "#nobody", delta: 1 },
+        { kind: "shift", targetSelector: "#side", delta: 1 },
+      ],
+      document,
+    );
+    expect(folded.changed).toEqual([false, true]);
+    const none = retimeClipTweensInScript(script, [
+      { kind: "shift", targetSelector: "#nobody", delta: 1 },
+    ]);
+    expect(none.script).toBe(script);
   });
 });
 

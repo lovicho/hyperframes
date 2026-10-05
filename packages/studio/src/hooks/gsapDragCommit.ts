@@ -5,14 +5,19 @@
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import { usePlayerStore } from "../player/store/playerStore";
-import { resolveTweenStart, resolveTweenDuration } from "../utils/globalTimeCompiler";
+import {
+  percentageToAbsoluteForAnimation,
+  resolveTweenStart,
+  resolveTweenDuration,
+} from "../utils/globalTimeCompiler";
 import { roundTo3, roundToLayoutPx } from "../utils/rounding";
 import { computeElementPercentage, keyframeEases, writeTargetSelector } from "./gsapShared";
 import { computeDraggedGsapPosition } from "./draggedGsapPosition";
 import type { CommitMutation } from "./gsapScriptCommitTypes";
 import { isGestureTransactionCommit, runGestureTransaction } from "./gestureTransaction";
 import { setPatchFromUpdateProperty } from "./gsapDragStaticSetHelpers";
-import { GsapEditBlockedError } from "./gsapEditOutcome";
+import { GsapEditBlockedError, type PlayheadEditRefusal } from "./gsapEditOutcome";
+import { isTweenConfigKey } from "@hyperframes/parsers/gsap-constants";
 export {
   findExistingPositionWrite,
   findRotationSetAnimation,
@@ -53,10 +58,9 @@ export function computeCurrentPercentage(
 // 1.2 start), so the post-commit reseek renders the element's base pose and the edit
 // looks like it snapped away. Keeping the playhead on the edited keyframe avoids that.
 export function parkPlayheadOnKeyframe(anim: GsapAnimation, pct: number): void {
-  const ts = resolveTweenStart(anim);
-  const td = resolveTweenDuration(anim);
-  if (ts == null || !td || td <= 0) return;
-  usePlayerStore.getState().requestSeek(roundTo3(ts + (pct / 100) * td));
+  const time = percentageToAbsoluteForAnimation(pct, anim);
+  if (time === null || resolveTweenDuration(anim) <= 0) return;
+  usePlayerStore.getState().requestSeek(roundTo3(time));
 }
 
 async function replaceKeyframedPositionHold(
@@ -115,6 +119,36 @@ export async function materializeIfDynamic(
   void commitMutation;
   void selection;
   throw new GsapEditBlockedError("source-uneditable", "geometry-unresolved-source");
+}
+
+/** Why a percentage keyframe can't stand in for this array step entry, or null when it can. */
+function stepBlock([key, value]: [string, number | string]): PlayheadEditRefusal | null {
+  if (key === "delay") return "array-step-delay";
+  if (/^on[A-Z]/.test(key)) return "array-step-callback";
+  if (isTweenConfigKey(key)) return "array-step-config";
+  if (typeof value === "number") return null;
+  return STEP_VALUE_BLOCKS.find(([pattern]) => pattern.test(value))?.[1] ?? null;
+}
+
+/** First match wins: code is computed, even when it calls random(). */
+const STEP_VALUE_BLOCKS: Array<[RegExp, PlayheadEditRefusal]> = [
+  [/^__raw:/, "array-step-computed"],
+  [/random\(/, "array-step-random"],
+  [/[-+*/]=/, "array-step-relative"],
+];
+
+/** Why a step list can't be rewritten as percentage keyframes, or null. */
+export function stepListBlock(anim: GsapAnimation): PlayheadEditRefusal | null {
+  const data = anim.keyframes;
+  if (data?.format !== "object-array") return null;
+  const entries = data.keyframes.flatMap((kf) => Object.entries(kf.properties));
+  return entries.map(stepBlock).find(Boolean) ?? null;
+}
+
+/** Whole-offset writers rewrite every step as a keyframe; refuse a list that holds more than values. */
+export function refuseStepListRewrite(anim: GsapAnimation): void {
+  const step = stepListBlock(anim);
+  if (step) throw new GsapEditBlockedError("keyframes-uneditable", step);
 }
 
 // ── Drag → GSAP position math ──────────────────────────────────────────────
@@ -330,6 +364,7 @@ export async function commitWholePathOffset(
   // fallow-ignore-next-line code-duplication
   let effectiveAnim = anim;
   if (anim.keyframes) {
+    refuseStepListRewrite(anim);
     const newId = await materializeIfDynamic(anim, iframe, callbacks.commitMutation, selection);
     if (newId) effectiveAnim = { ...anim, id: newId };
   }

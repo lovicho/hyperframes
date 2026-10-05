@@ -7,6 +7,8 @@
 
 import type { GsapAnimation } from "./gsapSerialize.js";
 
+export const GSAP_DEFAULT_DURATION = 0.5;
+
 export const SUPPORTED_PROPS = [
   // 2D Transforms
   "x",
@@ -47,6 +49,29 @@ export const SUPPORTED_PROPS = [
   // DOM content (number counters, text roll-ups)
   "innerText",
 ];
+
+/** Keys stored on dedicated GsapAnimation fields (not in properties/extras). */
+export const BUILTIN_VAR_KEYS: ReadonlySet<string> = new Set(["duration", "ease", "delay"]);
+export const DROPPED_VAR_KEYS: ReadonlySet<string> = new Set([
+  "onComplete",
+  "onStart",
+  "onUpdate",
+  "onRepeat",
+]);
+/** Keys that go in `extras`: non-editable GSAP config that must survive round-trips. */
+export const EXTRAS_KEYS: ReadonlySet<string> = new Set([
+  "stagger",
+  "yoyo",
+  "repeat",
+  "repeatDelay",
+  "snap",
+  "overwrite",
+  "immediateRender",
+]);
+
+export function isTweenConfigKey(key: string): boolean {
+  return BUILTIN_VAR_KEYS.has(key) || DROPPED_VAR_KEYS.has(key) || EXTRAS_KEYS.has(key);
+}
 
 // ── Property Groups ─────────────────────────────────────────────────────────
 // Each group maps to an independent GSAP tween so editing one property
@@ -115,7 +140,7 @@ function knownStart(animation: GsapAnimation): number | undefined {
 }
 
 /**
- * What a Studio hold pins from t=0 before a later keyframed tween: its first keyframe's position props,
+ * What a Studio hold pins from t=0 before a later keyframed tween: its 0% keyframe's position props,
  * minus those an earlier timeline tween on the target writes (a global `gsap.set` is a base value).
  */
 export function positionHoldForAnimation(
@@ -125,10 +150,8 @@ export function positionHoldForAnimation(
   if (!animation.keyframes) return null;
   const start = knownStart(animation) ?? 0;
   if (!(start > 0.001)) return null;
-  const first = [...animation.keyframes.keyframes].sort(
-    (left, right) => left.percentage - right.percentage,
-  )[0];
-  if (!first) return null;
+  const atStart = animation.keyframes.keyframes.find((keyframe) => keyframe.percentage === 0);
+  if (!atStart) return null;
   // A tween whose start the parser could not resolve (a label, say) is not known to come first.
   const earlier = animations.filter((other) => {
     const otherStart = knownStart(other);
@@ -141,7 +164,7 @@ export function positionHoldForAnimation(
     );
   });
   const position: Record<string, number> = {};
-  for (const [property, value] of Object.entries(first.properties)) {
+  for (const [property, value] of Object.entries(atStart.properties)) {
     if (classifyPropertyGroup(property) !== "position" || typeof value !== "number") continue;
     if (earlier.some((other) => writesProperty(other, property))) continue;
     position[property] = value;

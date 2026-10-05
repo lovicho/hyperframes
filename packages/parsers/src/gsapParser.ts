@@ -52,10 +52,12 @@ export {
 import {
   classifyPropertyGroup,
   classifyTweenPropertyGroup,
+  GSAP_DEFAULT_DURATION,
   isXYPositionWrite,
   positionHoldForAnimation,
 } from "./gsapConstants";
 import type { PropertyGroupName } from "./gsapConstants";
+import { BUILTIN_VAR_KEYS, DROPPED_VAR_KEYS, EXTRAS_KEYS, isTweenConfigKey } from "./gsapConstants";
 import { clipTweenMatcher, hasExplicitTime } from "./clipTweens";
 import {
   findObjectArrayKeyframeIndex,
@@ -707,23 +709,6 @@ function findAllTweenCalls(
   return results;
 }
 
-/** Keys that are stored on dedicated GsapAnimation fields (not in properties/extras). */
-const BUILTIN_VAR_KEYS = new Set(["duration", "ease", "delay"]);
-
-/** Keys that are never preserved (callbacks / advanced patterns). */
-const DROPPED_VAR_KEYS = new Set(["onComplete", "onStart", "onUpdate", "onRepeat"]);
-
-/** Keys that belong in `extras` — non-editable GSAP config that must survive round-trips. */
-const EXTRAS_KEYS = new Set([
-  "stagger",
-  "yoyo",
-  "repeat",
-  "repeatDelay",
-  "snap",
-  "overwrite",
-  "immediateRender",
-]);
-
 /**
  * Extract raw source text for a property in an ObjectExpression AST node.
  * Returns the printed source of the value node, suitable for verbatim re-emission.
@@ -1101,7 +1086,7 @@ function tweenCallToAnimation(
         percentage: waypoints.length > 1 ? Math.round((i / (waypoints.length - 1)) * 100) : 0,
         properties: { x: wp.x, y: wp.y },
       }));
-      keyframesData = { format: "percentage", keyframes: kf };
+      keyframesData = { format: "percentage", keyframes: kf, fromMotionPath: true };
     } else {
       // Merge waypoint positions into existing keyframes at matching percentages.
       // If keyframe count matches waypoint count, assign positionally.
@@ -1169,8 +1154,6 @@ function tweenCallToAnimation(
 
 // ── Timeline Position Resolution ──────────────────────────────────────────
 
-const GSAP_DEFAULT_DURATION = 0.5;
-
 // NOTE: Label-based positions (e.g. "myLabel+=0.5") are not yet resolved —
 // they fall through to parseFloat which returns null for non-numeric strings.
 function resolvePositionString(pos: string, cursor: number, prevStart: number): number | null {
@@ -1208,7 +1191,11 @@ function applyTimelineDefaults(
     if (anim.duration === undefined && defaults.duration !== undefined) {
       anim.duration = defaults.duration;
     }
-    if (anim.ease === undefined && defaults.ease !== undefined) {
+    if (
+      anim.ease === undefined &&
+      defaults.ease !== undefined &&
+      (!anim.keyframes || anim.keyframes.fromMotionPath)
+    ) {
       anim.ease = defaults.ease;
     }
   }
@@ -1387,7 +1374,7 @@ function isObjectProperty(prop: AstNode): boolean {
 
 /** A key the inspector treats as an editable transform/style property. */
 function isEditablePropertyKey(key: string): boolean {
-  return !BUILTIN_VAR_KEYS.has(key) && !DROPPED_VAR_KEYS.has(key) && !EXTRAS_KEYS.has(key);
+  return !isTweenConfigKey(key);
 }
 
 function makeObjectProperty(key: string, value: number | string | boolean): AstNode {
@@ -2240,7 +2227,7 @@ function convertArrayKeyframesToObjectNode(varsArg: AstNode, scope: ScopeBinding
     outerDuration,
   );
   if (!timing) return null;
-  if (timing.totalDuration !== undefined && findPropertyNode(varsArg, "duration") === undefined) {
+  if (findPropertyNode(varsArg, "duration") === undefined) {
     setVarsKey(varsArg, "duration", timing.totalDuration);
   }
   const entries = els.map((el: AstNode, i: number) => {
@@ -2249,7 +2236,7 @@ function convertArrayKeyframesToObjectNode(varsArg: AstNode, scope: ScopeBinding
     );
     return `${JSON.stringify(`${timing.percentages[i]}%`)}: ${recast.print(el).code}`;
   });
-  prop.value = parseExpr(`{ ${entries.join(", ")} }`);
+  prop.value = parseExpr(`{ ${entries.join(", ")}, easeEach: "none" }`);
   return prop.value;
 }
 

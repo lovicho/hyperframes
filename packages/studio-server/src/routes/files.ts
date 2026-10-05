@@ -76,8 +76,8 @@ import {
   replaceTweenWithKeyframesInScript,
   splitAnimationsInScript,
   splitIntoPropertyGroupsFromScript,
-  shiftPositionsInScript,
-  scalePositionsInScript,
+  retimeClipTweensInScript,
+  type ClipTweenRetime,
   dedupePositionWritesInScript,
   syncPositionHoldsBeforeKeyframes,
   clipQueryRoot,
@@ -1357,7 +1357,7 @@ function resolveReplacementEaseEach(
 // Mutations that can change a position tween's first keyframe (value/existence/timing)
 // and therefore require the pre-keyframe hold-`set`s to be re-synced afterwards.
 // `syncPositionHoldsBeforeKeyframes` rebuilds all `hf-hold` sets from scratch: it acts
-// on every tween that has keyframes whose first percentage carries a position prop and
+// on every tween whose 0% keyframe carries a position prop and
 // whose start is > 0. So any mutation that creates such a tween, retargets it, or moves
 // its start across the t=0 boundary must trigger a re-sync.
 const HOLD_SYNC_MUTATION_TYPES = new Set<string>([
@@ -1491,6 +1491,46 @@ async function prepareGsapMutationScript(
   return { html, beforeHtml, block };
 }
 
+type RetimeSlot = ClipTweenRetime | "no-op";
+
+function retimeRuns(mutations: readonly GsapMutationRequest[]): Map<number, RetimeSlot[]> {
+  const runs = new Map<number, RetimeSlot[]>();
+  let start = -1;
+  mutations.forEach((mutation, index) => {
+    const retime = clipRetimeOf(mutation);
+    if (!retime) return void (start = -1);
+    if (start < 0) runs.set((start = index), []);
+    runs.get(start)!.push(retime);
+  });
+  return runs;
+}
+
+// The one owner of the clip-retime no-op rules; a no-op keeps its slot so flags line up.
+function clipRetimeOf(mutation: GsapMutationRequest): RetimeSlot | null {
+  if (mutation.type === "shift-positions") {
+    const { targetSelector, delta } = mutation;
+    return targetSelector && Number.isFinite(delta) && delta !== 0
+      ? { kind: "shift", targetSelector, delta }
+      : "no-op";
+  }
+  if (mutation.type !== "scale-positions") return null;
+  const { targetSelector, oldStart, oldDuration, newStart, newDuration } = mutation;
+  const finite = [oldStart, oldDuration, newStart, newDuration].every(Number.isFinite);
+  if (!targetSelector || !finite || oldDuration <= 0 || newDuration <= 0) return "no-op";
+  if (oldStart === newStart && oldDuration === newDuration) return "no-op";
+  return { kind: "scale", targetSelector, oldStart, oldDuration, newStart, newDuration };
+}
+
+function retimeRun(script: string, run: readonly RetimeSlot[], root: ParentNode | undefined) {
+  const live = run.filter((slot): slot is ClipTweenRetime => slot !== "no-op");
+  const retimed = retimeClipTweensInScript(script, live, root);
+  const synced = syncPositionHoldsBeforeKeyframes(retimed.script);
+  let next = 0;
+  const changed = run.map((slot) => slot !== "no-op" && retimed.changed[next++]!);
+  if (synced !== retimed.script) changed[changed.length - 1] = true;
+  return { script: synced, changed: synced === script ? changed.map(() => false) : changed };
+}
+
 async function applyGsapMutations(
   c: RouteContext,
   res: ResolvedGsapFile,
@@ -1516,7 +1556,17 @@ async function applyGsapMutations(
   }
 
   const mutationChanges: boolean[] = [];
-  for (const mutation of mutations) {
+  const retimes = writer === "acorn" ? retimeRuns(mutations) : new Map<number, RetimeSlot[]>();
+  for (let index = 0; index < mutations.length; index++) {
+    const run = retimes.get(index);
+    if (run) {
+      const retimed = retimeRun(block.scriptText, run, block.root);
+      mutationChanges.push(...retimed.changed);
+      block.scriptText = retimed.script;
+      index += run.length - 1;
+      continue;
+    }
+    const mutation = mutations[index]!;
     const previousScript = block.scriptText;
     const result = await executeGsapMutation(mutation, block, respond, writer);
     if (result instanceof Response) return result;
@@ -1864,41 +1914,18 @@ function executeGsapMutationAcorn(
     case "unroll-timeline": {
       return unrollComputedTimeline(block.scriptText);
     }
-    case "shift-positions": {
-      const { targetSelector, delta } = body;
-      if (!targetSelector || !Number.isFinite(delta) || delta === 0) return block.scriptText;
-      return shiftPositionsInScript(block.scriptText, targetSelector, delta, block.root);
-    }
     case "shift-positions-batch": {
-      let script = block.scriptText;
-      for (const s of body.shifts) {
-        if (!s.targetSelector || !Number.isFinite(s.delta) || s.delta === 0) continue;
-        script = shiftPositionsInScript(script, s.targetSelector, s.delta, block.root);
-      }
-      return script;
+      const shifts = body.shifts
+        .filter((s) => s.targetSelector && Number.isFinite(s.delta) && s.delta !== 0)
+        .map((s) => ({ kind: "shift" as const, targetSelector: s.targetSelector, delta: s.delta }));
+      return retimeClipTweensInScript(block.scriptText, shifts, block.root).script;
     }
+    case "shift-positions":
     case "scale-positions": {
-      const { targetSelector, oldStart, oldDuration, newStart, newDuration } = body;
-      if (
-        !targetSelector ||
-        !Number.isFinite(oldStart) ||
-        !Number.isFinite(oldDuration) ||
-        !Number.isFinite(newStart) ||
-        !Number.isFinite(newDuration) ||
-        oldDuration <= 0 ||
-        newDuration <= 0
-      )
-        return block.scriptText;
-      if (oldStart === newStart && oldDuration === newDuration) return block.scriptText;
-      return scalePositionsInScript(
-        block.scriptText,
-        targetSelector,
-        oldStart,
-        oldDuration,
-        newStart,
-        newDuration,
-        block.root,
-      );
+      const retime = clipRetimeOf(body);
+      return retime && retime !== "no-op"
+        ? retimeClipTweensInScript(block.scriptText, [retime], block.root).script
+        : block.scriptText;
     }
     default:
       return respond({ error: `unknown mutation type: ${(body as { type: string }).type}` }, 400);

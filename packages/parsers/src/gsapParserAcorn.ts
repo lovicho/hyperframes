@@ -18,7 +18,13 @@ import type {
   GsapPercentageKeyframe,
   ParsedGsap,
 } from "./gsapSerialize.js";
-import { classifyTweenPropertyGroup } from "./gsapConstants.js";
+import {
+  BUILTIN_VAR_KEYS,
+  classifyTweenPropertyGroup,
+  DROPPED_VAR_KEYS,
+  EXTRAS_KEYS,
+  GSAP_DEFAULT_DURATION,
+} from "./gsapConstants.js";
 import { buildArcPath } from "./gsapSerialize.js";
 import { inlineComputedTimelines, readProvenance } from "./gsapInline.js";
 import { getObjectArrayKeyframeTiming } from "./gsapObjectArrayTiming.js";
@@ -859,21 +865,6 @@ function findTimelineVar(ast: any, scope?: ScopeBindings): TimelineDetection {
 
 // ── Tween call collection ─────────────────────────────────────────────────────
 
-/** Keys stored on dedicated GsapAnimation fields (not in properties/extras). */
-const BUILTIN_VAR_KEYS = new Set(["duration", "ease", "delay"]);
-/** Keys never preserved (callbacks / advanced patterns). */
-const DROPPED_VAR_KEYS = new Set(["onComplete", "onStart", "onUpdate", "onRepeat"]);
-/** Keys that go in `extras` — non-editable GSAP config that must survive round-trips. */
-const EXTRAS_KEYS = new Set([
-  "stagger",
-  "yoyo",
-  "repeat",
-  "repeatDelay",
-  "snap",
-  "overwrite",
-  "immediateRender",
-]);
-
 export interface TweenCallInfo {
   node: any;
   /** acorn-walk ancestor array at the call site (root→call, call is last). */
@@ -1082,6 +1073,9 @@ function computeKeyframesTotalDuration(
   return getObjectArrayKeyframeTiming(durations)?.totalDuration;
 }
 
+const isFullyReadableStep = (el: any) =>
+  el?.type === "ObjectExpression" && !el.properties.some((p: any) => p.type === "SpreadElement");
+
 // fallow-ignore-next-line complexity
 function parseObjectArrayKeyframes(
   node: any,
@@ -1096,7 +1090,7 @@ function parseObjectArrayKeyframes(
   }> = [];
 
   for (const el of elements) {
-    if (!el || el.type !== "ObjectExpression") continue;
+    if (!isFullyReadableStep(el)) return undefined;
     const record = objectExpressionToRecord(el, scope, source);
     const properties: Record<string, number | string> = {};
     let duration: unknown;
@@ -1108,6 +1102,9 @@ function parseObjectArrayKeyframes(
         ease = v;
       } else if (typeof v === "number" || typeof v === "string") {
         properties[k] = v;
+      } else {
+        // A step flag (runBackwards: true) is no channel and a rewrite would drop it.
+        return undefined;
       }
     }
     raw.push({ properties, duration, ease });
@@ -1324,7 +1321,7 @@ function tweenCallToAnimation(
         percentage: waypoints.length > 1 ? Math.round((i / (waypoints.length - 1)) * 100) : 0,
         properties: { x: wp.x, y: wp.y },
       }));
-      keyframesData = { format: "percentage", keyframes: kf };
+      keyframesData = { format: "percentage", keyframes: kf, fromMotionPath: true };
     } else {
       const kfs = keyframesData.keyframes;
       if (kfs.length === waypoints.length) {
@@ -1364,11 +1361,11 @@ function tweenCallToAnimation(
   let duration = typeof vars.duration === "number" ? vars.duration : undefined;
   const ease = typeof vars.ease === "string" ? vars.ease : undefined;
 
-  if (duration === undefined && keyframesData) {
-    duration = computeKeyframesTotalDuration(call.varsArg, scope, source);
-  }
   const durationUnresolved =
     call.method !== "set" && duration === undefined && hasUnknownDuration(call.varsArg, scope);
+  if (duration === undefined && keyframesData && !durationUnresolved) {
+    duration = computeKeyframesTotalDuration(call.varsArg, scope, source);
+  }
 
   // Relabel object-proxy / empty-target tweens so they don't read as bare
   // __unresolved__: a dwell/hold spacer or an onUpdate-driven DOM channel (#5/#11).
@@ -1513,8 +1510,6 @@ function annotateStaggeredCollections(anims: Omit<GsapAnimation, "id">[]): void 
 
 // ── Timeline position resolution ─────────────────────────────────────────────
 
-const GSAP_DEFAULT_DURATION = 0.5;
-
 // fallow-ignore-next-line complexity
 function resolvePositionString(pos: string, cursor: number, prevStart: number): number | null {
   const trimmed = pos.trim();
@@ -1650,7 +1645,11 @@ function applyTimelineDefaults(
       if (defaults.duration !== undefined) anim.duration = defaults.duration;
       else if (defaults.durationUnresolved) anim.durationUnresolved = true;
     }
-    if (anim.ease === undefined && defaults.ease !== undefined && !anim.keyframes) {
+    if (
+      anim.ease === undefined &&
+      defaults.ease !== undefined &&
+      (!anim.keyframes || anim.keyframes.fromMotionPath)
+    ) {
       anim.ease = defaults.ease;
     }
   }
