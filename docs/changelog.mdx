@@ -9,6 +9,113 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.8.133"
+  description="Released - 2026-10-05"
+  tags={["Release", "Studio"]}
+>
+Moving a timeline row now restacks only the clip you moved, so no other clip ends up behind it.
+
+## Fixes
+
+- **Studio:** A row move restacks only the clip you moved, so nothing else goes behind ([ff8ad1ca2](https://github.com/heygen-com/hyperframes/commit/ff8ad1ca25ce0159b3ff00feb267a720ca8e45cd), [#5057](https://github.com/heygen-com/hyperframes/pull/5057)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.132...v0.8.133).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.132"
+  description="Released - 2026-10-05"
+  tags={["Release", "Studio"]}
+>
+An app that embeds Studio can now hold playback, so pressing play or Space does nothing while the hold is on.
+
+## Features
+
+- **Studio:** A host can hold playback so nothing starts while it is held ([6bb85af18](https://github.com/heygen-com/hyperframes/commit/6bb85af18beef662aa6616fc2c598ba3414ef5a0), [#5060](https://github.com/heygen-com/hyperframes/pull/5060)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.131...v0.8.132).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.131"
+  description="Released - 2026-10-05"
+  tags={["Release", "Studio"]}
+>
+An app that embeds Studio can now file its own writes under the same history key Studio uses, so one undo takes back both.
+
+## Fixes
+
+- **Studio:** A host can claim its writes under the key Studio's edit history uses ([72d4cc3ef](https://github.com/heygen-com/hyperframes/commit/72d4cc3ef4edd062ff97df499439f7ae8eb05e20), [#5064](https://github.com/heygen-com/hyperframes/pull/5064)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.130...v0.8.131).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.130"
+  description="Released - 2026-10-05"
+  tags={["Release", "Studio"]}
+>
+An app that embeds Studio can now show the Layers panel in its own layout, and reordering layers there saves and undoes.
+
+## Features
+
+- **Studio:** A host app can mount the Layers panel outside Studio ([618fd7684](https://github.com/heygen-com/hyperframes/commit/618fd7684b3c53a0e6a589e96b78602c1b46d44e), [#5049](https://github.com/heygen-com/hyperframes/pull/5049)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.129...v0.8.130).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.129"
+  description="Released - 2026-10-05"
+  tags={["Release", "Deps", "Studio"]}
+>
+Undo now takes back the first edit of a film whose media is still copying. Dropping a clip on the timeline moves its animations in place instead of re-running the film script.
+
+## Fixes
+
+- **Deps:** Update aws-sdk-js-v3 monorepo to ^3.1146.0 ([ec09cb40b](https://github.com/heygen-com/hyperframes/commit/ec09cb40bdbe2061e73f2160d81e1849fafeadab), [#5055](https://github.com/heygen-com/hyperframes/pull/5055)).
+- **Studio:** Undo takes back the first edit of a film whose media is still being copied ([c6478e404](https://github.com/heygen-com/hyperframes/commit/c6478e404c668c848717555fe134562b11804a9c), [#5043](https://github.com/heygen-com/hyperframes/pull/5043)).
+
+## Performance
+
+- **Studio:** Move the live tweens in place after a timeline drop ([8661e8c96](https://github.com/heygen-com/hyperframes/commit/8661e8c9656586826558d802d66bfa6d096d9a8e), [#5042](https://github.com/heygen-com/hyperframes/pull/5042)).
+
+## Internal
+
+- **Deps:** Update terraform google to \>= 5.45.2 ([aa7f22805](https://github.com/heygen-com/hyperframes/commit/aa7f2280599f74ec123a64ba1497d26cebd3a5c5), [#5052](https://github.com/heygen-com/hyperframes/pull/5052)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.128...v0.8.129).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.128"
+  description="Released - 2026-10-05"
+  tags={["Release", "Parsers", "README", "Core"]}
+>
+Splitting, converting or editing a tween no longer deletes keyframes Studio cannot read. Dragging or resizing many selected clips now saves in one write per file.
+
+## Features
+
+- **Core:** The renderer's font pipeline is importable from @hyperframes/core/fonts/embed ([b3d2b82fe](https://github.com/heygen-com/hyperframes/commit/b3d2b82fe95542af84a856e3d6f4ac7b333b044b), [#5041](https://github.com/heygen-com/hyperframes/pull/5041)).
+
+## Fixes
+
+- **Parsers:** Splitting a clip keeps keyframes the parser cannot read ([8c7672f10](https://github.com/heygen-com/hyperframes/commit/8c7672f105a90a684cee44caf4ebb5340730ae2f), [#5044](https://github.com/heygen-com/hyperframes/pull/5044)).
+- **Studio:** Place GSAP step lists and duration-less tweens where GSAP plays them ([db12b3e02](https://github.com/heygen-com/hyperframes/commit/db12b3e022ef343d1d2318e9722f7668a1efc2c7), [#5024](https://github.com/heygen-com/hyperframes/pull/5024)).
+- **Studio:** Undo no longer snaps back a box you started dragging again ([2bee99f03](https://github.com/heygen-com/hyperframes/commit/2bee99f03074e13aba12cf60fbbe14d7fedb5b17), [#5039](https://github.com/heygen-com/hyperframes/pull/5039)).
+
+## Performance
+
+- **Studio:** Drag and resize any number of selected clips, saved in one write per file ([cd82ce044](https://github.com/heygen-com/hyperframes/commit/cd82ce044d9fc48c340100fe58585f398658717d), [#4937](https://github.com/heygen-com/hyperframes/pull/4937)).
+
+## Docs & Examples
+
+- **README:** Add Studio as the first link and show the HyperFrames app ([60575dc0d](https://github.com/heygen-com/hyperframes/commit/60575dc0d1f822151fbe620476acfbf21c654cab), [#4975](https://github.com/heygen-com/hyperframes/pull/4975)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.127...v0.8.128).
+</Update>
+
+<Update
   label="HyperFrames v0.8.127"
   description="Released - 2026-10-05"
   tags={["Release", "Studio", "Core"]}
