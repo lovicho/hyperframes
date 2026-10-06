@@ -23,6 +23,7 @@ import {
   resolveConversionProps,
   mergePercentageKeyframes,
   authorsKeyframes,
+  plainPercentKey,
 } from "./gsapSerialize";
 
 export type {
@@ -55,7 +56,8 @@ import {
   classifyTweenPropertyGroup,
   GSAP_DEFAULT_DURATION,
   isXYPositionWrite,
-  positionHoldForAnimation,
+  holdScope,
+  keyframeHoldForAnimation,
 } from "./gsapConstants";
 import type { PropertyGroupName } from "./gsapConstants";
 import { BUILTIN_VAR_KEYS, DROPPED_VAR_KEYS, EXTRAS_KEYS, isTweenConfigKey } from "./gsapConstants";
@@ -1073,11 +1075,6 @@ function tweenCallToAnimation(
     }
   }
 
-  // Apply tween-level easeEach to keyframes data.
-  if (keyframesData && typeof vars.easeEach === "string") {
-    keyframesData.easeEach = vars.easeEach as string;
-  }
-
   // When motionPath is present, reconstruct x/y as keyframe waypoints.
   if (motionPathResult) {
     const { waypoints } = motionPathResult;
@@ -1862,11 +1859,19 @@ export function isStudioHoldSet(anim: GsapAnimation): boolean {
  * so this pass owns it: every call wipes the prior holds and recomputes from the
  * current keyframes, keeping them in sync as keyframes are added/moved/deleted.
  *
- * Idempotent. Only position props (x/y/xPercent/yPercent) are held — opacity/scale
- * keep their authored pre-tween behavior. A tween already starting at 0 needs no
- * hold (no gap before it).
+ * Idempotent. Only position and size props are held — opacity/scale keep their
+ * authored pre-tween behavior. A tween already starting at 0 needs no hold, unless
+ * it is a lone keyframe, which GSAP never renders by itself.
  */
-export function syncPositionHoldsBeforeKeyframes(script: string): string {
+function animationsOf(script: string): GsapAnimation[] | null {
+  try {
+    return parseGsapScript(script).animations;
+  } catch {
+    return null;
+  }
+}
+
+export function syncPositionHoldsBeforeKeyframes(script: string, previous?: string): string {
   let parsed: ParsedGsap;
   try {
     parsed = parseGsapScript(script);
@@ -1878,15 +1883,19 @@ export function syncPositionHoldsBeforeKeyframes(script: string): string {
   const staleHoldIds = parsed.animations.filter(isStudioHoldSet).map((a) => a.id);
   for (const id of staleHoldIds) result = removeAnimationFromScript(result, id);
 
-  // 2. Re-add a hold for each position-keyframed tween that starts after t=0.
+  // 2. Re-add a hold for each keyframed tween keyframeHoldForAnimation pins.
   let reparsed: ParsedGsap;
   try {
     reparsed = parseGsapScript(result);
   } catch {
     return result;
   }
+  const scope = holdScope(
+    parsed.animations,
+    previous === undefined ? null : animationsOf(previous),
+  );
   for (const anim of reparsed.animations) {
-    const posProps = positionHoldForAnimation(anim, reparsed.animations);
+    const posProps = keyframeHoldForAnimation(anim, reparsed.animations, scope);
     if (!posProps) continue;
     result = insertInheritedStateSet(result, anim.targetSelector, 0, {
       ...posProps,
@@ -2076,7 +2085,7 @@ function buildKeyframeObjectCode(
     const props = keyframePropsToCode(kf);
     if (kf.ease) props.push(`ease: ${JSON.stringify(kf.ease)}`);
     if (kf.auto) props.push(`_auto: 1`);
-    return `${JSON.stringify(`${kf.percentage}%`)}: { ${props.join(", ")} }`;
+    return `${JSON.stringify(plainPercentKey(kf.percentage))}: { ${props.join(", ")} }`;
   });
   if (options?.easeEach) entries.push(`easeEach: ${JSON.stringify(options.easeEach)}`);
   return `{ ${entries.join(", ")} }`;
@@ -2238,7 +2247,7 @@ function convertArrayKeyframesToObjectNode(varsArg: AstNode, scope: ScopeBinding
     el.properties = (el.properties ?? []).filter(
       (property: AstNode) => !isObjectProperty(property) || propKeyName(property) !== "duration",
     );
-    return `${JSON.stringify(`${timing.percentages[i]}%`)}: ${recast.print(el).code}`;
+    return `${JSON.stringify(plainPercentKey(timing.percentages[i]!))}: ${recast.print(el).code}`;
   });
   prop.value = parseExpr(`{ ${entries.join(", ")}, easeEach: "none" }`);
   return prop.value;
@@ -2277,7 +2286,7 @@ function locateKeyframeCtx(script: string, animationId: string, percentage: numb
   if (!loc) return null;
   const kfNode = findKeyframesObjectNode(loc.target.call.varsArg);
   if (!kfNode) return null;
-  return { loc, kfNode, pctKey: `${percentage}%` };
+  return { loc, kfNode, pctKey: plainPercentKey(percentage) };
 }
 
 /**
@@ -2310,7 +2319,7 @@ export function addKeyframeToScript(
     kfNode = findKeyframesObjectNode(loc.target.call.varsArg);
     if (!kfNode) return script;
   }
-  const pctKey = `${percentage}%`;
+  const pctKey = plainPercentKey(percentage);
 
   const newValueNode = buildKeyframeValueNode(properties, ease);
 
@@ -2512,11 +2521,16 @@ export function moveKeyframeInScript(
   entries.push({ pct: toPercentage, value: movedValue });
   entries.sort((a, b) => a.pct - b.pct);
 
-  kfNode.properties = entries.map((e) => {
-    const p = parseExpr(`{ ${JSON.stringify(`${e.pct}%`)}: {} }`).properties[0];
-    p.value = e.value;
-    return p;
-  });
+  const pctProps = new Set(filterPercentageProps(kfNode));
+  const kept = (kfNode.properties ?? []).filter((p: AstNode) => !pctProps.has(p));
+  kfNode.properties = [
+    ...entries.map((e) => {
+      const p = parseExpr(`{ ${JSON.stringify(plainPercentKey(e.pct))}: {} }`).properties[0];
+      p.value = e.value;
+      return p;
+    }),
+    ...kept,
+  ];
   return recast.print(loc.parsed.ast).code;
 }
 
@@ -2553,7 +2567,7 @@ export function resizeKeyframedTweenInScript(
     seen.add(match.prop);
     // Replace only the key node; the value node (incl. _auto + per-keyframe ease)
     // stays verbatim. easeEach is a sibling non-percentage prop, left untouched.
-    match.prop.key = parseExpr(`{ ${JSON.stringify(`${to}%`)}: 0 }`).properties[0].key;
+    match.prop.key = parseExpr(`{ ${JSON.stringify(plainPercentKey(to))}: 0 }`).properties[0].key;
   }
 
   applyUpdatesToCall(loc.target.call, {
@@ -3357,7 +3371,8 @@ export function splitIntoPropertyGroups(
         typeof anim.position === "number" ? anim.position : 0,
         anim.duration ?? 0.5,
         groupKeyframes,
-        anim.keyframes.easeEach ?? anim.ease,
+        anim.keyframes.ease ?? anim.ease,
+        anim.keyframes.easeEach,
       );
       result = addResult.script;
     } else {

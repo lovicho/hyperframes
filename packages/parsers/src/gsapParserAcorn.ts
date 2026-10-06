@@ -32,6 +32,7 @@ import { getObjectArrayKeyframeTiming } from "./gsapObjectArrayTiming.js";
 // Browser-safe re-exports so studio code can build arc config without importing
 // the recast parser (this acorn module is the browser-safe gsap subpath).
 export { buildArcPath, editabilityForProvenance } from "./gsapSerialize.js";
+export { scriptShape } from "./scriptShape.js";
 export type {
   ArcPathConfig,
   ArcPathSegment,
@@ -1323,10 +1324,6 @@ function tweenCallToAnimation(
     if (typeof val === "number" || typeof val === "string") {
       properties[key] = val;
     }
-  }
-
-  if (keyframesData && typeof vars.easeEach === "string") {
-    keyframesData.easeEach = vars.easeEach as string;
   }
 
   if (motionPathResult) {

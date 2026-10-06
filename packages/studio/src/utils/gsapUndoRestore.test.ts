@@ -19,8 +19,10 @@ import {
   diffSoftReloadableRestore,
   showRestoreInPlace,
 } from "./gsapUndoRestore";
+import { recordLiveSet } from "./softReloadTargets";
 import { applyPatch } from "./sourcePatcher";
 import { beginStudioManualEditGesture } from "../components/editor/manualEdits";
+import { studioManualEditSavesIn } from "../components/editor/manualEditsDom";
 import { writePlainMove, writeTranslatePx } from "../components/editor/plainTranslate";
 
 // ── Bug 2: undo/redo restore soft-apply ──────────────────────────────────────
@@ -214,10 +216,16 @@ describe("applyUndoRestoreToPreview", () => {
   describe("an undo that re-runs a changed script matches a fresh load of the restored file", () => {
     const script = (extra: string) => `window.__timelines["root"]=gsap.timeline();${extra}`;
     const root = (body: string) => `<div data-composition-id="root">${body}</div>`;
-    const undoScriptEdit = (live: string, authored: string, edit: string) => {
+    const undoScriptEdit = (
+      live: string,
+      authored: string,
+      edit: string,
+      patchedLive?: (doc: Document) => void,
+    ) => {
       const { iframe, contentWindow, doc } = buildLiveIframe(
-        `${root(live)}<script>${script(edit)}</script>`,
+        `${root(live)}<script>${script(patchedLive ? "" : edit)}</script>`,
       );
+      patchedLive?.(doc);
       const clearProps = (targets: HTMLElement[]) =>
         targets.forEach((t) => t.removeAttribute("style"));
       Object.assign(contentWindow.gsap, { set: clearProps });
@@ -240,6 +248,18 @@ describe("applyUndoRestoreToPreview", () => {
       );
       expect(doc.getElementById("a")!.hasAttribute("data-hf-studio-box-size")).toBe(false);
       expect(doc.getElementById("a")!.getAttribute("style")).toBe("width: 300px");
+    });
+
+    it("drops the width a W edit set live, though the preview never ran its gsap.set", () => {
+      // The Design panel applies W to the live element and writes the set only to the file.
+      const doc = undoScriptEdit(
+        `<div id="a" style="left: 10px; width: 300px">t</div>`,
+        `<div id="a" style="left: 10px">t</div>`,
+        `gsap.set("#a",{width:300});`,
+        (live) => recordLiveSet(live.getElementById("a")!, { width: 300 }),
+      );
+      const { style } = doc.getElementById("a")!;
+      expect([style.width, style.left]).toEqual(["", "10px"]);
     });
 
     it("keeps the authored inline rotation of an element GSAP moved", () => {
@@ -279,6 +299,16 @@ describe("applyUndoRestoreToPreview", () => {
     expect(reloadPreview).toHaveBeenCalledTimes(1);
     // Target a resolved first, but the preflight found missing b before syncing either.
     expect(doc.getElementById("a")!.getAttribute("style")).toBe("z-index: 8");
+  });
+
+  it("counts a script-only restore applied in place, so a reload requested before it loads again", () => {
+    const script = (x: number) => `window.__timelines["root"]=gsap.timeline().to("#a",{x:${x}});`;
+    const page = (x: number) => `<div id="a">t</div><script>${script(x)}</script>`;
+    const { iframe, doc } = buildLiveIframe(page(2));
+    const before = studioManualEditSavesIn(doc);
+    const files = { [ROOT]: { previous: wrap(page(2)), restored: wrap(page(1)) } };
+    applyUndoRestoreToPreview(iframe, ROOT, files, 3, vi.fn());
+    expect(studioManualEditSavesIn(doc)).toBeGreaterThan(before);
   });
 
   it("does NOT re-run an UNCHANGED GSAP script for an attribute-only restore", () => {
@@ -561,6 +591,17 @@ describe("an undo that lands while the layer is being dragged", () => {
 
     expect(el.style.getPropertyValue("translate")).toBe("70px 110px");
     expect(el.style.getPropertyValue("width")).toBe("100px");
+  });
+
+  it("counts an undo shown or applied in place, so a reload requested before it loads again", () => {
+    const { iframe, doc } = buildLiveIframe(undone);
+    const before = studioManualEditSavesIn(doc);
+
+    showRestoreInPlace(iframe, ROOT, files, 3);
+    expect(studioManualEditSavesIn(doc)).toBeGreaterThan(before);
+    const shown = studioManualEditSavesIn(doc);
+    applyUndoRestoreToPreview(iframe, ROOT, files, 3, vi.fn());
+    expect(studioManualEditSavesIn(doc)).toBeGreaterThan(shown);
   });
 
   it("keeps a drag that started after the undo was shown when the undo is put back", () => {
