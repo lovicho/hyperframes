@@ -219,6 +219,21 @@ describe("transcribe command", () => {
       return { engine: out.engine, model: out.model, word: words[0]?.text, start: words[0]?.start };
     }
 
+    it("installs whisper's stop handling only when whisper starts, after any install or download", async () => {
+      const run = transcribeMock.getMockImplementation()!;
+      const handlers: number[] = [];
+      let signal: unknown;
+      transcribeMock.mockImplementationOnce(async (input, outputDir, options) => {
+        handlers.push(process.listenerCount("SIGTERM"));
+        signal = options.startCancellation();
+        handlers.push(process.listenerCount("SIGTERM"));
+        return run(input, outputDir, options);
+      });
+      await transcribeWith("whisper", { sherpa: false, mlx: false });
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(handlers[1]).toBeGreaterThan(handlers[0]!);
+    });
+
     it("auto and parakeet prefer sherpa-onnx, then parakeet-mlx, then whisper", async () => {
       const sherpa = {
         engine: "parakeet",
@@ -241,6 +256,34 @@ describe("transcribe command", () => {
         word: "whisper",
       });
     });
+
+    it.skipIf(process.platform === "win32")(
+      "lets parakeet-mlx detect the language itself, since it has no --language option",
+      async () => {
+        const parakeet =
+          await vi.importActual<typeof import("../whisper/parakeet.js")>("../whisper/parakeet.js");
+        // Rejects --language the way parakeet-mlx does, and writes one token otherwise.
+        const runner = join(runtimeDir, "parakeet-mlx");
+        writeFileSync(
+          runner,
+          `#!/bin/sh
+[ "$1" = --help ] && exit 0
+in="$1"
+for a in "$@"; do [ "$a" = --language ] && { echo "Error: No such option: --language" >&2; exit 2; }; done
+while [ "$1" != --output-dir ]; do shift; done
+echo '{"sentences":[{"tokens":[{"text":" hola","start":0,"end":1}]}]}' > "$2/$(basename "$in" .wav).json"
+`,
+        );
+        chmodSync(runner, 0o755);
+        vi.stubEnv("HYPERFRAMES_PARAKEET", runner);
+        mlxMock.mockImplementation(parakeet.transcribeWithParakeet);
+
+        expect(await transcribeWith("auto", { sherpa: false, mlx: true }, "es")).toMatchObject({
+          engine: "parakeet",
+          word: "hola",
+        });
+      },
+    );
 
     it("auto uses Parakeet only for a language it transcribes", async () => {
       const both = { sherpa: true, mlx: true };
@@ -329,6 +372,27 @@ describe("transcribe command", () => {
       }
       return { exitCode: exitCode || consumeCommandResult().exitCode, out: lastJson() };
     }
+
+    it("auto names the Parakeet install when whisper is missing and Parakeet is not installed", async () => {
+      transcribeMock.mockRejectedValue(new WhisperUnavailableError("whisper-cpp not found"));
+      const { exitCode, out } = await transcribeFails("auto", { optional: true });
+      expect(exitCode).toBe(0);
+      expect(out).toEqual({
+        ok: false,
+        skipped: true,
+        reason: "whisper_unavailable",
+        install: "hyperframes models install parakeet",
+      });
+    });
+
+    it.each([
+      ["a language Parakeet does not transcribe", "auto", "ja"],
+      ["an explicit --engine whisper", "whisper", undefined],
+    ])("offers no Parakeet install for %s", async (_case, engine, language) => {
+      transcribeMock.mockRejectedValue(new WhisperUnavailableError("whisper-cpp not found"));
+      const { out } = await transcribeFails(engine, { optional: true, language });
+      expect(out).toEqual({ ok: false, skipped: true, reason: "whisper_unavailable" });
+    });
 
     it.each(["whisper", "auto"])(
       "--no-runtime-install reaches %s including the fallback",

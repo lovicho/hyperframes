@@ -72,7 +72,8 @@ export default defineCommand({
     },
     language: {
       type: "string",
-      description: "Language code (e.g. en, es, ja). Filters out non-target language speech.",
+      description:
+        "Language code (e.g. en, es, ja). Whisper transcribes as this language; Parakeet, used when it covers it, detects the language itself.",
       alias: "l",
     },
     json: {
@@ -281,6 +282,8 @@ async function exportTranscript(
 
 type Runner = "sherpa" | "parakeet-mlx" | "whisper";
 
+const PARAKEET_INSTALL_COMMAND = "hyperframes models install parakeet";
+
 /** auto and parakeet prefer sherpa-onnx, then parakeet-mlx, then whisper, in Parakeet's languages. */
 function pickRunner(engine: string, sherpaUsable: () => boolean, language?: string): Runner {
   if (engine === "whisper" || !parakeetSpeaks(language)) return "whisper";
@@ -331,7 +334,7 @@ async function transcribeAudio(
       !parakeetSpeaks(opts.language)
         ? `Parakeet does not transcribe --language ${opts.language}; it covers ${PARAKEET_LANGUAGES.split(" ").join(", ")}. Use --engine whisper.`
         : (unsupported ??
-            "Parakeet is not installed. Install it with: hyperframes models install parakeet (or use --engine whisper)"),
+            `Parakeet is not installed. Install it with: ${PARAKEET_INSTALL_COMMAND} (or use --engine whisper)`),
       !!opts.json,
     );
   }
@@ -350,7 +353,7 @@ async function transcribeAudio(
   const onEvent = opts.json ? createProgressWriter(process.stderr) : undefined;
   let wavPath = inputPath;
   // Before audio prep: under --json no spinner listens for SIGINT, so Ctrl-C would kill Node.
-  const cancellation = runner === "sherpa" ? createRenderCancellationScope() : null;
+  let cancellation = runner === "sherpa" ? createRenderCancellationScope() : null;
   const run = (r: Runner) => {
     switch (r) {
       case "sherpa":
@@ -361,7 +364,6 @@ async function transcribeAudio(
         });
       case "parakeet-mlx":
         return transcribeWithParakeet(wavPath, dir, {
-          language: opts.language,
           onProgress,
           onEvent,
         });
@@ -373,6 +375,7 @@ async function transcribeAudio(
           onEvent,
           timeoutMs: opts.timeoutMs,
           installRuntime: opts.installRuntime,
+          startCancellation: () => (cancellation ??= createRenderCancellationScope()).signal,
         });
       default: {
         const unreachable: never = r;
@@ -390,7 +393,7 @@ async function transcribeAudio(
     } catch (err) {
       if (runner !== "sherpa" || err instanceof DecodeCancelled) throw err;
       const reason = normalizeErrorMessage(err).replace(/\.+$/, "");
-      const parakeetError = `Parakeet failed: ${reason}. To repair it, run: hyperframes models install parakeet`;
+      const parakeetError = `Parakeet failed: ${reason}. To repair it, run: ${PARAKEET_INSTALL_COMMAND}`;
       if (!parakeetFallsBack(engine)) throw new Error(parakeetError);
       runner = pickRunner(engine, () => false, opts.language);
       spin?.clear();
@@ -399,7 +402,7 @@ async function transcribeAudio(
       try {
         result = await run(runner);
       } catch (fallbackErr) {
-        // Whisper runs synchronously, so Ctrl-C shows as its child's signal before any listener runs.
+        // Ctrl-C reaches whisper too, so it can stop on its own signal before the scope aborts it.
         if (stoppedByCancelSignal(fallbackErr as { signal?: string })) {
           throw new DecodeCancelled("Transcription cancelled");
         }
@@ -477,10 +480,17 @@ async function transcribeAudio(
     // not inflate the cli_error budget, and let `--optional` callers continue.
     if (isWhisperUnavailable(err)) {
       trackTranscribeUnavailable({ optional: opts.optional === true });
+      const install =
+        engine === "auto" && parakeetSpeaks(opts.language) && !unsupported
+          ? PARAKEET_INSTALL_COMMAND
+          : undefined;
       if (opts.json) {
-        console.log(JSON.stringify({ ok: false, skipped: true, reason: "whisper_unavailable" }));
+        console.log(
+          JSON.stringify({ ok: false, skipped: true, reason: "whisper_unavailable", install }),
+        );
       } else {
-        spin?.stop(c.warn(`Captions skipped — ${message}`));
+        const orParakeet = install ? `\nOr transcribe with Parakeet after: ${install}` : "";
+        spin?.stop(c.warn(`Captions skipped — ${message}${orParakeet}`));
       }
       // Optional callers (pipelines) treat a missing prerequisite as a clean
       // skip; explicit runs still surface non-zero. Set the status and return
