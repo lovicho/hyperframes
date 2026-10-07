@@ -1192,8 +1192,8 @@ class HyperframesPlayer extends HTMLElement {
    * iframe on every frame. Used for the runtime bridge path so that animation
    * advances even when the composition iframe's own rAF is throttled by
    * Chromium (e.g. deeply nested cross-origin iframes in Electron / Claude desktop).
-   * The runtime's own rAF loop still runs — ticking GSAP twice per frame is
-   * harmless because seekTimelineAndAdapters is idempotent.
+   * The runtime skips a tick seek only when that timeline time is already
+   * rendered. Host ticks still advance a throttled iframe.
    */
   private _startParentTickClock(): void {
     this._stopParentTickClock();
@@ -1216,7 +1216,7 @@ class HyperframesPlayer extends HTMLElement {
 
   private _onMessage(e: MessageEvent) {
     // The iframe window outlives its documents: a late composition message must not reach a video.
-    if (this._videoSource) return;
+    if (this._videoSource || this.probe.failed) return;
     this._applyThenEmit(() => this._handleRuntimeMessage(e));
   }
 
@@ -1413,6 +1413,7 @@ class HyperframesPlayer extends HTMLElement {
   /** Every host-driven navigation or teardown: the old document's handshake, asset wait and
    *  data deliveries end here. A queued play is the caller's, so only its owners clear it. */
   private _abandonComposition(reason: string): void {
+    this.probe.stop();
     this._ready = false;
     this._readyDocument = null;
     this._invalidateAssetsWait();
