@@ -88,6 +88,7 @@ export {
   buildChromeArgs,
   compositionRequiresWebGpu,
   assertWebGpuAdapterAvailable,
+  usesSoftwareWebGpu,
   WebGpuUnavailableError,
   ENABLE_BROWSER_POOL,
   BrowserLeasePool,
@@ -343,6 +344,7 @@ export {
 export {
   runFfmpeg,
   formatFfmpegError,
+  describeFfmpegFailure,
   isExternalFfmpegInterruption,
   type RunFfmpegOptions,
   type RunFfmpegResult,

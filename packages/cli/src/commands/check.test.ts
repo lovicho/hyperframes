@@ -51,6 +51,7 @@ import type {
   LayoutOverflow,
   LayoutRect,
 } from "../utils/layoutAudit.js";
+import type { SeekClock } from "../utils/checkTypes.js";
 import type { ProjectDir } from "../utils/project.js";
 
 const PROJECT: ProjectDir = {
@@ -166,6 +167,7 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     collectLayout: vi.fn(async (_time: number, _tolerance: number) => []),
     collectOverlap: vi.fn(async (_time: number) => []),
     collectLayoutGeometry: vi.fn(async () => `geometry-${geometryCallCount++}`),
+    collectSeekClock: vi.fn(async () => [{ id: 1, time: 0, done: false }]),
     collectRotationSample: vi.fn(async (_time: number) => []),
     collectOffPivotRotationSample: vi.fn(async (time: number) => ({ time, samples: [] })),
     collectGeometryCandidates: vi.fn(async () => []),
@@ -1577,9 +1579,70 @@ describe("check pipeline", () => {
             finding.code === "sweep_static" &&
             finding.severity === "error" &&
             finding.message.includes("did not advance") &&
-            finding.fixHint?.includes("data-no-timeline"),
+            finding.fixHint?.includes("window.__timelines"),
         ),
       ).toBe(true);
+    });
+
+    function stillCard(clocks: (sample: number) => SeekClock[]) {
+      let sample = 0;
+      return fakeDriver({
+        getDuration: vi.fn(async () => 4),
+        collectLayoutGeometry: vi.fn(async () => "frozen"),
+        collectSeekClock: vi.fn(async () => clocks(sample++)),
+      });
+    }
+
+    function sweepOf(report: CheckReport): [string, string][] {
+      return report.layout.findings
+        .filter((finding) => finding.code === "sweep_static")
+        .map((finding) => [finding.severity, finding.message]);
+    }
+
+    it.each([
+      [
+        "whose timeline follows the seek",
+        (sample: number) => [{ id: 1, time: sample, done: false }],
+      ],
+      ["with nothing that could move", () => []],
+      ["whose only animation already holds at its end", () => [{ id: 1, time: 4, done: true }]],
+      [
+        "whose timeline is seen, listed twice, at only one sample",
+        (sample: number) =>
+          sample === 2
+            ? [
+                { id: 1, time: 0, done: false },
+                { id: 1, time: 0, done: false },
+              ]
+            : [],
+      ],
+    ])("warns, without failing, on a still card %s", async (_case, clocks) => {
+      const { report } = await runScenario(stillCard(clocks));
+
+      expect(sweepOf(report)).toEqual([["warning", "Nothing on screen moved under seek."]]);
+      expect(report.ok).toBe(true);
+    });
+
+    it.each([
+      [
+        "one animation is stuck while another follows the seek",
+        (sample: number) => [
+          { id: 1, time: 0, done: false },
+          { id: 2, time: sample, done: false },
+        ],
+      ],
+      [
+        "a tween created mid-run is stuck",
+        (sample: number) => [
+          { id: 1, time: sample, done: false },
+          ...(sample >= 2 ? [{ id: 2, time: 0, done: false }] : []),
+        ],
+      ],
+    ])("fails when %s", async (_case, clocks) => {
+      const { report } = await runScenario(stillCard(clocks));
+
+      expect(sweepOf(report).map(([severity]) => severity)).toEqual(["error"]);
+      expect(report.ok).toBe(false);
     });
 
     it("warns, without failing, when only the audio advanced and nothing on screen moved", async () => {

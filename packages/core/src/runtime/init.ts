@@ -1,4 +1,5 @@
 // fallow-ignore-file code-duplication complexity
+import { setPreviewRasterScale } from "./previewRasterHints";
 import { refreshSvgSelectorAliases } from "../compiler/svgSelectorAliases";
 import { RUNTIME_FILLER } from "./protocol";
 import { preloadMedia, releaseMedia, lengthIsAuthored, stopMediaDownload } from "./preloadMedia";
@@ -6,7 +7,11 @@ import { installRuntimeControlBridge, postRuntimeMessage, setRuntimeProtocolFps 
 import { instantTolerance } from "../clipFacts";
 import { isInClipWindow } from "./clipWindow";
 import { revealTimedClipsAfterFirstPass, SKIPPED_CLIP, skipsHiddenImages } from "./timedClipHide";
-import { STUDIO_PREVIEW_LAZY_ATTR, STUDIO_PREVIEW_UPCOMING_ATTR } from "../studioPreviewMark";
+import {
+  PREVIEW_ONLY_ATTRS,
+  STUDIO_PREVIEW_LAZY_ATTR,
+  STUDIO_PREVIEW_UPCOMING_ATTR,
+} from "../studioPreviewMark";
 import { initRuntimeAnalytics, emitAnalyticsEvent } from "./analytics";
 import { injectCompositionCssVariables } from "./getVariables";
 import { createCssAdapter } from "./adapters/css";
@@ -280,13 +285,14 @@ const authoredShape = (el: Element): string =>
   ]);
 
 // What the runtime writes on a video or audio: style (reset on a kept one), preload, the opacity stamp, a moved
-// element's original translate and its own __hf- classes. A proxied src is compared as written; a bound one is not.
+// element's original translate, preview marks and its own __hf- classes. A proxied src is compared as written.
 const RUNTIME_MEDIA_ATTRS = new Set([
   "style",
   "preload",
   "src",
   COLOR_GRADING_AUTHORED_OPACITY_ATTR,
   EDIT_ORIGINAL_TRANSLATE_ATTR,
+  ...PREVIEW_ONLY_ATTRS,
 ]);
 const ownClasses = (value: string) =>
   value
@@ -4101,7 +4107,7 @@ export function initSandboxRuntimeModular(): void {
         );
         // eslint-disable-next-line no-console -- loud author-facing warning; this render would otherwise freeze at t=0
         console.warn(
-          `[hyperframes] Root timeline not bound — render will freeze at t=0. ` +
+          `[hyperframes] Root timeline not bound, so render will freeze at t=0. ` +
             (rootCompositionId
               ? `Root data-composition-id is "${rootCompositionId}" but window.__timelines has no such key. `
               : `Root composition element has no data-composition-id. `) +
@@ -5024,7 +5030,10 @@ export function initSandboxRuntimeModular(): void {
       if (state.transportClock) state.transportClock.setRate(state.playbackRate);
       applyWebAudioRate();
     },
-    onSetDisplayScale: setProxyDisplayScale,
+    onSetDisplayScale: (scale) => {
+      setProxyDisplayScale(scale);
+      setPreviewRasterScale(scale);
+    },
     onSetIdleHeartbeat: (slow) => {
       slowIdleHeartbeat = slow;
       wakeTransport();

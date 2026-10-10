@@ -46,6 +46,7 @@ import {
 import { fetchRemoteTemplate } from "../templates/remote.js";
 import { trackInitTemplate } from "../telemetry/events.js";
 import { DEFAULT_MODEL, hasFFmpeg } from "../whisper/manager.js";
+import { TRANSCRIPT_FILE } from "../whisper/transcriptFile.js";
 import { initialModelForLanguage } from "../whisper/transcribe.js";
 import { findFFmpeg, findFFprobe, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { VERSION } from "../version.js";
@@ -938,7 +939,7 @@ export default defineCommand({
         failCommand();
       }
       trackInitTemplate(templateId, { tailwind });
-      const transcriptFile = resolve(destDir, "transcript.json");
+      const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
       if (existsSync(transcriptFile)) {
         await patchTranscript(destDir, transcriptFile);
       }
@@ -1175,7 +1176,7 @@ export default defineCommand({
     trackInitTemplate(templateId, { tailwind });
 
     // 4b. Patch captions with transcript if available
-    const transcriptFile = resolve(destDir, "transcript.json");
+    const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
     if (existsSync(transcriptFile)) {
       await patchTranscript(destDir, transcriptFile);
     }

@@ -252,6 +252,16 @@ describe("compositionRequiresWebGpu", () => {
     expect(compositionRequiresWebGpu('<div data-composition-id="dom"></div>')).toBe(false);
   });
 
+  it("finds the root after an inlined script whose code holds '<' and the marker name", () => {
+    const runtime = `<script>if(n<32)q="[data-composition-id]";if(a>b)go()</script>`;
+    expect(
+      compositionRequiresWebGpu(`${runtime}<div data-composition-id="main" data-requires-webgpu>`),
+    ).toBe(true);
+    expect(
+      compositionRequiresWebGpu(`<div title="data-composition-id" data-requires-webgpu>`),
+    ).toBe(false);
+  });
+
   it("reads only the composition root tag and stays linear on repeated '<'", () => {
     expect(
       compositionRequiresWebGpu('<p data-requires-webgpu></p><div data-composition-id="a"></div>'),
@@ -434,6 +444,32 @@ describe("resolveBrowserGpuMode", () => {
     expect(warning).toContain("GPU probe could not run");
     expect(warning).toContain("hyperframes doctor");
     expect(warning).not.toContain("--gpus all");
+  });
+
+  it("falls back to 'software' within the probe budget when the probe page never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const kill = vi.fn();
+      const launch = vi.fn().mockResolvedValue({
+        newPage: vi.fn().mockResolvedValue({ evaluate: () => new Promise(() => {}) }),
+        close: () => new Promise(() => {}),
+        process: () => ({ kill }),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+      });
+      _setPuppeteerForTests({ launch } as unknown as PuppeteerNode);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const mode = resolveBrowserGpuMode("auto", { browserTimeout: 120_000 });
+      await vi.advanceTimersByTimeAsync(15_000 + 250);
+
+      await expect(mode).resolves.toBe("software");
+      expect(launch).toHaveBeenCalledWith(
+        expect.objectContaining({ timeout: 120_000, waitForInitialPage: false }),
+      );
+      expect(kill).toHaveBeenCalledWith("SIGKILL");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to 'software' when the probe browser cannot launch", async () => {

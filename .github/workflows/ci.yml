@@ -69,6 +69,7 @@ jobs:
       code: ${{ (github.event_name == 'workflow_dispatch' && inputs.catalog_publish) && 'true' || steps.filter.outputs.code }}
       docs_catalog: ${{ steps.filter.outputs.docs_catalog }}
       cli: ${{ steps.filter.outputs.cli }}
+      cli_bundle: ${{ steps.filter.outputs.cli_bundle }}
       skills: ${{ steps.filter.outputs.skills }}
       catalog_index: ${{ steps.filter.outputs.catalog_index }}
       codex_plugin: ${{ steps.filter.outputs.codex_plugin }}
@@ -94,6 +95,11 @@ jobs:
           git rev-parse --verify -q HEAD^2 > /dev/null || { echo "::error::HEAD is not the pull request merge commit"; exit 1; }
           sha="$(git rev-parse --verify HEAD^1)"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Reject large binaries outside LFS
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: sh scripts/check-large-files.sh --range "$BASE_SHA" HEAD
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
@@ -131,6 +137,12 @@ jobs:
               - "package.json"
               - "bun.lock"
               - ".github/workflows/ci.yml"
+            # Skills packages/cli/scripts/build-copy.mjs bundles into the CLI tarball (size budget).
+            cli_bundle:
+              - "skills/hyperframes/**"
+              - "skills/hyperframes-cli/**"
+              - "skills/gsap/**"
+              - "skills/media-use/**"
             skills:
               - "scripts/generate-captured-font-copies.mjs"
               - "packages/cli/src/media-use/**"
@@ -220,6 +232,12 @@ jobs:
         with:
           lfs: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # Docker Hub rate-limits anonymous pulls from shared runners; pull through Google's mirror.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Build BeginFrame contract image
         # A hung bun install (Dockerfile.test, run 35468046055) would
         # otherwise eat the whole job timeout instead of failing at this step.
@@ -237,14 +255,14 @@ jobs:
     name: Build
     needs: changes
     # A skipped required check passes, so a broken change detection must fail it instead.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.cli_bundle == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Require change detection
         if: needs.changes.result != 'success'
         run: |
-          echo "::error::Change detection did not succeed, so this required check cannot pass."
+          echo "::error::Detect changes did not succeed (it also rejects large binaries outside LFS); see its log. This required check cannot pass."
           exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -431,7 +449,7 @@ jobs:
       - name: Require change detection
         if: needs.changes.result != 'success'
         run: |
-          echo "::error::Change detection did not succeed, so this required check cannot pass."
+          echo "::error::Detect changes did not succeed (it also rejects large binaries outside LFS); see its log. This required check cannot pass."
           exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -537,7 +555,7 @@ jobs:
       - name: Require change detection
         if: needs.changes.result != 'success'
         run: |
-          echo "::error::Change detection did not succeed, so this required check cannot pass."
+          echo "::error::Detect changes did not succeed (it also rejects large binaries outside LFS); see its log. This required check cannot pass."
           exit 1
       - name: Require producer source tests
         if: needs.changes.outputs.code == 'true' && needs.producer-source-tests.result != 'success'
@@ -766,7 +784,7 @@ jobs:
       - name: Require change detection
         if: needs.changes.result != 'success'
         run: |
-          echo "::error::Change detection did not succeed, so this required check cannot pass."
+          echo "::error::Detect changes did not succeed (it also rejects large binaries outside LFS); see its log. This required check cannot pass."
           exit 1
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
