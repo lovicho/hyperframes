@@ -29,6 +29,7 @@ import {
   blitRgb48leAffine,
   parseTransformMatrix,
   convertTransfer,
+  isVideoHiddenBeforeStreamStart,
 } from "@hyperframes/engine";
 import type { ProducerLogger } from "../logger.js";
 import { type HdrImageTransferCache } from "./hdrImageTransferCache.js";
@@ -141,6 +142,8 @@ export interface HdrVideoFrameSource {
   scratch: Buffer;
   /** The raw file contains one playable source cycle and must wrap at EOF. */
   loop?: boolean;
+  mediaStart?: number;
+  videoStreamLeadSeconds?: number;
 }
 
 export function closeHdrVideoFrameSource(source: HdrVideoFrameSource, log?: ProducerLogger): void {
@@ -198,6 +201,8 @@ export function blitHdrVideoLayer(
     frameSource.loop,
   );
   if (effectiveIndex === null) return;
+  const mediaTime = (frameSource.mediaStart ?? 0) + effectiveIndex / fps;
+  if (isVideoHiddenBeforeStreamStart(frameSource.videoStreamLeadSeconds, mediaTime)) return;
   const frameOffset = effectiveIndex * frameSource.frameSize;
 
   try {

@@ -176,14 +176,7 @@ export function writeWav(
   writeFileSync(path, buf);
 }
 
-/**
- * Split an interleaved buffer into one array per channel.
- *
- * The graph used to fold everything to mono, which collapsed a stereo bed's
- * width for the render only — and cost ~3 dB through the very mono-to-stereo
- * rematrix that `prepareAudioTrack`'s pan filter exists to avoid. Preview kept
- * the track stereo, so the two diverged the moment any effect was enabled.
- */
+/** Split an interleaved buffer into one array per channel, keeping stereo width as preview does. */
 function deinterleave(samples: Float32Array, channels: number): Float32Array[] {
   if (channels <= 1) return [samples];
   const frames = Math.floor(samples.length / channels);

@@ -184,6 +184,8 @@ export interface VideoMetadata {
    * timestamps are absolute, so callers crossing those APIs must normalize by
    * this value. Absent only in legacy/manually-constructed metadata. */
   videoStreamStartSeconds?: number;
+  /** Seconds after the file's media time 0 (its earliest audio/video stream start) at which video begins. */
+  videoStreamLeadSeconds?: number;
   width: number;
   height: number;
   fps: number;
@@ -214,6 +216,8 @@ export interface AudioMetadata {
   channels: number;
   audioCodec: string;
   bitrate?: number;
+  /** Seconds after the file's media time 0 at which its last audio or video stream starts. */
+  latestStreamLeadSeconds?: number;
 }
 
 interface FFProbeStream {
@@ -820,6 +824,7 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
       durationSeconds: containerDuration,
       videoStreamDurationSeconds: effectiveStreamDuration,
       videoStreamStartSeconds: streamStart,
+      videoStreamLeadSeconds: streamLeadSeconds(output, videoStream),
       width: videoStream.width || stillImage()?.width || 0,
       height: videoStream.height || stillImage()?.height || 0,
       fps,
@@ -989,12 +994,35 @@ export async function extractAudioMetadata(
       channels: audioStream.channels || 2,
       audioCodec,
       bitrate: output.format.bit_rate ? parseInt(output.format.bit_rate) : undefined,
+      latestStreamLeadSeconds: latestStreamLeadSeconds(output),
     };
   })();
 
   if (options?.signal) return probePromise;
   writeMetadataCache(audioMetadataCache, filePath, identity, probePromise);
   return probePromise;
+}
+
+/** Chrome's media time 0 is the earliest of these; a stream starting later plays that much in. */
+function audioVideoStreamStarts(output: FFProbeOutput | null): number[] {
+  return (output?.streams ?? [])
+    .filter(
+      (s) =>
+        (s.codec_type === "audio" || s.codec_type === "video") && s.disposition?.attached_pic !== 1,
+    )
+    .map((s) => parseFloat(s.start_time ?? ""))
+    .filter(Number.isFinite);
+}
+
+function streamLeadSeconds(output: FFProbeOutput | null, stream: FFProbeStream): number {
+  const starts = audioVideoStreamStarts(output);
+  const start = parseFloat(stream.start_time ?? "");
+  return Number.isFinite(start) && starts.length > 0 ? Math.max(0, start - Math.min(...starts)) : 0;
+}
+
+function latestStreamLeadSeconds(output: FFProbeOutput): number {
+  const starts = audioVideoStreamStarts(output);
+  return starts.length > 0 ? Math.max(...starts) - Math.min(...starts) : 0;
 }
 
 function audioStartSeconds(stream: FFProbeStream, format: FFProbeFormat): number {

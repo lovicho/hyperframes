@@ -18,6 +18,7 @@ const INTEGRATION_TEST_FILES = new Set([
   "src/services/distributed/assemble.test.ts",
   "src/services/distributed/chunkBoundary.test.ts",
   "src/services/distributed/crossWorkerIdempotency.test.ts",
+  "src/services/distributed/plan.masterBus.test.ts",
   "src/services/distributed/plan.test.ts",
   "src/services/distributed/planSizeCap.test.ts",
   "src/services/distributed/renderChunk.test.ts",

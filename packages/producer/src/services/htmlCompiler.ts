@@ -79,6 +79,7 @@ import {
   analyzeKeyframeIntervals,
   assertMediaPayload,
   NotMediaPayloadError,
+  parseMasterFxChain,
   probeMediaProfile,
 } from "@hyperframes/engine";
 import {
@@ -110,6 +111,7 @@ export interface CompiledComposition {
   videos: VideoElement[];
   audios: AudioElement[];
   images: ImageElement[];
+  masterFxChain?: string;
   unresolvedCompositions: UnresolvedElement[];
   /** Assets that resolve outside projectDir. Keys are the path used in HTML, values are absolute filesystem paths. */
   externalAssets: Map<string, string>;
@@ -2146,6 +2148,7 @@ export async function compileForRender(
   // two bare `<video>`s, both auto-numbered `hf-video-0` — collapsed into one
   // entry and injected frames onto whichever element came first. See #3340.
   const { videos, audios, images } = collectRenderMedia(html);
+  const masterFxChain = parseMasterFxChain(html);
 
   // Advisory video checks (sparse keyframes, VFR). Fire-and-forget — these spawn
   // ffprobe subprocesses and should not block compilation since they only produce warnings.
@@ -2198,6 +2201,7 @@ export async function compileForRender(
     videos,
     audios,
     images,
+    ...(masterFxChain ? { masterFxChain } : {}),
     unresolvedCompositions,
     externalAssets,
     width,
@@ -2662,12 +2666,15 @@ export async function resolveCompositionDurations(
     for (const id of compIds) {
       // Try window.__timelines[id].duration() first (GSAP timeline)
       const tl = timelines[id];
-      if (tl && typeof tl.duration === "function") {
-        const dur = tl.duration();
-        if (dur > 0) {
-          resolved.push({ id, duration: dur, source: "__timelines" });
-          continue;
-        }
+      let dur = 0;
+      try {
+        dur = typeof tl?.duration === "function" ? Number(tl.duration()) : 0;
+      } catch {
+        dur = 0;
+      }
+      if (dur > 0) {
+        resolved.push({ id, duration: dur, source: "__timelines" });
+        continue;
       }
 
       // Fallback: check for authored duration on the element itself

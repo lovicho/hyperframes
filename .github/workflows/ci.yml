@@ -882,6 +882,8 @@ jobs:
             packages/studio/data/projects/inline-text-caret
           cp -R packages/studio/tests/e2e/fixtures/undo-socket-pool \
             packages/studio/data/projects/undo-socket-pool
+          cp -R packages/studio/tests/e2e/fixtures/aroll-backdrop \
+            packages/studio/data/projects/aroll-backdrop
       - name: Build the base the viewport gate compares against
         # The first parent of the checked-out commit, as in base-file.sh. Measured only when the head misses a budget.
         run: |
@@ -1000,7 +1002,7 @@ jobs:
           node packages/studio/tests/e2e/perf-ratchet.mjs check \
             packages/studio/tests/e2e/perf-ceilings.json studio-open /tmp/studio-open-counts.json \
             /tmp/base-perf-ceilings.json
-      - name: Check fade handles, render selects, thumbnail connection release and trim snapping
+      - name: Check fade handles, render selects, thumbnail connection release, trim snapping and a script-hidden backdrop
         if: success() || failure()
         run: |
           set -euo pipefail
@@ -1030,6 +1032,8 @@ jobs:
             packages/studio/data/projects/timeline-trim-snap
           STUDIO_URL="http://localhost:5316/#project/timeline-trim-snap" \
             node packages/studio/tests/e2e/timeline-snap-release.mjs || rc=1
+          STUDIO_URL="http://localhost:5316/#project/aroll-backdrop" \
+            node packages/studio/tests/e2e/aroll-backdrop.mjs || rc=1
           exit "$rc"
       - name: Measure the caret of a text edited in place
         if: success() || failure()
